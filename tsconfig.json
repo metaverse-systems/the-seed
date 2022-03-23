@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "esModuleInterop": true,
+    "target": "es6",
+    "sourceMap": true,
+    "outDir": "dist",
+    "declaration": true,
+    "lib": [
+      "es6",
+      "es2016",
+      "dom"
+    ],
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "importHelpers": true
+  },
+  "include": [
+    "./src/**/*"
+  ]
+}
