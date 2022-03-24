@@ -22,7 +22,7 @@ class Scopes {
     }
 
     fs.mkdirSync(dir);
-  }
+  };
 
   deleteScope = (scope: string) => {
     let name = "";
@@ -38,7 +38,7 @@ class Scopes {
     }
 
     fs.rmSync(dir, { recursive: true });
-  }
+  };
 
   getScopes = () => {
     const scopes: string[] = [];
@@ -51,7 +51,7 @@ class Scopes {
     });
 
     return scopes;
-  }
+  };
 }
 
 export default Scopes;
