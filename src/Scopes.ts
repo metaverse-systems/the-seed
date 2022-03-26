@@ -12,7 +12,7 @@ class Scopes {
     if(scope[0] != "@") name = "@";
     name += scope;
 
-    const dir = this.configDir + name;
+    const dir = this.configDir + "/" + name;
 
     console.log("Creating scope '" + name + "' in '" + this.configDir + "'.");
 
@@ -29,7 +29,7 @@ class Scopes {
     if(scope[0] != "@") name = "@";
     name += scope;
 
-    const dir = this.configDir + name;
+    const dir = this.configDir + "/" + name;
 
     console.log("Deleting scope '" + name + "' in '" + this.configDir + "'.");
     if(!fs.existsSync(dir)) {
@@ -44,7 +44,7 @@ class Scopes {
     const scopes: string[] = [];
     const dirs = fs.readdirSync(this.configDir);
     dirs.forEach((entry: string) => {
-      const stats = fs.statSync(this.configDir + entry);
+      const stats = fs.statSync(this.configDir + "/" + entry);
       if(!stats.isDirectory()) return;
 
       scopes.push(entry);

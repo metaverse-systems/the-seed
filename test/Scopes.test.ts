@@ -1,7 +1,7 @@
 import fs from "fs";
 import Scopes from "../src/Scopes";
 
-const configDir = "./tempDir/";
+const configDir = "./ScopesTestDir";
 const scopeName1 = "@scope-" + Math.random().toString(36).substr(2, 5);
 const scopeName2 = "scope-" + Math.random().toString(36).substr(2, 5);
 
