@@ -3,8 +3,10 @@
   "version": "1.0.0",
   "description": "The Seed",
   "scripts": {
-    "setup": "node dist/Setup.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "lint": "./node_modules/eslint/bin/eslint.js src/*",
+    "lint-fix": "./node_modules/eslint/bin/eslint.js src/* --fix",
+    "build": "tsc",
+    "test": "./node_modules/jest/bin/jest.js"
   },
   "repository": {
     "type": "git",
@@ -24,9 +26,12 @@
   "bin": {},
   "keywords": [],
   "devDependencies": {
+    "@types/jest": "^27.4.1",
     "@types/node": "^17.0.21",
     "@typescript-eslint/eslint-plugin": "^5.15.0",
     "@typescript-eslint/parser": "^5.15.0",
-    "eslint": "^8.11.0"
+    "eslint": "^8.11.0",
+    "jest": "^27.5.1",
+    "ts-jest": "^27.1.3"
   }
 }
