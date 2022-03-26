@@ -7,8 +7,14 @@ class Config {
   config: {
     [index: string]: any;
     prefix?: string;
+    name?: string;
+    email?: string;
+    url?: string;
   } = {
     prefix: "",
+    name: "",
+    email: "",
+    url: "",
   };
 
   constructor(configDir: string) {
@@ -37,15 +43,18 @@ class Config {
       },
       {
         name: "name",
-        message: "Your name?"
+        message: "Your name?",
+        default: this.config["name"],
       },
       {
         name: "email",
-        message: "Your e-mail address?"
+        message: "Your e-mail address?",
+        default: this.config["email"],
       },
       {
         name: "url",
-        message: "Your website address?"
+        message: "Your website address?",
+        default: this.config["url"],
       },
     ];
   };
