@@ -26,7 +26,7 @@
     "typescript": "^4.6.2"
   },
   "bin": {
-    "the-seed-config": "dist/scripts/config.js"
+    "the-seed": "dist/scripts/the-seed.js"
   },
   "keywords": [],
   "devDependencies": {

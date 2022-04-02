@@ -17,3 +17,9 @@ export interface ConfigType {
   prefix: string;
   scopes: ScopesType;
 }
+
+export interface ScriptConfigType {
+  binName: string;
+  args: string[];
+  configDir: string;
+}
