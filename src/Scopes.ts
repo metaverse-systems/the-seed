@@ -1,10 +1,11 @@
 import fs from "fs";
+import { ConfigType } from "./types";
 
 class Scopes {
-  configDir: string;
+  config: ConfigType;
 
-  constructor(configDir: string) {
-    this.configDir = configDir;
+  constructor(config: ConfigType) {
+    this.config = config;
   }
 
   createScope = (scope: string) => {
@@ -12,16 +13,19 @@ class Scopes {
     if(scope[0] != "@") name = "@";
     name += scope;
 
-    const dir = this.configDir + "/" + name;
-
-    console.log("Creating scope '" + name + "' in '" + this.configDir + "'.");
-
-    if(fs.existsSync(dir)) {
-      console.error(dir + " already exists.");
+    console.log("Creating scope '" + name);
+    if(Object.keys(this.config.scopes).includes(name)) {
+      console.error("Scope already exists");
       return;
     }
 
-    fs.mkdirSync(dir);
+    this.config.scopes[name] = {
+      author: {
+        name: "",
+        email: "",
+        url: ""
+      }
+    };
   };
 
   deleteScope = (scope: string) => {
@@ -29,26 +33,17 @@ class Scopes {
     if(scope[0] != "@") name = "@";
     name += scope;
 
-    const dir = this.configDir + "/" + name;
-
-    console.log("Deleting scope '" + name + "' in '" + this.configDir + "'.");
-    if(!fs.existsSync(dir)) {
-      console.error(dir + " does not exist.");
+    console.log("Deleting scope '" + name);
+    if(!Object.keys(this.config.scopes).includes(name)) {
+      console.error("Scope does not exist.");
       return;
     }
 
-    fs.rmSync(dir, { recursive: true });
+    delete this.config.scopes[name];
   };
 
   getScopes = () => {
-    const scopes: string[] = [];
-    const dirs = fs.readdirSync(this.configDir);
-    dirs.forEach((entry: string) => {
-      const stats = fs.statSync(this.configDir + "/" + entry);
-      if(!stats.isDirectory()) return;
-
-      scopes.push(entry);
-    });
+    const scopes: string[] = Object.keys(this.config.scopes);
 
     return scopes;
   };

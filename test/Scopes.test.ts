@@ -1,4 +1,5 @@
 import fs from "fs";
+import Config from "../src/Config";
 import Scopes from "../src/Scopes";
 
 const configDir = "./ScopesTestDir";
@@ -10,7 +11,9 @@ describe("test Scopes", () => {
     fs.mkdirSync(configDir);
   });
 
-  const scopes = new Scopes(configDir);
+  const config = new Config(configDir);
+  config.loadConfig();
+  const scopes = new Scopes(config.config);
 
   it("should return empty list", () => {
     expect(scopes.getScopes().length).toEqual(0);
