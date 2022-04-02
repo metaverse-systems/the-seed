@@ -23,7 +23,7 @@ describe("test Config", () => {
   });
 
   it("clear config and reload", () => {
-    config.config = {};
+    config.config = { prefix: "", scopes: {} };
     config.loadConfig();
     expect(config.config.prefix).toBe(prefix);
   });

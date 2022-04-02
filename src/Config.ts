@@ -1,20 +1,13 @@
 import fs from "fs";
 import os from "os";
+import { ConfigType } from "./types";
 
 class Config {
   configDir: string;
   configFile: string;
-  config: {
-    [index: string]: any;
-    prefix?: string;
-    name?: string;
-    email?: string;
-    url?: string;
-  } = {
-    prefix: "",
-    name: "",
-    email: "",
-    url: "",
+  config: ConfigType = {
+    prefix: os.homedir() + "/the-seed",
+    scopes: {}
   };
 
   constructor(configDir: string) {
@@ -39,23 +32,8 @@ class Config {
       {
         name: "prefix",
         message: "Installation prefix?",
-        default: this.config["prefix"] || os.homedir() + "/the-seed"
-      },
-      {
-        name: "name",
-        message: "Your name?",
-        default: this.config["name"],
-      },
-      {
-        name: "email",
-        message: "Your e-mail address?",
-        default: this.config["email"],
-      },
-      {
-        name: "url",
-        message: "Your website address?",
-        default: this.config["url"],
-      },
+        default: this.config["prefix"]
+      }
     ];
   };
 
