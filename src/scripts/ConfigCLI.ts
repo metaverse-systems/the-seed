@@ -1,9 +1,9 @@
 import fs from "fs";
 import inquirer from "inquirer";
 import Config from "../Config";
-import { ScriptConfigType } from "../types";
+import { ScriptArgsType } from "../types";
 
-const ConfigCLI = (scriptConfig: ScriptConfigType) => {
+const ConfigCLI = (scriptConfig: ScriptArgsType) => {
   const config = new Config(scriptConfig.configDir);
   const updateConfig = () => {
     inquirer.prompt(config.getQuestions())
@@ -27,8 +27,19 @@ const ConfigCLI = (scriptConfig: ScriptConfigType) => {
       updateConfig();
       break;
     case "scopes":
-      const subcommand = scriptConfig.args[3] || "list";
-      console.log("scopes " + subcommand);
+      const subcommand = scriptConfig.args[4] || "help";
+      console.log(scriptConfig.binName + " " + command + " " + subcommand);
+
+      switch(subcommand)
+      {
+        case "help":
+          console.log("Scopes commands:");
+          console.log("  " + scriptConfig.binName + " " + command + " list");
+          break;
+        case "list":
+          console.log(Object.keys(config.config.scopes));
+          break;
+      }
       break;
   }
 };

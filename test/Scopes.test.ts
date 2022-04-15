@@ -6,6 +6,18 @@ const configDir = "./ScopesTestDir";
 const scopeName1 = "@scope-" + Math.random().toString(36).substr(2, 5);
 const scopeName2 = "scope-" + Math.random().toString(36).substr(2, 5);
 
+const author1 = {
+  authorName: "Person1",
+  authorEmail: "person1@domain.com",
+  authorURL: "https://domain.com/person1"
+};
+
+const author2 = {
+  authorName: "Person1",
+  authorEmail: "person1@domain.com",
+  authorURL: "https://domain.com/person1"
+};
+
 describe("test Scopes", () => {
   beforeAll(() => {
     fs.mkdirSync(configDir);
@@ -13,15 +25,15 @@ describe("test Scopes", () => {
 
   const config = new Config(configDir);
   config.loadConfig();
-  const scopes = new Scopes(config.config);
+  const scopes = new Scopes(config);
 
   it("should return empty list", () => {
     expect(scopes.getScopes().length).toEqual(0);
   });
 
   it("should create scopes", () => {
-    scopes.createScope(scopeName1);
-    scopes.createScope(scopeName2);
+    scopes.createOrEditScope({...author1, scopeName: scopeName1});
+    scopes.createOrEditScope({...author2, scopeName: scopeName2});
 
     expect(scopes.getScopes().includes(scopeName1)).toEqual(true);
     expect(scopes.getScopes().includes("@" + scopeName2)).toEqual(true);

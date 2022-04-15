@@ -2,11 +2,12 @@
 import os from "os";
 import path from "path";
 import ConfigCLI from "./ConfigCLI";
-import { ScriptConfigType } from "../types";
+import ScopesCLI from  "./ScopesCLI";
+import { ScriptArgsType } from "../types";
 
 const homedir = os.homedir;
 
-const scriptConfig: ScriptConfigType = {
+const scriptConfig: ScriptArgsType = {
   binName: path.basename(process.argv[1]),
   args: process.argv,
   configDir: homedir + "/.config/the-seed"
@@ -18,8 +19,12 @@ switch(section)
 {
   case "help":
     console.log(scriptConfig.binName + " config");
+    console.log(scriptConfig.binName + " scopes");
     break;
   case "config":
     ConfigCLI(scriptConfig);
+    break;
+  case "scopes":
+    ScopesCLI(scriptConfig);
     break;
 }
