@@ -84,6 +84,10 @@ class Scopes {
     return scopes;
   };
 
+  getScope = (scope: string) => {
+    return this.config.config.scopes[scope];
+  }
+
   getQuestions = (defaults: any) => {
     return [
       {
