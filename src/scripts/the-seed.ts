@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import ConfigCLI from "./ConfigCLI";
 import ScopesCLI from  "./ScopesCLI";
+import TemplateCLI from "./TemplateCLI";
 import { ScriptArgsType } from "../types";
 
 const homedir = os.homedir;
@@ -20,11 +21,15 @@ switch(section)
   case "help":
     console.log(scriptConfig.binName + " config");
     console.log(scriptConfig.binName + " scopes");
+    console.log(scriptConfig.binName + " template");
     break;
   case "config":
     ConfigCLI(scriptConfig);
     break;
   case "scopes":
     ScopesCLI(scriptConfig);
+    break;
+  case "template":
+    TemplateCLI(scriptConfig);
     break;
 }
