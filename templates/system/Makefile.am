@@ -1,2 +1,3 @@
+pkgconfig_DATA = SKELETON.pc
 ACLOCAL_AMFLAGS = -I m4
 SUBDIRS = src

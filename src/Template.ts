@@ -41,7 +41,7 @@ class Template {
     const scopeDir = this.config.config.prefix + "/projects/" + scope;
 
     const underscoreRegex = new RegExp("-", "g");
-    const underscoreName = name.replace(underscoreRegex, "_") + "_";
+    const underscoreName = name.replace(underscoreRegex, "_");
     
     if(!fs.existsSync(scopeDir)) {
       fs.mkdirSync(scopeDir);
@@ -65,6 +65,8 @@ class Template {
     const files = [
       'AUTHORS',
       'configure.ac',
+      'SKELETON.pc.in',
+      'Makefile.am',
       'src/Makefile.am',
       'src/SKELETON.hpp',
       'src/SKELETON.cpp'
@@ -81,6 +83,7 @@ class Template {
 
     fs.renameSync(this.packageDir + "/src/SKELETON.hpp", this.packageDir + "/src/" + name + ".hpp");
     fs.renameSync(this.packageDir + "/src/SKELETON.cpp", this.packageDir + "/src/" + name + ".cpp");
+    fs.renameSync(this.packageDir + "/SKELETON.pc.in", this.packageDir + "/" + name + ".pc.in");
   }
 
   createPackage = (scope: string, name: string) => {

@@ -1,16 +1,16 @@
 #include <SKELETON.hpp>
 
-SKELETON::SKELETON() 
+SKELETON_::SKELETON_() 
 { 
     this->Type = "SKELETON";
 }
 
-SKELETON::SKELETON(nlohmann::json config)
+SKELETON_::SKELETON_(nlohmann::json config)
 {
     this->Type = "SKELETON";
 }
 
-nlohmann::json SKELETON::Export()
+nlohmann::json SKELETON_::Export()
 {
     nlohmann::json config;
     return config;
@@ -22,10 +22,10 @@ extern "C"
     {
         if(p == nullptr)
         {
-            return new SKELETON();
+            return new SKELETON_();
         }
 
         nlohmann::json *config = (nlohmann::json *)p;
-        return new SKELETON(*config);
+        return new SKELETON_(*config);
     }
 }

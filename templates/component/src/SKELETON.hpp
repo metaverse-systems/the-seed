@@ -2,10 +2,10 @@
 
 #include <libecs-cpp/ecs.hpp>
 
-class SKELETON : public ecs::Component
+class SKELETON_ : public ecs::Component
 {
   public:
-    SKELETON(); 
-    SKELETON(nlohmann::json);
+    SKELETON_(); 
+    SKELETON_(nlohmann::json);
     nlohmann::json Export();
 };

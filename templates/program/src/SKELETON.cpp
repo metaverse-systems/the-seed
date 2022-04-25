@@ -1,4 +1,5 @@
 #include "SKELETON.hpp"
+#include <iostream>
 
 void run(int argc, char *argv[])
 {
