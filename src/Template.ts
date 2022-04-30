@@ -65,12 +65,15 @@ class Template {
     const files = [
       'AUTHORS',
       'configure.ac',
-      'SKELETON.pc.in',
       'Makefile.am',
       'src/Makefile.am',
       'src/SKELETON.hpp',
       'src/SKELETON.cpp'
     ];
+
+    if(this.type != "program") {
+      files.push('SKELETON.pc.in');
+    }
 
     files.forEach((file) => {
       let temp = fs.readFileSync(this.packageDir + "/" + file).toString();
@@ -83,7 +86,7 @@ class Template {
 
     fs.renameSync(this.packageDir + "/src/SKELETON.hpp", this.packageDir + "/src/" + name + ".hpp");
     fs.renameSync(this.packageDir + "/src/SKELETON.cpp", this.packageDir + "/src/" + name + ".cpp");
-    fs.renameSync(this.packageDir + "/SKELETON.pc.in", this.packageDir + "/" + name + ".pc.in");
+    if(this.type != "program") fs.renameSync(this.packageDir + "/SKELETON.pc.in", this.packageDir + "/" + name + ".pc.in");
   }
 
   createPackage = (scope: string, name: string) => {
