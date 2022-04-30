@@ -29,6 +29,6 @@ describe("test Config", () => {
   });
 
   afterAll(() => {
-    fs.rmdirSync(configDir, { recursive: true });
+    fs.rmSync(configDir, { recursive: true });
   });
 });

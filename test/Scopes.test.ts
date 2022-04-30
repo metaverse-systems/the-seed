@@ -48,6 +48,6 @@ describe("test Scopes", () => {
   });
 
   afterAll(() => {
-    fs.rmdirSync(configDir, { recursive: true })
+    fs.rmSync(configDir, { recursive: true })
   });
 });
