@@ -4,6 +4,7 @@ import path from "path";
 import ConfigCLI from "./ConfigCLI";
 import ScopesCLI from  "./ScopesCLI";
 import TemplateCLI from "./TemplateCLI";
+import BuildCLI from "./BuildCLI";
 import { ScriptArgsType } from "../types";
 
 const homedir = os.homedir;
@@ -19,6 +20,7 @@ const section = scriptConfig.args[2] || "help";
 switch(section)
 {
   case "help":
+    console.log(scriptConfig.binName + " build");
     console.log(scriptConfig.binName + " config");
     console.log(scriptConfig.binName + " scopes");
     console.log(scriptConfig.binName + " template");
@@ -32,4 +34,6 @@ switch(section)
   case "template":
     TemplateCLI(scriptConfig);
     break;
+  case "build":
+    BuildCLI(scriptConfig);
 }
