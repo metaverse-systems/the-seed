@@ -16,7 +16,11 @@ nlohmann::json SKELETON_::Export()
     return config;
 }
 
-void SKELETON_::Init()
+void SKELETON_::Initialize()
+{
+}
+
+void SKELETON_::Shutdown()
 {
 }
 

@@ -9,5 +9,6 @@ class SKELETON_ : public ecs::System
     SKELETON_(nlohmann::json);
     nlohmann::json Export();
     void Update();
-    void Init();
+    void Initialize();
+    void Shutdown();
 };
