@@ -17,10 +17,7 @@ class Config {
   }
 
   loadConfig = () => {
-    try {
-      this.config = JSON.parse(fs.readFileSync(this.configDir + this.configFile).toString());
-    } catch (err) {
-    }
+    this.config = JSON.parse(fs.readFileSync(this.configDir + this.configFile).toString());
   };
 
   saveConfig = () => {

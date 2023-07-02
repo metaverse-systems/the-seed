@@ -4,7 +4,7 @@ const { execSync } = require('child_process');
 const targets: {
   [key:string]: string;
 } = {
-  "linux": "x86_64-linux-gnu",
+  "native": "x86_64-linux-gnu",
   "windows": "x86_64-w64-mingw32",
   "wasm": "wasm32-unknown-emscripten",
 };
@@ -32,6 +32,7 @@ class Build {
   }
 
   configure = () => {
+console.log("Target: " + this.target);
     const newTarget = targets[this.target];
     const distclean_command = "make distclean";
     try {
@@ -40,9 +41,11 @@ class Build {
     }
 
     const prefix = this.config.config.prefix;
+console.log("Prefix: " + prefix);
     const exec_prefix = prefix + "/" + newTarget;
+console.log("Exec prefix: " + exec_prefix);
 
-    const configure_command = "PKGCONFIG=" + exec_prefix + "/lib/pkgconfig/ " +
+    const configure_command = "PKG_CONFIG_PATH=" + exec_prefix + "/lib/pkgconfig/ " +
         (this.target === "wasm" ? "emconfigure " : "") + 
         "./configure --prefix=" + prefix + 
         " --exec-prefix=" + exec_prefix +

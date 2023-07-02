@@ -12,7 +12,7 @@ const homedir = os.homedir;
 const scriptConfig: ScriptArgsType = {
   binName: path.basename(process.argv[1]),
   args: process.argv,
-  configDir: homedir + "/.config/the-seed"
+  configDir: homedir + "/the-seed"
 };
 
 const section = scriptConfig.args[2] || "help";
