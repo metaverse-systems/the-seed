@@ -24,10 +24,11 @@ const BuildCLI = (scriptConfig: ScriptArgsType) => {
     case "wasm":
       build.reconfigure(command);
       build.compile();
+      build.install();
       break;
     default:
-console.log("default");
       build.compile();
+      build.install();
       break;
   }
 };

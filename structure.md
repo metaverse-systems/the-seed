@@ -3,7 +3,7 @@
 ## Configuration file
 
 ```
-    ~/.config/the-seed/config.json
+    ~/the-seed/config.json
 ```
 
 ## The Seed development environment

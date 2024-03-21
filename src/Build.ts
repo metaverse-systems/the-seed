@@ -32,7 +32,6 @@ class Build {
   }
 
   configure = () => {
-console.log("Target: " + this.target);
     const newTarget = targets[this.target];
     const distclean_command = "make distclean";
     try {
@@ -40,15 +39,11 @@ console.log("Target: " + this.target);
     } catch (e) {
     }
 
-    const prefix = this.config.config.prefix;
-console.log("Prefix: " + prefix);
-    const exec_prefix = prefix + "/" + newTarget;
-console.log("Exec prefix: " + exec_prefix);
+    const prefix = this.config.config.prefix + "/" + newTarget;
 
-    const configure_command = "PKG_CONFIG_PATH=" + exec_prefix + "/lib/pkgconfig/ " +
+    const configure_command = "PKG_CONFIG_PATH=" + prefix + "/lib/pkgconfig/ " +
         (this.target === "wasm" ? "emconfigure " : "") + 
         "./configure --prefix=" + prefix + 
-        " --exec-prefix=" + exec_prefix +
         (this.target === "windows" ? " --host=" + targets["windows"] : "");
 
     try {
@@ -70,10 +65,23 @@ console.log("Exec prefix: " + exec_prefix);
   compile = () => {
     const make_command = this.target === "wasm" ?
         "emmake make" :
-        "make";
+        "make -j";
 
     try {
       const result = execSync(make_command).toString();
+      console.log(result);
+    } catch (e) {
+      console.error(e);
+      throw e;
+    }
+  }
+
+  install = () => {
+    const install_command = "make install";
+
+   try {
+      const result = execSync(install_command).toString();
+      console.log(result);
     } catch (e) {
       console.error(e);
       throw e;
