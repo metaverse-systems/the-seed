@@ -1,0 +1,38 @@
+import Config from "../Config";
+import { ScriptArgsType } from "../types";
+import ResourcePak from "../ResourcePak";
+
+const ResourcePakCLI = (scriptConfig: ScriptArgsType) => {
+  const config = new Config(scriptConfig.configDir);
+  const command = scriptConfig.args[3];
+  const name = scriptConfig.args[4];
+  
+  let rp: ResourcePak;
+
+  switch(command) {
+    case "help":
+      console.log("Available resource-pak commands:");
+      console.log("  create <name>");
+      console.log("  add <resource-name> <filename>");
+      console.log("  build");
+      break;
+    case "create":
+      rp = new ResourcePak(config, process.cwd());
+      rp.create(name);
+      rp.savePackage();
+      console.log(rp.package);
+      break;
+    case "add":
+      rp = new ResourcePak(config, process.cwd());
+      rp.addResource(name, scriptConfig.args[5]);
+      rp.savePackage();
+      console.log(rp.package);
+      break;
+    case "build":
+      rp = new ResourcePak(config, process.cwd());
+      rp.build();
+      break;
+  }
+};
+
+export default ResourcePakCLI;

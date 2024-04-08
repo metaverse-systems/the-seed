@@ -8,6 +8,7 @@ const ConfigCLI_1 = tslib_1.__importDefault(require("./ConfigCLI"));
 const ScopesCLI_1 = tslib_1.__importDefault(require("./ScopesCLI"));
 const TemplateCLI_1 = tslib_1.__importDefault(require("./TemplateCLI"));
 const BuildCLI_1 = tslib_1.__importDefault(require("./BuildCLI"));
+const ResourcePakCLI_1 = tslib_1.__importDefault(require("./ResourcePakCLI"));
 const homedir = os_1.default.homedir;
 const scriptConfig = {
     binName: path_1.default.basename(process.argv[1]),
@@ -21,6 +22,7 @@ switch (section) {
         console.log(scriptConfig.binName + " config");
         console.log(scriptConfig.binName + " scopes");
         console.log(scriptConfig.binName + " template");
+        console.log(scriptConfig.binName + " resource-pak");
         break;
     case "config":
         (0, ConfigCLI_1.default)(scriptConfig);
@@ -33,5 +35,9 @@ switch (section) {
         break;
     case "build":
         (0, BuildCLI_1.default)(scriptConfig);
+        break;
+    case "resource-pak":
+        (0, ResourcePakCLI_1.default)(scriptConfig);
+        break;
 }
 //# sourceMappingURL=the-seed.js.map

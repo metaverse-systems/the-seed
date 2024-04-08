@@ -29,7 +29,7 @@ class Config {
                 this.config[k] = answers[k];
             });
         };
-        this.configDir = configDir;
+        this.configDir = configDir || os_1.default.homedir() + "/the-seed";
         this.configFile = "/config.json";
         this.loadConfig();
     }

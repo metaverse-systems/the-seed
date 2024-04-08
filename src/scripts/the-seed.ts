@@ -5,6 +5,7 @@ import ConfigCLI from "./ConfigCLI";
 import ScopesCLI from  "./ScopesCLI";
 import TemplateCLI from "./TemplateCLI";
 import BuildCLI from "./BuildCLI";
+import ResourcePakCLI from "./ResourcePakCLI";
 import { ScriptArgsType } from "../types";
 
 const homedir = os.homedir;
@@ -24,6 +25,7 @@ switch(section)
     console.log(scriptConfig.binName + " config");
     console.log(scriptConfig.binName + " scopes");
     console.log(scriptConfig.binName + " template");
+    console.log(scriptConfig.binName + " resource-pak");
     break;
   case "config":
     ConfigCLI(scriptConfig);
@@ -36,4 +38,8 @@ switch(section)
     break;
   case "build":
     BuildCLI(scriptConfig);
+    break;
+  case "resource-pak":
+    ResourcePakCLI(scriptConfig);
+    break;
 }

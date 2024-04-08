@@ -12,6 +12,7 @@ const ConfigCLI = (scriptConfig) => {
             .then(() => config.saveConfig());
     };
     const command = scriptConfig.args[3] || "list";
+    const subcommand = scriptConfig.args[4] || "help";
     switch (command) {
         case "list":
             if (!fs_1.default.existsSync(scriptConfig.configDir + config.configFile)) {
@@ -25,7 +26,6 @@ const ConfigCLI = (scriptConfig) => {
             updateConfig();
             break;
         case "scopes":
-            const subcommand = scriptConfig.args[4] || "help";
             console.log(scriptConfig.binName + " " + command + " " + subcommand);
             switch (subcommand) {
                 case "help":

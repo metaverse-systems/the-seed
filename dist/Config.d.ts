@@ -3,7 +3,7 @@ declare class Config {
     configDir: string;
     configFile: string;
     config: ConfigType;
-    constructor(configDir: string);
+    constructor(configDir?: string);
     loadConfig: () => void;
     saveConfig: () => void;
     getQuestions: () => {

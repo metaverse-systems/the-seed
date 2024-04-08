@@ -10,8 +10,8 @@ class Config {
     scopes: {}
   };
 
-  constructor(configDir: string) {
-    this.configDir = configDir;
+  constructor(configDir?: string) {
+    this.configDir = configDir || os.homedir() + "/the-seed";
     this.configFile = "/config.json";
     this.loadConfig();
   }
