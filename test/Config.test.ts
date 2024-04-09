@@ -1,17 +1,23 @@
 import fs from "fs";
 import os from "os";
+import path from "path";
 import Config from "../src/Config";
 
 const home = os.homedir();
 const prefix = home + "/the-seed";
-const configDir = "./ConfigTestDir";
+
+function createTempDir(): string {
+  return fs.mkdtempSync(path.join(os.tmpdir(), "config-test-"));
+}
 
 describe("test Config", () => {
-  beforeAll(() => {
-    fs.mkdirSync(configDir);
-  });
+  let configDir: string;
+  let config: Config;
 
-  const config = new Config(configDir);
+  beforeAll(() => {
+    configDir = createTempDir();
+    config = new Config(configDir);
+  });
 
   it("write empty config file", () => {
     config.saveConfig();
