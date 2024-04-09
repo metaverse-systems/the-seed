@@ -4,7 +4,6 @@ import path from "path";
 import os from "os";
 import Config from "./Config";
 import Scopes from "./Scopes";
-import { ConfigType } from "./types";
 
 const build_command = "build_command src/Template.ts";
 const build_win64_command = "";

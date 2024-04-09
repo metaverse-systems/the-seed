@@ -23,3 +23,19 @@ export interface ScriptArgsType {
   args: string[];
   configDir: string;
 }
+
+export interface ResourceType {
+  name: string;
+  filename: string;
+  size: number;
+}
+
+export interface PackageType {
+  author: AuthorType;
+  name: string;
+  licence: string;
+  scripts: {
+    [index: string]: string;
+  };
+  resources: ResourceType[];
+}

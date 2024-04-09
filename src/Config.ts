@@ -10,17 +10,18 @@ class Config {
     scopes: {}
   };
 
-  constructor(configDir: string) {
-    this.configDir = configDir;
+  constructor(configDir?: string) {
+    this.configDir = configDir || os.homedir() + "/the-seed";
     this.configFile = "/config.json";
     this.loadConfig();
   }
 
   loadConfig = () => {
-    try {
-      this.config = JSON.parse(fs.readFileSync(this.configDir + this.configFile).toString());
-    } catch (err) {
+    // if file does not exist, create it
+    if (!fs.existsSync(this.configDir + this.configFile)) {
+      this.saveConfig();
     }
+    this.config = JSON.parse(fs.readFileSync(this.configDir + this.configFile).toString());
   };
 
   saveConfig = () => {

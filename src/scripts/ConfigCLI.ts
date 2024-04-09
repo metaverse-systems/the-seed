@@ -7,11 +7,12 @@ const ConfigCLI = (scriptConfig: ScriptArgsType) => {
   const config = new Config(scriptConfig.configDir);
   const updateConfig = () => {
     inquirer.prompt(config.getQuestions())
-    .then((answers) => config.parseAnswers(answers))
-    .then(() => config.saveConfig());
+      .then((answers) => config.parseAnswers(answers))
+      .then(() => config.saveConfig());
   };
 
   const command = scriptConfig.args[3] || "list";
+  const subcommand = scriptConfig.args[4] || "help";
 
   switch(command)
   {
@@ -27,7 +28,6 @@ const ConfigCLI = (scriptConfig: ScriptArgsType) => {
       updateConfig();
       break;
     case "scopes":
-      const subcommand = scriptConfig.args[4] || "help";
       console.log(scriptConfig.binName + " " + command + " " + subcommand);
 
       switch(subcommand)
