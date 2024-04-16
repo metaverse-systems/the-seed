@@ -10,6 +10,10 @@ class Config {
             scopes: {}
         };
         this.loadConfig = () => {
+            // if file does not exist, create it
+            if (!fs_1.default.existsSync(this.configDir + this.configFile)) {
+                this.saveConfig();
+            }
             this.config = JSON.parse(fs_1.default.readFileSync(this.configDir + this.configFile).toString());
         };
         this.saveConfig = () => {

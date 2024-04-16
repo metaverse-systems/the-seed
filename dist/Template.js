@@ -45,6 +45,7 @@ class Template {
             };
             const files = [
                 'AUTHORS',
+                'COPYING',
                 'configure.ac',
                 'Makefile.am',
                 'src/Makefile.am',
