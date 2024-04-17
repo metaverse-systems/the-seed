@@ -55,3 +55,4 @@ Makefile
 libtool
 dist
 node_modules
+*.pc
