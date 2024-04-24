@@ -1,6 +1,7 @@
 import Config from "../Config";
 import { ScriptArgsType } from "../types";
 import ResourcePak from "../ResourcePak";
+import inquirer from "inquirer";
 
 const ResourcePakCLI = (scriptConfig: ScriptArgsType) => {
   const config = new Config(scriptConfig.configDir);
@@ -17,19 +18,18 @@ const ResourcePakCLI = (scriptConfig: ScriptArgsType) => {
       console.log("  build");
       break;
     case "create":
-      rp = new ResourcePak(config, process.cwd());
-      rp.create(name);
-      rp.savePackage();
-      console.log(rp.package);
+      rp = new ResourcePak(config);
+      inquirer.prompt(rp.askName())
+        .then((answers) => {
+          rp.createPackage(answers.scopeName, answers.pakName);
+        });
       break;
     case "add":
-      rp = new ResourcePak(config, process.cwd());
+      rp = new ResourcePak(config);
       rp.addResource(name, scriptConfig.args[5]);
-      rp.savePackage();
-      console.log(rp.package);
       break;
     case "build":
-      rp = new ResourcePak(config, process.cwd());
+      rp = new ResourcePak(config);
       rp.build();
       break;
   }

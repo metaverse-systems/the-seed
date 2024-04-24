@@ -5,45 +5,63 @@ import Scopes from "./Scopes";
 import { PackageType } from "./types";
 
 class ResourcePak {
-  packageDir: string;
+  packageDir = "";
   config: Config;
   scopes: Scopes;
   package?: PackageType;
   
-  constructor(config: Config, dir: string) {
+  constructor(config: Config) {
     this.config = config;
     this.scopes = new Scopes(config);
-    this.packageDir = dir;
-    if (fs.existsSync(this.packageDir + "/package.json")) {
-      this.package = JSON.parse(
-        fs.readFileSync(this.packageDir + "/package.json")
-      );
-    }
   }
 
-  create = (name: string) => {
-    if (!this.package) {
-      execSync("npm init --yes", { cwd: this.packageDir });
-    }
-
-    this.package = JSON.parse(
-      fs.readFileSync(this.packageDir + "/package.json")
-    );
-
-    if (this.package) {
-      this.package.name = name;
-      if (!this.package.scripts) {
-        this.package.scripts = {
-          build: "the-seed resource-pak build",
-        };
+  askName = () => {
+    return [
+      {
+        "type": "list",
+        "name": "scopeName",
+        "message": "Choose scope for resource pak",
+        "choices": this.scopes.getScopes()
+      },
+      {
+        "name": "pakName",
+        "message": "Choose name for resource pak"
       }
-      if(!this.package.resources) {
-        this.package.resources = [];
-      }
-    }
+    ];
   };
 
-  savePackage = () => {
+  createPackage = (scope: string, name: string) => {
+    const scopeDir = this.config.config.prefix + "/projects/" + scope;
+    if(!fs.existsSync(scopeDir)) {
+      fs.mkdirSync(scopeDir);
+    }
+
+    this.packageDir = scopeDir + "/" + name;
+    if(!fs.existsSync(this.packageDir)) {
+      fs.mkdirSync(this.packageDir);
+    }
+
+    // Create default package.json
+    execSync("npm init --yes", { cwd: this.packageDir });
+
+    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json"));
+    if(!this.package) {
+      return;
+    }
+    this.package.author = this.scopes.getScope(scope).author;
+    this.package.license = "UNLICENSED";
+    this.package.name = scope + "/" + name;
+    this.package.version = "0.0.1";
+    this.package.scripts = {
+      "test": "echo \"Error: no test specified\" && exit 1",
+      "build": "the-seed resource-pak build"
+    };
+    this.package.resources = [];
+    delete this.package.main;
+    this.save();
+  };
+
+  save = () => {
     fs.writeFileSync(
       this.packageDir + "/package.json",
       JSON.stringify(this.package, null, 2)
@@ -51,6 +69,8 @@ class ResourcePak {
   };
 
   addResource = (name: string, filename: string) => {
+    this.packageDir = process.cwd();
+    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json"));
     if (!this.package) {
       return;
     }
@@ -69,19 +89,32 @@ class ResourcePak {
       filename: filename,
       size: stats.size,
     });
+    this.save();
   };
 
   build = () => {
+    this.packageDir = process.cwd();
+    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json"));
     if (!this.package) {
       return;
     }
-    this.savePackage();
+    
+    // make a copy of this.package.resources that doesn't include the filename
+    // property
+    const resources = this.package.resources.map((r) => {
+      return {
+        name: r.name,
+        size: r.size,
+        attributes: r.attributes
+      };
+    });
+    
     const header = {
       name: this.package.name,
-      headerSize: JSON.stringify(this.package.resources)
+      headerSize: JSON.stringify(resources)
         .length.toString()
         .padStart(10, "0"),
-      resources: this.package.resources,
+      resources: resources,
     };
     header.headerSize = JSON.stringify(header).length.toString().padStart(10, "0");
 

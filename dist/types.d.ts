@@ -23,13 +23,16 @@ export interface ResourceType {
     name: string;
     filename: string;
     size: number;
+    attributes?: any;
 }
 export interface PackageType {
     author: AuthorType;
     name: string;
-    licence: string;
+    license: string;
+    version: string;
     scripts: {
         [index: string]: string;
     };
     resources: ResourceType[];
+    main?: any;
 }

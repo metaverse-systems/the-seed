@@ -6,9 +6,20 @@ declare class ResourcePak {
     config: Config;
     scopes: Scopes;
     package?: PackageType;
-    constructor(config: Config, dir: string);
-    create: (name: string) => void;
-    savePackage: () => void;
+    constructor(config: Config);
+    askName: () => ({
+        type: string;
+        name: string;
+        message: string;
+        choices: string[];
+    } | {
+        name: string;
+        message: string;
+        type?: undefined;
+        choices?: undefined;
+    })[];
+    createPackage: (scope: string, name: string) => void;
+    save: () => void;
     addResource: (name: string, filename: string) => void;
     build: () => void;
 }

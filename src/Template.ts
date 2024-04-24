@@ -1,5 +1,5 @@
 const fs = require("fs-extra");
-const { execSync } = require('child_process');
+const { execSync } = require("child_process");
 import path from "path";
 import os from "os";
 import Config from "./Config";
@@ -9,8 +9,8 @@ const build_command = "build_command src/Template.ts";
 const build_win64_command = "";
 
 class Template {
-  type: string = "";
-  packageDir: string = "";
+  type = "";
+  packageDir = "";
   config: Config;
   scopes: Scopes;
   package: any;
@@ -33,7 +33,7 @@ class Template {
         "message": "Choose name for " + this.type
       }
     ];
-  }
+  };
 
   copyTemplate = (scope: string, name: string) => {
     const templateDir = path.join(path.dirname(require.main!.filename), "../../templates/" +  this.type);
@@ -62,17 +62,17 @@ class Template {
     };
 
     const files = [
-      'AUTHORS',
-      'COPYING',
-      'configure.ac',
-      'Makefile.am',
-      'src/Makefile.am',
-      'src/SKELETON.hpp',
-      'src/SKELETON.cpp'
+      "AUTHORS",
+      "COPYING",
+      "configure.ac",
+      "Makefile.am",
+      "src/Makefile.am",
+      "src/SKELETON.hpp",
+      "src/SKELETON.cpp"
     ];
 
     if(this.type != "program") {
-      files.push('SKELETON.pc.in');
+      files.push("SKELETON.pc.in");
     }
 
     files.forEach((file) => {
@@ -87,7 +87,7 @@ class Template {
     fs.renameSync(this.packageDir + "/src/SKELETON.hpp", this.packageDir + "/src/" + name + ".hpp");
     fs.renameSync(this.packageDir + "/src/SKELETON.cpp", this.packageDir + "/src/" + name + ".cpp");
     if(this.type != "program") fs.renameSync(this.packageDir + "/SKELETON.pc.in", this.packageDir + "/" + name + ".pc.in");
-  }
+  };
 
   createPackage = (scope: string, name: string) => {
     const scopeDir = this.config.config.prefix + "/projects/" + scope;
@@ -95,7 +95,7 @@ class Template {
     this.copyTemplate(scope, name);
 
     // Create default package.json
-    execSync('npm init --yes', { cwd: this.packageDir });
+    execSync("npm init --yes", { cwd: this.packageDir });
 
     this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json"));
     this.package.author = this.scopes.getScope(scope).author;
@@ -109,11 +109,11 @@ class Template {
     };
     delete this.package.main;
     this.save();
-  }
+  };
 
   save = () => {
     fs.writeFileSync(this.packageDir + "/package.json", JSON.stringify(this.package, null, 2));
-  }
+  };
 }
 
 export default Template;

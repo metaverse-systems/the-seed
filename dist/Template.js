@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 const tslib_1 = require("tslib");
 const fs = require("fs-extra");
-const { execSync } = require('child_process');
+const { execSync } = require("child_process");
 const path_1 = tslib_1.__importDefault(require("path"));
 const Scopes_1 = tslib_1.__importDefault(require("./Scopes"));
 const build_command = "build_command src/Template.ts";
@@ -44,16 +44,16 @@ class Template {
                 "SKELETON": name
             };
             const files = [
-                'AUTHORS',
-                'COPYING',
-                'configure.ac',
-                'Makefile.am',
-                'src/Makefile.am',
-                'src/SKELETON.hpp',
-                'src/SKELETON.cpp'
+                "AUTHORS",
+                "COPYING",
+                "configure.ac",
+                "Makefile.am",
+                "src/Makefile.am",
+                "src/SKELETON.hpp",
+                "src/SKELETON.cpp"
             ];
             if (this.type != "program") {
-                files.push('SKELETON.pc.in');
+                files.push("SKELETON.pc.in");
             }
             files.forEach((file) => {
                 let temp = fs.readFileSync(this.packageDir + "/" + file).toString();
@@ -73,7 +73,7 @@ class Template {
             this.packageDir = scopeDir + "/" + name;
             this.copyTemplate(scope, name);
             // Create default package.json
-            execSync('npm init --yes', { cwd: this.packageDir });
+            execSync("npm init --yes", { cwd: this.packageDir });
             this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json"));
             this.package.author = this.scopes.getScope(scope).author;
             this.package.license = "UNLICENSED";
