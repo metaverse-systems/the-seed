@@ -95,9 +95,9 @@ class ResourcePak {
                     .padStart(10, "0"),
                 resources: resources,
             };
-            header.headerSize = JSON.stringify(header).length.toString().padStart(10, "0");
+            header.headerSize = (JSON.stringify(header).length + 1).toString().padStart(10, "0");
             const [, name] = this.package.name.split("/");
-            fs.writeFileSync(this.packageDir + "/" + name + ".pak", JSON.stringify(header));
+            fs.writeFileSync(this.packageDir + "/" + name + ".pak", JSON.stringify(header) + "\n");
             this.package.resources.forEach((r) => {
                 fs.appendFileSync(name + ".pak", fs.readFileSync(r.filename));
             });
