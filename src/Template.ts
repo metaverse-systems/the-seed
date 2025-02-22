@@ -5,8 +5,8 @@ import os from "os";
 import Config from "./Config";
 import Scopes from "./Scopes";
 
-const build_command = "build_command src/Template.ts";
-const build_win64_command = "";
+const build_command = "the-seed build native";
+const build_win64_command = "the-seed build windows";
 
 class Template {
   type = "";
