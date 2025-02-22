@@ -13,9 +13,6 @@
 ```
     |-- ~/the-seed
         |-- include
-        |-- wasm32-unknown-emscripten
-            |-- bin
-            |-- lib
         |-- x86_64-linux-gnu
             |-- bin
             |-- lib
