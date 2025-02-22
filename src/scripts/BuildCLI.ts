@@ -17,11 +17,9 @@ const BuildCLI = (scriptConfig: ScriptArgsType) => {
       console.log("Available build targets:");
       console.log("  native");
       console.log("  windows");
-      console.log("  wasm");
       break;
     case "native":
     case "windows":
-    case "wasm":
       build.reconfigure(command);
       build.compile();
       build.install();

@@ -6,14 +6,13 @@ const targets: {
 } = {
   "native": "x86_64-linux-gnu",
   "windows": "x86_64-w64-mingw32",
-  "wasm": "wasm32-unknown-emscripten",
 };
 
 const execOptions = {stdio : 'pipe' };
 
 class Build {
   config: Config;
-  target: string = "linux";
+  target = "linux";
 
   constructor(config: Config) {
     this.config = config;
@@ -42,7 +41,6 @@ class Build {
     const prefix = this.config.config.prefix + "/" + newTarget;
 
     const configure_command = "PKG_CONFIG_PATH=" + prefix + "/lib/pkgconfig/ " +
-        (this.target === "wasm" ? "emconfigure " : "") + 
         "./configure --prefix=" + prefix + 
         (this.target === "windows" ? " --host=" + targets["windows"] : "");
 
@@ -63,9 +61,7 @@ class Build {
   }
 
   compile = () => {
-    const make_command = this.target === "wasm" ?
-        "emmake make" :
-        "make -j";
+    const make_command = "make -j";
 
     try {
       const result = execSync(make_command).toString();
