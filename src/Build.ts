@@ -1,7 +1,7 @@
 import Config from "./Config";
 const { execSync } = require('child_process');
 
-const targets: {
+export const targets: {
   [key:string]: string;
 } = {
   "native": "x86_64-linux-gnu",
