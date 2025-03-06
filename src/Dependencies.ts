@@ -36,59 +36,37 @@ export const checkLibTheSeed = (config: Config, target: string) => {
 };
 
 export const installLibEcs = (config: Config, target: string) => {
+  if(installLib(config, libEcsRepo, "libecs-cpp", target)) {
+    return true;
+  }
+  console.error("Failed to build libecs-cpp");
+  return false;
+};
+
+export const installLibTheSeed = (config: Config, target: string) => {
+  if(installLib(config, libTheSeedRepo, "libthe-seed", target)) {
+    return true;
+  }
+  console.error("Failed to build libthe-seed");
+  return false;
+};
+
+export const installLib = (config: Config, repo: string, installDir: string, target: string) => {
   const targetDir = targets[target];
   const prefix = config.config.prefix + "/" + targetDir;
-  const cloneCommand = "git clone " + libEcsRepo;
+  const cloneCommand = "git clone " + repo;
   try {
     const result = execSync(cloneCommand, execOptions).toString();
   } catch (e) {
-    console.error("Failed to clone libecs-cpp");
+    console.error("Failed to clone " + repo);
   }
   const buildCommand =
-    "cd ecs-cpp && ./autogen.sh && ./configure --prefix=" +
-    prefix +
-    target != "native" ? " --host=" + targetDir : "" +
+    "cd " + installDir + " && ./autogen.sh && ./configure --prefix=" +
+    prefix + (target != "native" ? " --host=" + targetDir : "") +
     " && make && make install";
   try {
     const result = execSync(buildCommand, execOptions).toString();
   } catch (e) {
-    console.error("Failed to build libecs-cpp");
-    console.error(e);
-    return false;
-  }
-  return true;
-};
-
-export const installLibTheSeed = (config: Config, target: string) => {
-  const targetDir = targets[target];
-  const prefix = config.config.prefix + "/" + targetDir;
-  const cloneCommand = "git clone " + libTheSeedRepo;
-  try {
-    const result = execSync(cloneCommand, execOptions).toString();
-  } catch (e) {
-    console.error("Failed to clone libthe-seed");
-  }
-  const env = {
-    ...process.env,
-    PKG_CONFIG_PATH: `${prefix}/lib/pkgconfig/`
-  };
-
-  let buildCommand = "cd libthe-seed";
-  buildCommand += " && ./autogen.sh";
-  buildCommand += " && PKG_CONFIG_PATH=" + prefix + "/lib/pkgconfig/";
-  buildCommand += " ./configure --prefix=" + prefix;
-  if(target != "native") {
-    buildCommand += " --host=" + targetDir;
-  }
-  buildCommand += " && make && make install";
-  try {
-    const result = execSync(
-      buildCommand,
-      { stdio: "inherit", env, shell: "/bin/bash" }
-    );
-  } catch (e) {
-    console.error("Failed to build libthe-seed");
-    console.error(e);
     return false;
   }
   return true;
