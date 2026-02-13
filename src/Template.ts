@@ -43,10 +43,11 @@ class Template {
     const underscoreName = name.replace(underscoreRegex, "_");
     
     if(!fs.existsSync(scopeDir)) {
-      fs.mkdirSync(scopeDir);
+      fs.mkdirSync(scopeDir, { recursive: true });
     }
 
     // Create package from template
+    console.log("Copying template from " + templateDir + " to " + this.packageDir);
     fs.copySync(templateDir, this.packageDir);
 
     // Replace template variables with real values
@@ -90,8 +91,7 @@ class Template {
   };
 
   createPackage = (scope: string, name: string) => {
-    const scopeDir = this.config.config.prefix + "/projects/" + scope;
-    this.packageDir = scopeDir + "/" + name;
+    this.packageDir = name;
     this.copyTemplate(scope, name);
 
     // Create default package.json
