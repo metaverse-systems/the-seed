@@ -23,7 +23,7 @@
 
 **Purpose**: Establish baseline and verify current project state
 
-- [ ] T001 Verify baseline by running `npm run build` and `npm test`; document pre-existing ResourcePak.test.ts failures per research.md R-005
+- [X] T001 Verify baseline by running `npm run build` and `npm test`; document pre-existing ResourcePak.test.ts failures per research.md R-005
 
 ---
 
@@ -45,14 +45,14 @@
 
 ### Implementation for User Story 1
 
-- [ ] T002 [US1] Update type interfaces in src/types.ts per types-contract.md: remove `[index: string]: any` from ConfigType, change `attributes?: any` to `attributes?: { [key: string]: string }` in ResourceType, change `main?: any` to `main?: string` in PackageType, add ScopeAnswersType and ScopeDefaultsType interfaces
-- [ ] T003 [P] [US1] Refactor parseAnswers in src/Config.ts: change parameter type from `{ [index:string]: any }` to `{ prefix: string }`, replace dynamic key iteration with `this.config.prefix = answers.prefix`, change `this.config["prefix"]` to `this.config.prefix` in getQuestions
-- [ ] T004 [P] [US1] Update parameter types in src/Scopes.ts: change `askEditScope(defaults?: any)` to `askEditScope(defaults?: ScopeDefaultsType)`, change `createOrEditScope(answers: any)` to `createOrEditScope(answers: ScopeAnswersType)`, change `getQuestions(defaults: any)` to `getQuestions(defaults: { scopeName?: string })`; add import for ScopeAnswersType and ScopeDefaultsType from ./types
-- [ ] T005 [P] [US1] Replace `package: any` property with `package?: PackageType` in src/Template.ts; add import for PackageType from ./types; add null checks where this.package is accessed if needed
-- [ ] T006 [P] [US1] Export new types (ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, ScriptArgsType) from src/index.ts per types-contract.md
-- [ ] T007 [P] [US1] Update test/Config.test.ts: change `config.config["prefix"]` bracket notation to `config.config.prefix` dot notation
-- [ ] T008 [US1] Add ESLint rule `@typescript-eslint/no-explicit-any` at `"error"` level in the ESLint configuration file to prevent any-type regressions
-- [ ] T009 [US1] Verify US1 completion: run `npm run build`, `npm run lint`, `npx tsc --noEmit`, and `grep -rn ': any' src/ --include='*.ts'` confirming zero errors and zero any types
+- [X] T002 [US1] Update type interfaces in src/types.ts per types-contract.md: remove `[index: string]: any` from ConfigType, change `attributes?: any` to `attributes?: { [key: string]: string }` in ResourceType, change `main?: any` to `main?: string` in PackageType, add ScopeAnswersType and ScopeDefaultsType interfaces
+- [X] T003 [P] [US1] Refactor parseAnswers in src/Config.ts: change parameter type from `{ [index:string]: any }` to `{ prefix: string }`, replace dynamic key iteration with `this.config.prefix = answers.prefix`, change `this.config["prefix"]` to `this.config.prefix` in getQuestions
+- [X] T004 [P] [US1] Update parameter types in src/Scopes.ts: change `askEditScope(defaults?: any)` to `askEditScope(defaults?: ScopeDefaultsType)`, change `createOrEditScope(answers: any)` to `createOrEditScope(answers: ScopeAnswersType)`, change `getQuestions(defaults: any)` to `getQuestions(defaults: { scopeName?: string })`; add import for ScopeAnswersType and ScopeDefaultsType from ./types
+- [X] T005 [P] [US1] Replace `package: any` property with `package?: PackageType` in src/Template.ts; add import for PackageType from ./types; add null checks where this.package is accessed if needed
+- [X] T006 [P] [US1] Export new types (ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, ScriptArgsType) from src/index.ts per types-contract.md
+- [X] T007 [P] [US1] Update test/Config.test.ts: change `config.config["prefix"]` bracket notation to `config.config.prefix` dot notation
+- [X] T008 [US1] Add ESLint rule `@typescript-eslint/no-explicit-any` at `"error"` level in the ESLint configuration file to prevent any-type regressions
+- [X] T009 [US1] Verify US1 completion: run `npm run build`, `npm run lint`, `npx tsc --noEmit`, and `grep -rn ': any' src/ --include='*.ts'` confirming zero errors and zero any types
 
 **Checkpoint**: All explicit `any` types eliminated. Compiler and linter enforce type safety. US1 is independently verifiable.
 
@@ -66,10 +66,10 @@
 
 ### Implementation for User Story 2
 
-- [ ] T010 [P] [US2] Create test/Template.test.ts per test-coverage-contract.md: test askName question shape, copyTemplate for component/system/program types, SKELETON variable substitution and file renaming; mock execSync for npm init; use fs.mkdtempSync for temp directories with cleanup
-- [ ] T011 [P] [US2] Create test/Build.test.ts per test-coverage-contract.md: test autogen, configure (native/windows targets), reconfigure chain, compile, install commands, error propagation, and targets map; fully mock child_process.execSync; construct Config with temp directory
-- [ ] T012 [P] [US2] Create test/Dependencies.test.ts per test-coverage-contract.md: test checkLib found/not-found/wrong-output, checkLibEcs/checkLibTheSeed delegation, installLib success/failure/target-flags, installLibEcs/installLibTheSeed delegation; fully mock child_process.execSync; construct Config with temp directory
-- [ ] T013 [US2] Verify US2 completion: run `npm test` confirming all 6 test suites (3 existing + 3 new) pass
+- [X] T010 [P] [US2] Create test/Template.test.ts per test-coverage-contract.md: test askName question shape, copyTemplate for component/system/program types, SKELETON variable substitution and file renaming; mock execSync for npm init; use fs.mkdtempSync for temp directories with cleanup
+- [X] T011 [P] [US2] Create test/Build.test.ts per test-coverage-contract.md: test autogen, configure (native/windows targets), reconfigure chain, compile, install commands, error propagation, and targets map; fully mock child_process.execSync; construct Config with temp directory
+- [X] T012 [P] [US2] Create test/Dependencies.test.ts per test-coverage-contract.md: test checkLib found/not-found/wrong-output, checkLibEcs/checkLibTheSeed delegation, installLib success/failure/target-flags, installLibEcs/installLibTheSeed delegation; fully mock child_process.execSync; construct Config with temp directory
+- [X] T013 [US2] Verify US2 completion: run `npm test` confirming all 6 test suites (3 existing + 3 new) pass
 
 **Checkpoint**: All six library modules have test coverage. Tests pass without autotools or cross-compilers installed (shell commands are mocked). US2 is independently verifiable.
 
@@ -83,11 +83,11 @@
 
 ### Implementation for User Story 3
 
-- [ ] T014 [P] [US3] Migrate src/Template.ts per import-migration-contract.md: replace `const fs = require("fs-extra")` with `import fs from "fs-extra"`, replace `const { execSync } = require("child_process")` with `import { execSync } from "child_process"`, replace `require.main!.filename` path resolution with `path.join(__dirname, '..', 'templates', this.type)`
-- [ ] T015 [P] [US3] Migrate src/Build.ts per import-migration-contract.md: replace `const { execSync } = require('child_process')` with `import { execSync } from "child_process"`
-- [ ] T016 [P] [US3] Migrate src/Dependencies.ts per import-migration-contract.md: replace `const { execSync } = require("child_process")` with `import { execSync } from "child_process"`
-- [ ] T017 [P] [US3] Migrate src/ResourcePak.ts per import-migration-contract.md: replace `const fs = require("fs-extra")` with `import fs from "fs-extra"`, replace `const { execSync } = require("child_process")` with `import { execSync } from "child_process"`
-- [ ] T018 [US3] Verify US3 completion: run `npm run build`, `npm test`, and `grep -rn 'require(' src/ --include='*.ts'` confirming zero require() calls and no regressions
+- [X] T014 [P] [US3] Migrate src/Template.ts per import-migration-contract.md: replace `const fs = require("fs-extra")` with `import fs from "fs-extra"`, replace `const { execSync } = require("child_process")` with `import { execSync } from "child_process"`, replace `require.main!.filename` path resolution with `path.join(__dirname, '..', 'templates', this.type)`
+- [X] T015 [P] [US3] Migrate src/Build.ts per import-migration-contract.md: replace `const { execSync } = require('child_process')` with `import { execSync } from "child_process"`
+- [X] T016 [P] [US3] Migrate src/Dependencies.ts per import-migration-contract.md: replace `const { execSync } = require("child_process")` with `import { execSync } from "child_process"`
+- [X] T017 [P] [US3] Migrate src/ResourcePak.ts per import-migration-contract.md: replace `const fs = require("fs-extra")` with `import fs from "fs-extra"`, replace `const { execSync } = require("child_process")` with `import { execSync } from "child_process"`
+- [X] T018 [US3] Verify US3 completion: run `npm run build`, `npm test`, and `grep -rn 'require(' src/ --include='*.ts'` confirming zero require() calls and no regressions
 
 **Checkpoint**: All source files use consistent ES import syntax. Compiled CommonJS output is functionally unchanged. US3 is independently verifiable.
 
@@ -97,8 +97,8 @@
 
 **Purpose**: Final validation across all user stories
 
-- [ ] T019 Run full verification checklist from quickstart.md: `npm run build`, `npm run lint`, `npm test`, `npx tsc --noEmit`, grep for `: any` and `require(` in src/
-- [ ] T020 [P] Validate CLI commands still work: verify `the-seed template component`, `the-seed build native`, and `the-seed dependencies check` produce identical behavior to pre-change baseline per SC-007
+- [X] T019 Run full verification checklist from quickstart.md: `npm run build`, `npm run lint`, `npm test`, `npx tsc --noEmit`, grep for `: any` and `require(` in src/
+- [X] T020 [P] Validate CLI commands still work: verify `the-seed template component`, `the-seed build native`, and `the-seed dependencies check` produce identical behavior to pre-change baseline per SC-007
 
 ---
 

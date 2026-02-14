@@ -13,7 +13,6 @@ export interface ScopesType {
 }
 
 export interface ConfigType {
-  [index: string]: any;
   prefix: string;
   scopes: ScopesType;
 }
@@ -28,7 +27,7 @@ export interface ResourceType {
   name: string;
   filename: string;
   size: number;
-  attributes?: any;
+  attributes?: { [key: string]: string };
 }
 
 export interface PackageType {
@@ -40,5 +39,18 @@ export interface PackageType {
     [index: string]: string;
   };
   resources: ResourceType[];
-  main?: any;
+  main?: string;
+}
+
+export interface ScopeAnswersType {
+  scopeName: string;
+  authorName: string;
+  authorEmail: string;
+  authorURL: string;
+}
+
+export interface ScopeDefaultsType {
+  name?: string;
+  email?: string;
+  url?: string;
 }

@@ -1,6 +1,6 @@
 import Config from "./Config";
 import Scopes from "./Scopes";
-import { AuthorType, ConfigType, ScopeType, ScopesType } from "./types";
+import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, ScriptArgsType } from "./types";
 
 export {
   Config,
@@ -8,5 +8,10 @@ export {
   AuthorType,
   ConfigType,
   ScopeType,
-  ScopesType
+  ScopesType,
+  ScopeAnswersType,
+  ScopeDefaultsType,
+  ResourceType,
+  PackageType,
+  ScriptArgsType
 };

@@ -24,7 +24,7 @@ describe("test Config", () => {
   });
 
   it("write updated config file", () => {
-    config.config["prefix"] = prefix;
+    config.config.prefix = prefix;
     config.saveConfig();
   });
 

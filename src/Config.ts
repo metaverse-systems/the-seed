@@ -33,15 +33,13 @@ class Config {
       {
         name: "prefix",
         message: "Installation prefix?",
-        default: this.config["prefix"]
+        default: this.config.prefix
       }
     ];
   };
 
-  parseAnswers = (answers: { [index:string]: any }) => {
-    Object.keys(answers).forEach((k) => {
-      this.config[k] = answers[k];
-    });
+  parseAnswers = (answers: { prefix: string }) => {
+    this.config.prefix = answers.prefix;
   };
 }
 
