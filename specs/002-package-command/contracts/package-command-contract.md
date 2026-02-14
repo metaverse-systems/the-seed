@@ -117,6 +117,15 @@ export interface DependencyResultType {
 }
 ```
 
+### Argument Routing Logic
+
+| args[3] value | args[4+] | Behavior | Story |
+|---|---|---|---|
+| `undefined` | — | Print usage message (stdout), exit 0 | US2 |
+| `"help"` | — | Print help text (stdout), exit 0 | US2 |
+| `<output-dir>` | empty | Print usage error (stderr), exit 1 | US3 |
+| `<output-dir>` | `<file1> ...` | Run packaging logic | US1 |
+
 ### PackageCLI Handler
 
 **File**: `src/scripts/PackageCLI.ts`
@@ -126,7 +135,8 @@ import { ScriptArgsType } from "../types";
 
 /**
  * CLI handler for the package command.
- * Parses args[3] as command/output-dir, args[4+] as binary file paths.
+ * If args[3] is "help" or undefined, prints usage information.
+ * Otherwise, parses args[3] as the output directory, args[4+] as binary file paths.
  * Delegates to Package class for all logic.
  */
 const PackageCLI: (scriptConfig: ScriptArgsType) => void;

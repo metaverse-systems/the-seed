@@ -1,7 +1,7 @@
 # Feature Specification: Package Command
 
 **Feature Branch**: `002-package-command`  
-**Created**: 2025-02-13  
+**Created**: 2026-02-13  
 **Status**: Draft  
 **Input**: User description: "Add a package command. The first argument should be a directory name, the rest will be files to include. Use the DependencyLister class from libthe-seed with the listed files to find all dependencies. Then create the directory with the specified name and copy the files to it."
 
@@ -70,7 +70,7 @@ A developer provides invalid arguments — such as a file that does not exist, o
 - **FR-002**: The first positional argument after `package` MUST be treated as the output directory name.
 - **FR-003**: All subsequent positional arguments MUST be treated as paths to binary files (executables or libraries) to include in the package.
 - **FR-004**: The system MUST use the `DependencyLister` class from `libthe-seed` to resolve all runtime shared library dependencies of the specified binary files. The `DependencyLister` auto-detects the target platform from the binary file format (e.g., ELF vs PE); no explicit target argument is required. The system MUST pass the project's Config prefix path to `DependencyLister` so it can locate libraries installed by the build system.
-- **FR-005**: The system MUST create the output directory if it does not already exist.
+- **FR-005**: The system MUST create the output directory if it does not already exist. If the path includes intermediate directories that do not exist, the system MUST create them recursively (equivalent to `mkdir -p`).
 - **FR-006**: The system MUST copy all specified binary files into the output directory.
 - **FR-007**: The system MUST copy all resolved shared library dependency files into the output directory.
 - **FR-008**: The system MUST NOT create duplicate copies of files that appear both in the explicit list and in the resolved dependencies.
@@ -79,6 +79,8 @@ A developer provides invalid arguments — such as a file that does not exist, o
 - **FR-011**: The system MUST display usage information when `the-seed package help` is run.
 - **FR-012**: The system MUST display a usage error when fewer than two arguments are provided after `package` (i.e., no directory name or no files).
 - **FR-013**: The system MUST print each file name as it is copied to the output directory and display a summary count upon completion (e.g., "Packaged 7 files into my-release/").
+- **FR-014**: The system MUST display an error if any specified input path is a directory rather than a file.
+- **FR-015**: The system MUST display a clear permissions error if the output directory cannot be created due to insufficient write permissions.
 
 ### Key Entities
 

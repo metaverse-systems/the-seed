@@ -29,6 +29,8 @@ Configuration for a single package operation, constructed from CLI arguments and
 | `binaryPaths` | `string[]` | List of binary file paths to include (remaining CLI arguments). |
 | `searchPaths` | `string[]` | Ordered list of directories for DependencyLister to search when resolving library names. Constructed from Config prefix + all target lib dirs. |
 
+> **Note**: `PackageOptionsType` is a conceptual grouping for documentation purposes. It is not materialized as a TypeScript interface in `types.ts`. The `Package.run()` method accepts `outputDir` and `binaryPaths` as separate parameters, and `searchPaths` are computed internally by `getSearchPaths()`. See the contract for the authoritative API signature.
+
 **Validation Rules**:
 - `outputDir` must not already exist on the filesystem.
 - `binaryPaths` must contain at least one entry.
