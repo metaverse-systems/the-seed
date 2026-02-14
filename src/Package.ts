@@ -60,6 +60,81 @@ class Package {
   };
 
   /**
+   * Parse src/Makefile.am in a project directory to determine the binary type and name.
+   * Returns { type, name } for programs (bin_PROGRAMS) or libraries (lib_LTLIBRARIES), or null on error.
+   */
+  parseMakefileAm = (projectDir: string): { type: "program" | "library"; name: string } | null => {
+    const makefileAmPath = path.join(projectDir, "src", "Makefile.am");
+    if (!fs.existsSync(makefileAmPath)) {
+      console.error("Error: src/Makefile.am not found in " + projectDir);
+      return null;
+    }
+
+    const content = fs.readFileSync(makefileAmPath, "utf-8");
+
+    // Check for bin_PROGRAMS = <name>
+    const programMatch = content.match(/^bin_PROGRAMS\s*=\s*(\S+)/m);
+    if (programMatch) {
+      return { type: "program", name: programMatch[1] };
+    }
+
+    // Check for lib_LTLIBRARIES = <name>.la
+    const libraryMatch = content.match(/^lib_LTLIBRARIES\s*=\s*(\S+)\.la/m);
+    if (libraryMatch) {
+      return { type: "library", name: libraryMatch[1] };
+    }
+
+    console.error("Error: Could not determine binary type from " + makefileAmPath);
+    return null;
+  };
+
+  /**
+   * Resolve actual installed binary paths from a project directory for all build targets.
+   * Resolve binary paths from the libtool build output in {projectDir}/src/.libs/.
+   * For programs: looks for {name} (native) or {name}.exe (cross-compiled for Windows).
+   * For libraries: looks for {name}.so (native) or {name}*.dll (cross-compiled for Windows).
+   */
+  resolveBinaryPaths = (projectDir: string): string[] => {
+    const parsed = this.parseMakefileAm(projectDir);
+    if (!parsed) return [];
+
+    const binaryPaths: string[] = [];
+    const libsDir = path.join(projectDir, "src", ".libs");
+
+    if (!fs.existsSync(libsDir)) {
+      return binaryPaths;
+    }
+
+    if (parsed.type === "program") {
+      // Native binary (no extension)
+      const nativePath = path.join(libsDir, parsed.name);
+      if (fs.existsSync(nativePath) && fs.statSync(nativePath).isFile()) {
+        binaryPaths.push(nativePath);
+      }
+      // Cross-compiled Windows binary (.exe)
+      const windowsPath = path.join(libsDir, parsed.name + ".exe");
+      if (fs.existsSync(windowsPath)) {
+        binaryPaths.push(windowsPath);
+      }
+    } else {
+      // library
+      const files = fs.readdirSync(libsDir);
+      for (const file of files) {
+        // Native shared library (.so)
+        if (file === parsed.name + ".so") {
+          binaryPaths.push(path.join(libsDir, file));
+        }
+        // Cross-compiled Windows DLL
+        if (file.startsWith(parsed.name) && file.endsWith(".dll")) {
+          binaryPaths.push(path.join(libsDir, file));
+        }
+      }
+    }
+
+    return binaryPaths;
+  };
+
+  /**
    * Invoke the native addon's listDependencies() to call DependencyLister::ListDependencies() directly.
    * Returns the result as a plain JS object.
    */
@@ -70,34 +145,46 @@ class Package {
   };
 
   /**
-   * Main entry point: validate inputs, resolve dependencies, create directory, copy files.
+   * Main entry point: validate inputs, resolve binary paths from project directories,
+   * resolve dependencies, create directory, copy files.
    * Returns true on success, false on validation/resolution errors (after printing messages).
    */
-  run = (outputDir: string, binaryPaths: string[]): boolean => {
+  run = (outputDir: string, projectDirs: string[]): boolean => {
     // Validate output directory doesn't already exist
     if (fs.existsSync(outputDir)) {
       console.error("Error: Output directory already exists: " + outputDir);
       return false;
     }
 
-    // Validate all input files exist and are files (not directories)
-    for (const filePath of binaryPaths) {
-      if (!fs.existsSync(filePath)) {
-        console.error("Error: File not found: " + filePath);
+    // Validate all project directories exist and are directories
+    for (const projectDir of projectDirs) {
+      if (!fs.existsSync(projectDir)) {
+        console.error("Error: Directory not found: " + projectDir);
         return false;
       }
-      const stat = fs.statSync(filePath);
-      if (!stat.isFile()) {
-        console.error("Error: Not a file: " + filePath);
+      const stat = fs.statSync(projectDir);
+      if (!stat.isDirectory()) {
+        console.error("Error: Not a directory: " + projectDir);
         return false;
       }
+    }
+
+    // Resolve binary paths from project directories
+    const binaryPaths: string[] = [];
+    for (const projectDir of projectDirs) {
+      const paths = this.resolveBinaryPaths(projectDir);
+      if (paths.length === 0) {
+        console.error("Error: No installed binaries found for " + projectDir);
+        return false;
+      }
+      binaryPaths.push(...paths);
     }
 
     // Resolve dependencies recursively — resolved libraries may have their own dependencies
     const searchPaths = this.getSearchPaths();
     const filesToCopy = new Set<string>();
 
-    // Add explicit binary paths
+    // Add resolved binary paths
     for (const filePath of binaryPaths) {
       filesToCopy.add(path.resolve(filePath));
     }

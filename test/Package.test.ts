@@ -34,8 +34,17 @@ function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "package-test-"));
 }
 
-function createTempFile(dir: string, name: string, content = ""): string {
-  const filePath = path.join(dir, name);
+function createProjectDir(baseDir: string, name: string, makefileAmContent: string): string {
+  const projectDir = path.join(baseDir, name);
+  fs.mkdirSync(path.join(projectDir, "src"), { recursive: true });
+  fs.writeFileSync(path.join(projectDir, "src", "Makefile.am"), makefileAmContent);
+  return projectDir;
+}
+
+function installBuildOutput(projectDir: string, filename: string, content = ""): string {
+  const libsDir = path.join(projectDir, "src", ".libs");
+  fs.mkdirSync(libsDir, { recursive: true });
+  const filePath = path.join(libsDir, filename);
   fs.writeFileSync(filePath, content);
   return filePath;
 }
@@ -52,9 +61,10 @@ describe("test Package", () => {
   });
 
   beforeEach(() => {
+    tempDir = createTempDir();
+    config.config.prefix = path.join(tempDir, "prefix");
     pkg = new Package(config);
     mockedListDependencies.mockClear();
-    tempDir = createTempDir();
   });
 
   afterEach(() => {
@@ -85,12 +95,104 @@ describe("test Package", () => {
     });
   });
 
+  // parseMakefileAm tests
+  describe("parseMakefileAm", () => {
+    it("parses bin_PROGRAMS as a program type", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "ACLOCAL_AMFLAGS=-I m4\nbin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const result = pkg.parseMakefileAm(projectDir);
+      expect(result).toEqual({ type: "program", name: "myapp" });
+    });
+
+    it("parses lib_LTLIBRARIES as a library type", () => {
+      const projectDir = createProjectDir(tempDir, "libfoo",
+        "ACLOCAL_AMFLAGS=-I m4\nlib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      const result = pkg.parseMakefileAm(projectDir);
+      expect(result).toEqual({ type: "library", name: "libfoo" });
+    });
+
+    it("returns null when src/Makefile.am does not exist", () => {
+      const projectDir = path.join(tempDir, "noproject");
+      fs.mkdirSync(projectDir, { recursive: true });
+      const consoleSpy = jest.spyOn(console, "error").mockImplementation();
+      const result = pkg.parseMakefileAm(projectDir);
+      consoleSpy.mockRestore();
+      expect(result).toBeNull();
+    });
+
+    it("returns null when Makefile.am has unrecognized format", () => {
+      const projectDir = createProjectDir(tempDir, "weird",
+        "ACLOCAL_AMFLAGS=-I m4\n# nothing useful here\n");
+      const consoleSpy = jest.spyOn(console, "error").mockImplementation();
+      const result = pkg.parseMakefileAm(projectDir);
+      consoleSpy.mockRestore();
+      expect(result).toBeNull();
+    });
+  });
+
+  // resolveBinaryPaths tests
+  describe("resolveBinaryPaths", () => {
+    it("finds native program binary in src/.libs/", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      installBuildOutput(projectDir, "myapp", "binary");
+      const result = pkg.resolveBinaryPaths(projectDir);
+      expect(result).toContain(
+        path.join(projectDir, "src", ".libs", "myapp"));
+    });
+
+    it("finds Windows program binary (.exe) in src/.libs/", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      installBuildOutput(projectDir, "myapp.exe", "binary");
+      const result = pkg.resolveBinaryPaths(projectDir);
+      expect(result).toContain(
+        path.join(projectDir, "src", ".libs", "myapp.exe"));
+    });
+
+    it("finds native library (.so) in src/.libs/", () => {
+      const projectDir = createProjectDir(tempDir, "libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      installBuildOutput(projectDir, "libfoo.so", "library");
+      const result = pkg.resolveBinaryPaths(projectDir);
+      expect(result).toContain(
+        path.join(projectDir, "src", ".libs", "libfoo.so"));
+    });
+
+    it("finds Windows library DLL in src/.libs/", () => {
+      const projectDir = createProjectDir(tempDir, "libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      installBuildOutput(projectDir, "libfoo-0.dll", "library");
+      const result = pkg.resolveBinaryPaths(projectDir);
+      expect(result).toContain(
+        path.join(projectDir, "src", ".libs", "libfoo-0.dll"));
+    });
+
+    it("finds both native and Windows binaries in src/.libs/", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      installBuildOutput(projectDir, "myapp", "binary");
+      installBuildOutput(projectDir, "myapp.exe", "binary");
+      const result = pkg.resolveBinaryPaths(projectDir);
+      expect(result).toHaveLength(2);
+    });
+
+    it("returns empty array when src/.libs/ does not exist", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const result = pkg.resolveBinaryPaths(projectDir);
+      expect(result).toEqual([]);
+    });
+  });
+
   // T008: Package binary with dependencies creates dir and copies all files
   describe("run - happy path with dependencies", () => {
     it("creates directory and copies binary plus all resolved dependencies", () => {
-      const binary = createTempFile(tempDir, "myapp", "binary-content");
-      const libFoo = createTempFile(tempDir, "libfoo.so", "libfoo-content");
-      const libBar = createTempFile(tempDir, "libbar.so", "libbar-content");
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      const libFoo = installBuildOutput(projectDir, "libfoo.so", "libfoo-content");
+      const libBar = installBuildOutput(projectDir, "libbar.so", "libbar-content");
 
       const outputDir = path.join(tempDir, "my-release");
 
@@ -104,7 +206,7 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [binary]);
+      const result = pkg.run(outputDir, [projectDir]);
       consoleSpy.mockRestore();
 
       expect(result).toBe(true);
@@ -119,8 +221,10 @@ describe("test Package", () => {
 
   // T009: Package binary with no non-system dependencies copies only explicit files
   describe("run - no non-system dependencies", () => {
-    it("copies only the explicit binary files when no project dependencies resolved", () => {
-      const binary = createTempFile(tempDir, "myapp", "binary-content");
+    it("copies only the resolved binary when no project dependencies found", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
       const outputDir = path.join(tempDir, "my-release");
 
       mockedListDependencies.mockReturnValue({
@@ -132,23 +236,27 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [binary]);
+      const result = pkg.run(outputDir, [projectDir]);
       consoleSpy.mockRestore();
 
       expect(result).toBe(true);
       expect(fs.existsSync(outputDir)).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
-      // Only the explicit binary, no system libs
+      // Only the resolved binary, no system libs
       expect(fs.readdirSync(outputDir).length).toBe(1);
     });
   });
 
-  // T010: Two binaries sharing a dependency copies shared library only once
+  // T010: Two project dirs sharing a dependency copies shared library only once
   describe("run - deduplication", () => {
     it("copies a shared dependency only once when two binaries share it", () => {
-      const binary1 = createTempFile(tempDir, "app1", "app1-content");
-      const binary2 = createTempFile(tempDir, "app2", "app2-content");
-      const sharedLib = createTempFile(tempDir, "libshared.so", "shared-content");
+      const projectDir1 = createProjectDir(tempDir, "app1",
+        "bin_PROGRAMS = app1\napp1_SOURCES = app1.cpp\n");
+      const projectDir2 = createProjectDir(tempDir, "app2",
+        "bin_PROGRAMS = app2\napp2_SOURCES = app2.cpp\n");
+      const binary1 = installBuildOutput(projectDir1, "app1", "app1-content");
+      const binary2 = installBuildOutput(projectDir2, "app2", "app2-content");
+      const sharedLib = installBuildOutput(projectDir1, "libshared.so", "shared-content");
       const outputDir = path.join(tempDir, "my-release");
 
       mockedListDependencies.mockReturnValue({
@@ -159,7 +267,7 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [binary1, binary2]);
+      const result = pkg.run(outputDir, [projectDir1, projectDir2]);
       consoleSpy.mockRestore();
 
       expect(result).toBe(true);
@@ -175,9 +283,11 @@ describe("test Package", () => {
   // Transitive dependency resolution: resolved libs are themselves analyzed
   describe("run - transitive dependencies", () => {
     it("resolves dependencies of dependencies recursively", () => {
-      const binary = createTempFile(tempDir, "myapp", "binary-content");
-      const libFoo = createTempFile(tempDir, "libfoo.so", "libfoo-content");
-      const libBar = createTempFile(tempDir, "libbar.so", "libbar-content");
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      const libFoo = installBuildOutput(projectDir, "libfoo.so", "libfoo-content");
+      const libBar = installBuildOutput(projectDir, "libbar.so", "libbar-content");
       const outputDir = path.join(tempDir, "my-release");
 
       // First call: binary depends on libfoo
@@ -198,7 +308,7 @@ describe("test Package", () => {
         });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [binary]);
+      const result = pkg.run(outputDir, [projectDir]);
       consoleSpy.mockRestore();
 
       expect(result).toBe(true);
@@ -214,8 +324,10 @@ describe("test Package", () => {
   // T011: Each file printed during copy and summary count displayed
   describe("run - verbose output", () => {
     it("prints each file during copy and summary count at end", () => {
-      const binary = createTempFile(tempDir, "myapp", "binary-content");
-      const libFoo = createTempFile(tempDir, "libfoo.so", "libfoo-content");
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      const libFoo = installBuildOutput(projectDir, "libfoo.so", "libfoo-content");
       const outputDir = path.join(tempDir, "my-release");
 
       mockedListDependencies.mockReturnValue({
@@ -226,7 +338,7 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [binary]);
+      const result = pkg.run(outputDir, [projectDir]);
 
       const logCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
@@ -244,9 +356,9 @@ describe("test Package", () => {
   // T017: no arguments prints usage message (US2)
   // (These test the CLI handler, included in Phases 4)
 
-  // T019: input file doesn't exist shows error, no directory created (US3)
-  describe("run - input file not found", () => {
-    it("shows error and does not create directory when input file does not exist", () => {
+  // T019: project directory doesn't exist shows error, no output directory created (US3)
+  describe("run - project directory not found", () => {
+    it("shows error and does not create directory when project directory does not exist", () => {
       const outputDir = path.join(tempDir, "my-release");
       const nonExistent = path.join(tempDir, "nonexistent");
 
@@ -257,19 +369,21 @@ describe("test Package", () => {
 
       expect(result).toBe(false);
       expect(fs.existsSync(outputDir)).toBe(false);
-      expect(errorCalls.some(msg => msg.includes("File not found"))).toBe(true);
+      expect(errorCalls.some(msg => msg.includes("Directory not found"))).toBe(true);
     });
   });
 
   // T020: output directory already exists shows error (US3)
   describe("run - output directory already exists", () => {
     it("shows error when output directory already exists", () => {
-      const binary = createTempFile(tempDir, "myapp", "binary-content");
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      installBuildOutput(projectDir, "myapp", "binary-content");
       const outputDir = path.join(tempDir, "my-release");
       fs.mkdirSync(outputDir);
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const result = pkg.run(outputDir, [binary]);
+      const result = pkg.run(outputDir, [projectDir]);
       const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
@@ -281,7 +395,9 @@ describe("test Package", () => {
   // T022: DependencyLister returns errors triggers fatal abort (US3)
   describe("run - dependency resolution errors", () => {
     it("aborts with error messages when DependencyLister returns errors", () => {
-      const binary = createTempFile(tempDir, "myapp", "binary-content");
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
       const outputDir = path.join(tempDir, "my-release");
 
       mockedListDependencies.mockReturnValue({
@@ -292,7 +408,7 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const result = pkg.run(outputDir, [binary]);
+      const result = pkg.run(outputDir, [projectDir]);
       const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
@@ -302,21 +418,39 @@ describe("test Package", () => {
     });
   });
 
-  // T022a: input path is a directory shows error (US3)
-  describe("run - input is a directory", () => {
-    it("shows error when input path is a directory instead of a file", () => {
-      const subDir = path.join(tempDir, "subdir");
-      fs.mkdirSync(subDir);
+  // T022a: input path is not a directory shows error (US3)
+  describe("run - input is not a directory", () => {
+    it("shows error when input path is a file instead of a directory", () => {
+      const filePath = path.join(tempDir, "notadir");
+      fs.writeFileSync(filePath, "content");
       const outputDir = path.join(tempDir, "my-release");
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const result = pkg.run(outputDir, [subDir]);
+      const result = pkg.run(outputDir, [filePath]);
       const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
       expect(result).toBe(false);
       expect(fs.existsSync(outputDir)).toBe(false);
-      expect(errorCalls.some(msg => msg.includes("Not a file"))).toBe(true);
+      expect(errorCalls.some(msg => msg.includes("Not a directory"))).toBe(true);
+    });
+  });
+
+  // No installed binaries found for a valid project directory
+  describe("run - no installed binaries", () => {
+    it("shows error when project has Makefile.am but no installed binaries", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const outputDir = path.join(tempDir, "my-release");
+
+      const consoleSpy = jest.spyOn(console, "error").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
+      consoleSpy.mockRestore();
+
+      expect(result).toBe(false);
+      expect(fs.existsSync(outputDir)).toBe(false);
+      expect(errorCalls.some(msg => msg.includes("No installed binaries found"))).toBe(true);
     });
   });
 
@@ -335,8 +469,8 @@ describe("test Package", () => {
       consoleSpy.mockRestore();
 
       expect(logCalls.some(msg => msg.includes("Usage: the-seed package"))).toBe(true);
-      expect(logCalls.some(msg => msg.includes("directory"))).toBe(true);
-      expect(logCalls.some(msg => msg.includes("file1"))).toBe(true);
+      expect(logCalls.some(msg => msg.includes("output-directory"))).toBe(true);
+      expect(logCalls.some(msg => msg.includes("project-dir"))).toBe(true);
     });
   });
 
@@ -358,9 +492,9 @@ describe("test Package", () => {
     });
   });
 
-  // T021: no files specified shows usage error (US3)
-  describe("PackageCLI - no files specified", () => {
-    it("shows usage error when output dir given but no files", () => {
+  // T021: no project dirs specified shows usage error (US3)
+  describe("PackageCLI - no project dirs specified", () => {
+    it("shows usage error when output dir given but no project dirs", () => {
       const scriptConfig: ScriptArgsType = {
         binName: "the-seed",
         args: ["node", "the-seed", "package", "my-release"],
