@@ -7,6 +7,7 @@ import TemplateCLI from "./TemplateCLI";
 import BuildCLI from "./BuildCLI";
 import ResourcePakCLI from "./ResourcePakCLI";
 import DependenciesCLI from "./DependenciesCLI";
+import PackageCLI from "./PackageCLI";
 import { ScriptArgsType } from "../types";
 
 const homedir = os.homedir;
@@ -27,6 +28,7 @@ switch(section)
     console.log(scriptConfig.binName + " config");
     console.log(scriptConfig.binName + " scopes");
     console.log(scriptConfig.binName + " template");
+    console.log(scriptConfig.binName + " package");
     console.log(scriptConfig.binName + " resource-pak");
     break;
   case "config":
@@ -46,6 +48,9 @@ switch(section)
     break;
   case "dependencies":
     DependenciesCLI(scriptConfig);
+    break;
+  case "package":
+    PackageCLI(scriptConfig);
     break;
   default:
     console.log("Invalid command. Use 'the-seed help' for usage information.");

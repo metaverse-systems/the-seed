@@ -24,9 +24,9 @@
 
 **Purpose**: Project initialization — new dependencies, native addon build configuration, and shared type definitions
 
-- [ ] T001 Add `node-addon-api` and `node-gyp` dependencies to package.json
-- [ ] T002 Create native addon build configuration in native/binding.gyp
-- [ ] T003 Add `DependencyResultType` interface to src/types.ts
+- [X] T001 Add `node-addon-api` and `node-gyp` dependencies to package.json
+- [X] T002 Create native addon build configuration in native/binding.gyp
+- [X] T003 Add `DependencyResultType` interface to src/types.ts
 
 ---
 
@@ -36,9 +36,9 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T004 Implement N-API addon wrapper calling DependencyLister::ListDependencies() in native/src/addon.cpp
-- [ ] T005 Create Package class with constructor, `getSearchPaths()`, and `resolveDependencies()` methods in src/Package.ts
-- [ ] T006 Export Package class and DependencyResultType from src/index.ts
+- [X] T004 Implement N-API addon wrapper calling DependencyLister::ListDependencies() in native/src/addon.cpp
+- [X] T005 Create Package class with constructor, `getSearchPaths()`, and `resolveDependencies()` methods in src/Package.ts
+- [X] T006 Export Package class and DependencyResultType from src/index.ts
 
 **Checkpoint**: Foundation ready — native addon compiles, Package class can resolve dependencies. User story implementation can now begin.
 
@@ -54,18 +54,18 @@
 
 > **NOTE: Write these tests FIRST, ensure they FAIL before implementation**
 
-- [ ] T007 [P] [US1] Create test file with mocked native addon and temp directory setup in test/Package.test.ts
-- [ ] T008 [P] [US1] Add test: package binary with dependencies creates dir and copies all files in test/Package.test.ts
-- [ ] T009 [P] [US1] Add test: package binary with no non-system dependencies copies only explicit files in test/Package.test.ts
-- [ ] T010 [P] [US1] Add test: two binaries sharing a dependency copies shared library only once in test/Package.test.ts
-- [ ] T011 [P] [US1] Add test: each file printed during copy and summary count displayed in test/Package.test.ts
-- [ ] T012 [P] [US1] Add test: search paths constructed from Config prefix and all targets in test/Package.test.ts
+- [X] T007 [P] [US1] Create test file with mocked native addon and temp directory setup in test/Package.test.ts
+- [X] T008 [P] [US1] Add test: package binary with dependencies creates dir and copies all files in test/Package.test.ts
+- [X] T009 [P] [US1] Add test: package binary with no non-system dependencies copies only explicit files in test/Package.test.ts
+- [X] T010 [P] [US1] Add test: two binaries sharing a dependency copies shared library only once in test/Package.test.ts
+- [X] T011 [P] [US1] Add test: each file printed during copy and summary count displayed in test/Package.test.ts
+- [X] T012 [P] [US1] Add test: search paths constructed from Config prefix and all targets in test/Package.test.ts
 
 ### Implementation for User Story 1
 
-- [ ] T013 [US1] Implement `Package.run()` method — validate inputs, resolve dependencies, build deduplicated file list, create directory, copy files, print verbose output in src/Package.ts
-- [ ] T014 [US1] Create PackageCLI handler that parses args and delegates to Package.run() in src/scripts/PackageCLI.ts
-- [ ] T015 [US1] Wire package command into CLI router switch and help output in src/scripts/the-seed.ts
+- [X] T013 [US1] Implement `Package.run()` method — validate inputs, resolve dependencies, build deduplicated file list, create directory, copy files, print verbose output in src/Package.ts
+- [X] T014 [US1] Create PackageCLI handler that parses args and delegates to Package.run() in src/scripts/PackageCLI.ts
+- [X] T015 [US1] Wire package command into CLI router switch and help output in src/scripts/the-seed.ts
 
 **Checkpoint**: `the-seed package <dir> <file1> [file2] ...` works end-to-end. Binaries and their resolved dependencies are copied to the output directory with verbose output. All US1 tests pass.
 
@@ -79,12 +79,12 @@
 
 ### Tests for User Story 2
 
-- [ ] T016 [P] [US2] Add test: `help` subcommand prints usage information in test/Package.test.ts
-- [ ] T017 [P] [US2] Add test: no arguments prints usage message in test/Package.test.ts
+- [X] T016 [P] [US2] Add test: `help` subcommand prints usage information in test/Package.test.ts
+- [X] T017 [P] [US2] Add test: no arguments prints usage message in test/Package.test.ts
 
 ### Implementation for User Story 2
 
-- [ ] T018 [US2] Implement help text output and no-arguments usage message in src/scripts/PackageCLI.ts
+- [X] T018 [US2] Implement help text output and no-arguments usage message in src/scripts/PackageCLI.ts
 
 **Checkpoint**: `the-seed package help` and `the-seed package` (no args) display correct usage information. All US2 tests pass.
 
@@ -98,19 +98,19 @@
 
 ### Tests for User Story 3
 
-- [ ] T019 [P] [US3] Add test: input file doesn't exist shows error, no directory created in test/Package.test.ts
-- [ ] T020 [P] [US3] Add test: output directory already exists shows error in test/Package.test.ts
-- [ ] T021 [P] [US3] Add test: no files specified shows usage error in test/Package.test.ts
-- [ ] T022 [P] [US3] Add test: DependencyLister returns errors triggers fatal abort in test/Package.test.ts
-- [ ] T022a [P] [US3] Add test: input path is a directory shows error in test/Package.test.ts
+- [X] T019 [P] [US3] Add test: input file doesn't exist shows error, no directory created in test/Package.test.ts
+- [X] T020 [P] [US3] Add test: output directory already exists shows error in test/Package.test.ts
+- [X] T021 [P] [US3] Add test: no files specified shows usage error in test/Package.test.ts
+- [X] T022 [P] [US3] Add test: DependencyLister returns errors triggers fatal abort in test/Package.test.ts
+- [X] T022a [P] [US3] Add test: input path is a directory shows error in test/Package.test.ts
 
 ### Implementation for User Story 3
 
-- [ ] T023 [US3] Implement input file existence validation with clear error messages in src/Package.ts
-- [ ] T024 [US3] Implement output directory existence check with error message in src/Package.ts
-- [ ] T025 [US3] Implement argument count validation (no files specified) in src/scripts/PackageCLI.ts
-- [ ] T026 [US3] Implement DependencyLister error map handling with fatal abort in src/Package.ts
-- [ ] T026a [US3] Implement directory-as-input validation (reject non-file paths) in src/Package.ts
+- [X] T023 [US3] Implement input file existence validation with clear error messages in src/Package.ts
+- [X] T024 [US3] Implement output directory existence check with error message in src/Package.ts
+- [X] T025 [US3] Implement argument count validation (no files specified) in src/scripts/PackageCLI.ts
+- [X] T026 [US3] Implement DependencyLister error map handling with fatal abort in src/Package.ts
+- [X] T026a [US3] Implement directory-as-input validation (reject non-file paths) in src/Package.ts
 
 **Checkpoint**: All error scenarios produce clear messages, no partial directories are created, and exit codes are correct. All US3 tests pass.
 
@@ -120,9 +120,9 @@
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] T027 [P] Add `install` script to package.json for node-gyp native addon compilation
-- [ ] T028 [P] Verify all existing tests still pass after changes to types.ts, index.ts, and the-seed.ts
-- [ ] T029 Run quickstart.md validation — test basic packaging, multiple binaries, help, and error scenarios
+- [X] T027 [P] Add `install` script to package.json for node-gyp native addon compilation
+- [X] T028 [P] Verify all existing tests still pass after changes to types.ts, index.ts, and the-seed.ts
+- [X] T029 Run quickstart.md validation — test basic packaging, multiple binaries, help, and error scenarios
 
 ---
 

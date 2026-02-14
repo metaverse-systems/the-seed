@@ -54,3 +54,8 @@ export interface ScopeDefaultsType {
   email?: string;
   url?: string;
 }
+
+export interface DependencyResultType {
+  dependencies: Record<string, string[]>;
+  errors: Record<string, string>;
+}
