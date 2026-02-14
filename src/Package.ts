@@ -135,11 +135,15 @@ class Package {
   };
 
   /**
-   * Read package.json from a project directory and resolve dependency directories
-   * via node_modules. Returns an array of absolute paths to dependency project directories.
-   * Skips dependencies that don't have a src/Makefile.am (i.e. non-native deps).
+   * Recursively read package.json from a project directory and resolve dependency
+   * directories via node_modules. Returns an array of absolute paths to all native
+   * dependency project directories (those with src/Makefile.am), including transitive deps.
    */
-  getPackageDeps = (projectDir: string): string[] => {
+  getPackageDeps = (projectDir: string, visited: Set<string> = new Set()): string[] => {
+    const resolved = path.resolve(projectDir);
+    if (visited.has(resolved)) return [];
+    visited.add(resolved);
+
     const packageJsonPath = path.join(projectDir, "package.json");
     if (!fs.existsSync(packageJsonPath)) {
       return [];
@@ -153,6 +157,8 @@ class Package {
       const depDir = path.join(projectDir, "node_modules", depName);
       if (fs.existsSync(depDir) && fs.existsSync(path.join(depDir, "src", "Makefile.am"))) {
         depDirs.push(depDir);
+        // Recurse into the dependency's own package.json
+        depDirs.push(...this.getPackageDeps(depDir, visited));
       }
     }
 

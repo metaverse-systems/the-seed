@@ -242,6 +242,28 @@ describe("test Package", () => {
       const result = pkg.getPackageDeps(projectDir);
       expect(result).toEqual([]);
     });
+
+    it("recursively collects transitive native dependencies", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      // myapp depends on @org/libfoo
+      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
+        dependencies: { "@org/libfoo": "^1.0.0" }
+      }));
+      const libfooDir = createNodeModuleDep(projectDir, "@org/libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      // @org/libfoo depends on @org/libbar
+      fs.writeFileSync(path.join(libfooDir, "package.json"), JSON.stringify({
+        dependencies: { "@org/libbar": "^1.0.0" }
+      }));
+      createNodeModuleDep(libfooDir, "@org/libbar",
+        "lib_LTLIBRARIES = libbar.la\nlibbar_la_SOURCES = bar.cpp\n");
+
+      const result = pkg.getPackageDeps(projectDir);
+      expect(result).toHaveLength(2);
+      expect(result).toContain(path.join(projectDir, "node_modules", "@org/libfoo"));
+      expect(result).toContain(path.join(libfooDir, "node_modules", "@org/libbar"));
+    });
   });
 
   // T008: Package binary with dependencies creates dir and copies all files
