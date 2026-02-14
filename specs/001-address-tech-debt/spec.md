@@ -89,7 +89,7 @@ A contributor reading `Template.ts`, `Build.ts`, `Dependencies.ts`, or `Resource
 - **FR-010**: The `require.main!.filename` usage in `src/Template.ts` MUST be replaced with `__dirname`-based path resolution (e.g., `path.resolve(__dirname, '..', 'templates')`) that relies on the compiled package layout.
 - **FR-011**: No behavioral regressions MUST occur — all existing tests and CLI commands MUST continue to pass after changes.
 - **FR-012**: The `ConfigType` index signature MUST be removed entirely. `ConfigType` MUST declare only its known properties (`prefix: string` and `scopes: ScopesType`) with no index signature.
-- **FR-013**: `noImplicitAny` MUST be enabled in `tsconfig.json` to prevent reintroduction of `any` types. Optionally, `strict` mode may be enabled if all strict checks pass after the type cleanup.
+- **FR-013**: Since `strict: true` (which includes `noImplicitAny`) is already enabled in `tsconfig.json`, the ESLint rule `@typescript-eslint/no-explicit-any` MUST be enabled at `"error"` level to prevent reintroduction of explicit `any` type annotations.
 
 ### Key Entities
 
@@ -103,7 +103,7 @@ A contributor reading `Template.ts`, `Build.ts`, `Dependencies.ts`, or `Resource
 ### Measurable Outcomes
 
 - **SC-001**: Zero instances of the `any` type remain in source files under `src/`.
-- **SC-002**: `noImplicitAny` is enabled in `tsconfig.json` and the project compiles successfully with zero errors.
+- **SC-002**: `strict: true` (already enabled) and the ESLint rule `@typescript-eslint/no-explicit-any` at `"error"` level are both active, and the project compiles and lints with zero errors.
 - **SC-003**: Test coverage exists for all six library modules (`Config`, `Scopes`, `Template`, `Build`, `Dependencies`, `ResourcePak`) — up from the current three.
 - **SC-004**: All new tests pass in an environment without autotools or cross-compilers installed, confirming proper test isolation.
 - **SC-005**: Zero `require()` calls remain in source files under `src/` (with the exception of any runtime-necessary `require` that has no ES import equivalent, which must be documented).
