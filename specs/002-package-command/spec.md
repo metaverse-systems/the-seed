@@ -88,7 +88,7 @@ A developer provides invalid arguments — such as a file that does not exist, o
 
 ## Assumptions
 
-- The `DependencyLister` class from `libthe-seed` is already available and provides an interface for resolving runtime shared library dependencies of binary files.
+- The `DependencyLister` class from `libthe-seed` is already available and provides an interface for resolving runtime shared library dependencies of binary files. It is called directly from TypeScript via a native Node.js addon (N-API) that links against `libthe-seed`.
 - The package command uses the project's Config prefix (where `the-seed build` installs libraries) as the library search path for `DependencyLister`, consistent with how `build` and `dependencies` commands operate.
 - Dependency resolution covers shared libraries (`.so`, `.dll`) as used in the metaverse-systems ecosystem build targets (native Linux and cross-compiled Windows). The `DependencyLister` auto-detects the target platform from the binary file format rather than requiring an explicit target argument.
 - The command operates on the current working directory's project context (consistent with other `the-seed` commands like `build` and `resource-pak`).
