@@ -95,7 +95,7 @@ A contributor reading `Template.ts`, `Build.ts`, `Dependencies.ts`, or `Resource
 
 - **ConfigType**: The root configuration object. The `any` index signature will be removed; only `prefix: string` and `scopes: ScopesType` will remain as declared properties.
 - **ScopeAnswersType** (new): Represents the shape of user prompt answers when creating or editing scopes — includes `scopeName`, `authorName`, `authorEmail`, `authorURL`.
-- **ScopeDefaultsType** (new): Represents the optional defaults passed to the scope editing prompt — a partial `AuthorType` plus optional `scopeName`.
+- **ScopeDefaultsType** (new): Represents the optional defaults passed to the scope editing prompt — structurally equivalent to `Partial<AuthorType>` (fields: `name?`, `email?`, `url?`). Note: `scopeName` is passed separately to `getQuestions` via an inline type, not as part of `ScopeDefaultsType`.
 - **PackageType**: Already defined; represents `package.json` content. The `main` field needs a specific type (likely `string`). The `attributes` field on `ResourceType` needs a concrete type.
 
 ## Success Criteria *(mandatory)*
@@ -107,7 +107,7 @@ A contributor reading `Template.ts`, `Build.ts`, `Dependencies.ts`, or `Resource
 - **SC-003**: Test coverage exists for all six library modules (`Config`, `Scopes`, `Template`, `Build`, `Dependencies`, `ResourcePak`) — up from the current three.
 - **SC-004**: All new tests pass in an environment without autotools or cross-compilers installed, confirming proper test isolation.
 - **SC-005**: Zero `require()` calls remain in source files under `src/` (with the exception of any runtime-necessary `require` that has no ES import equivalent, which must be documented).
-- **SC-006**: All existing tests continue to pass without modification (no regressions).
+- **SC-006**: All existing tests that currently pass continue to pass after changes. Modifications to existing tests are limited to type-safety adjustments required by interface changes (e.g., bracket notation → dot notation) — no behavioral changes. Note: `test/ResourcePak.test.ts` has pre-existing failures (calls non-existent API methods) documented in research.md R-005; this is out of scope.
 - **SC-007**: A contributor can successfully run `the-seed template component`, `the-seed build native`, and `the-seed dependencies check` after all changes with identical behavior to before.
 
 ## Assumptions

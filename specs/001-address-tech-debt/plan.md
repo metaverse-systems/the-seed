@@ -63,7 +63,7 @@ src/
 ├── Build.ts          # MODIFIED: Migrate 1 require() to import
 ├── Dependencies.ts   # MODIFIED: Migrate 1 require() to import
 ├── ResourcePak.ts    # MODIFIED: Migrate 2 require() to import
-└── index.ts          # MODIFIED: Export new types (ScopeAnswersType, ScopeDefaultsType)
+└── index.ts          # MODIFIED: Export new types (ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, ScriptArgsType)
 
 test/
 ├── Config.test.ts       # EXISTING: May need minor update for ConfigType change
