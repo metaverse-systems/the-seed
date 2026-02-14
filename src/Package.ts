@@ -135,6 +135,31 @@ class Package {
   };
 
   /**
+   * Read package.json from a project directory and resolve dependency directories
+   * via node_modules. Returns an array of absolute paths to dependency project directories.
+   * Skips dependencies that don't have a src/Makefile.am (i.e. non-native deps).
+   */
+  getPackageDeps = (projectDir: string): string[] => {
+    const packageJsonPath = path.join(projectDir, "package.json");
+    if (!fs.existsSync(packageJsonPath)) {
+      return [];
+    }
+
+    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
+    const deps = packageJson.dependencies || {};
+    const depDirs: string[] = [];
+
+    for (const depName of Object.keys(deps)) {
+      const depDir = path.join(projectDir, "node_modules", depName);
+      if (fs.existsSync(depDir) && fs.existsSync(path.join(depDir, "src", "Makefile.am"))) {
+        depDirs.push(depDir);
+      }
+    }
+
+    return depDirs;
+  };
+
+  /**
    * Invoke the native addon's listDependencies() to call DependencyLister::ListDependencies() directly.
    * Returns the result as a plain JS object.
    */
@@ -169,7 +194,7 @@ class Package {
       }
     }
 
-    // Resolve binary paths from project directories
+    // Resolve binary paths from project directories and their package.json dependencies
     const binaryPaths: string[] = [];
     for (const projectDir of projectDirs) {
       const paths = this.resolveBinaryPaths(projectDir);
@@ -178,6 +203,15 @@ class Package {
         return false;
       }
       binaryPaths.push(...paths);
+
+      // Also resolve binaries from package.json dependencies in node_modules
+      const depDirs = this.getPackageDeps(projectDir);
+      for (const depDir of depDirs) {
+        const depPaths = this.resolveBinaryPaths(depDir);
+        if (depPaths.length > 0) {
+          binaryPaths.push(...depPaths);
+        }
+      }
     }
 
     // Resolve dependencies recursively — resolved libraries may have their own dependencies

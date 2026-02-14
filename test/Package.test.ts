@@ -49,6 +49,13 @@ function installBuildOutput(projectDir: string, filename: string, content = ""):
   return filePath;
 }
 
+function createNodeModuleDep(projectDir: string, depName: string, makefileAmContent: string): string {
+  const depDir = path.join(projectDir, "node_modules", depName);
+  fs.mkdirSync(path.join(depDir, "src"), { recursive: true });
+  fs.writeFileSync(path.join(depDir, "src", "Makefile.am"), makefileAmContent);
+  return depDir;
+}
+
 describe("test Package", () => {
   let configDir: string;
   let config: Config;
@@ -185,6 +192,58 @@ describe("test Package", () => {
     });
   });
 
+  // getPackageDeps tests
+  describe("getPackageDeps", () => {
+    it("returns dependency dirs from node_modules that have src/Makefile.am", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
+        dependencies: { "@org/libfoo": "^1.0.0", "@org/libbar": "^2.0.0" }
+      }));
+      createNodeModuleDep(projectDir, "@org/libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      createNodeModuleDep(projectDir, "@org/libbar",
+        "lib_LTLIBRARIES = libbar.la\nlibbar_la_SOURCES = bar.cpp\n");
+      const result = pkg.getPackageDeps(projectDir);
+      expect(result).toHaveLength(2);
+      expect(result).toContain(path.join(projectDir, "node_modules", "@org/libfoo"));
+      expect(result).toContain(path.join(projectDir, "node_modules", "@org/libbar"));
+    });
+
+    it("skips dependencies without src/Makefile.am", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
+        dependencies: { "@org/libfoo": "^1.0.0", "some-js-lib": "^3.0.0" }
+      }));
+      createNodeModuleDep(projectDir, "@org/libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      // some-js-lib exists in node_modules but has no Makefile.am
+      const jsLibDir = path.join(projectDir, "node_modules", "some-js-lib");
+      fs.mkdirSync(jsLibDir, { recursive: true });
+      const result = pkg.getPackageDeps(projectDir);
+      expect(result).toHaveLength(1);
+      expect(result).toContain(path.join(projectDir, "node_modules", "@org/libfoo"));
+    });
+
+    it("returns empty array when no package.json exists", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const result = pkg.getPackageDeps(projectDir);
+      expect(result).toEqual([]);
+    });
+
+    it("returns empty array when package.json has no dependencies", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
+        name: "myapp", version: "1.0.0"
+      }));
+      const result = pkg.getPackageDeps(projectDir);
+      expect(result).toEqual([]);
+    });
+  });
+
   // T008: Package binary with dependencies creates dir and copies all files
   describe("run - happy path with dependencies", () => {
     it("creates directory and copies binary plus all resolved dependencies", () => {
@@ -216,6 +275,38 @@ describe("test Package", () => {
       expect(fs.existsSync(path.join(outputDir, "libbar.so"))).toBe(true);
       // system lib should NOT be copied
       expect(fs.existsSync(path.join(outputDir, "libc.so.6"))).toBe(false);
+    });
+  });
+
+  // run includes binaries from package.json dependencies in node_modules
+  describe("run - includes package.json dependency binaries", () => {
+    it("copies binaries from node_modules dependencies alongside the main binary", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+
+      // Add a native dependency via package.json + node_modules
+      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
+        dependencies: { "@org/libfoo": "^1.0.0" }
+      }));
+      const depDir = createNodeModuleDep(projectDir, "@org/libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      const depLib = installBuildOutput(depDir, "libfoo-0.dll", "dll-content");
+
+      const outputDir = path.join(tempDir, "my-release");
+
+      mockedListDependencies.mockReturnValue({
+        dependencies: {},
+        errors: {}
+      });
+
+      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      consoleSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "libfoo-0.dll"))).toBe(true);
     });
   });
 
