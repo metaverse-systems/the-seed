@@ -1,5 +1,5 @@
 import fs from "fs";
-import { ConfigType } from "./types";
+import { ConfigType, ScopeAnswersType, ScopeDefaultsType } from "./types";
 import Config from "./Config";
 
 class Scopes {
@@ -30,7 +30,7 @@ class Scopes {
     ];
   };
 
-  askEditScope = (defaults?: any) => {
+  askEditScope = (defaults?: ScopeDefaultsType) => {
     return [
       {
         "name": "authorName",
@@ -50,7 +50,7 @@ class Scopes {
     ];
   };
 
-  createOrEditScope = (answers: any) => {
+  createOrEditScope = (answers: ScopeAnswersType) => {
     let name = "";
     if(answers.scopeName[0] != "@") name = "@";
     name += answers.scopeName;
@@ -88,7 +88,7 @@ class Scopes {
     return this.config.config.scopes[scope];
   }
 
-  getQuestions = (defaults: any) => {
+  getQuestions = (defaults: { scopeName?: string }) => {
     return [
       {
         name: "scopeName",

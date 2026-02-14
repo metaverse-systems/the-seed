@@ -1,5 +1,5 @@
-const fs = require("fs-extra");
-const { execSync } = require("child_process");
+import fs from "fs-extra";
+import { execSync } from "child_process";
 import Config from "./Config";
 import Scopes from "./Scopes";
 import { PackageType } from "./types";
@@ -44,7 +44,7 @@ class ResourcePak {
     // Create default package.json
     execSync("npm init --yes", { cwd: this.packageDir });
 
-    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json"));
+    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json").toString());
     if(!this.package) {
       return;
     }
@@ -70,7 +70,7 @@ class ResourcePak {
 
   addResource = (name: string, filename: string) => {
     this.packageDir = process.cwd();
-    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json"));
+    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json").toString());
     if (!this.package) {
       return;
     }
@@ -94,7 +94,7 @@ class ResourcePak {
 
   build = () => {
     this.packageDir = process.cwd();
-    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json"));
+    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json").toString());
     if (!this.package) {
       return;
     }

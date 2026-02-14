@@ -1,9 +1,9 @@
-const fs = require("fs-extra");
-const { execSync } = require("child_process");
+import fs from "fs-extra";
+import { execSync } from "child_process";
 import path from "path";
-import os from "os";
 import Config from "./Config";
 import Scopes from "./Scopes";
+import { PackageType } from "./types";
 
 const build_command = "the-seed build native";
 const build_win64_command = "the-seed build windows";
@@ -13,7 +13,7 @@ class Template {
   packageDir = "";
   config: Config;
   scopes: Scopes;
-  package: any;
+  package?: PackageType;
 
   constructor(config: Config) {
     this.config = config;
@@ -36,7 +36,7 @@ class Template {
   };
 
   copyTemplate = (scope: string, name: string) => {
-    const templateDir = path.join(path.dirname(require.main!.filename), "../../templates/" +  this.type);
+    const templateDir = path.join(__dirname, "..", "templates", this.type);
     const scopeDir = this.config.config.prefix + "/projects/" + scope;
 
     const underscoreRegex = new RegExp("-", "g");
@@ -97,7 +97,7 @@ class Template {
     // Create default package.json
     execSync("npm init --yes", { cwd: this.packageDir });
 
-    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json"));
+    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json").toString()) as PackageType;
     this.package.author = this.scopes.getScope(scope).author;
     this.package.license = "UNLICENSED";
     this.package.name = scope + "/" + name;
@@ -112,6 +112,7 @@ class Template {
   };
 
   save = () => {
+    if (!this.package) return;
     fs.writeFileSync(this.packageDir + "/package.json", JSON.stringify(this.package, null, 2));
   };
 }

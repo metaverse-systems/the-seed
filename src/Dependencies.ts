@@ -1,8 +1,8 @@
 import Config from "./Config";
-const { execSync } = require("child_process");
+import { execSync } from "child_process";
 import { targets } from "./Build";
 
-const execOptions = { stdio: "pipe", shell: "/bin/bash", env: { ...process.env } };
+const execOptions = { stdio: "pipe" as const, shell: "/bin/bash", env: { ...process.env } };
 const libEcsRepo = "https://github.com/metaverse-systems/libecs-cpp.git";
 const libTheSeedRepo = "https://github.com/metaverse-systems/libthe-seed.git";
 
