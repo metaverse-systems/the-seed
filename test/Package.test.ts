@@ -12,6 +12,19 @@ jest.mock("../native/build/Release/dependency_lister.node", () => ({
   listDependencies: jest.fn()
 }), { virtual: true });
 
+// Mock child_process for MinGW detection in getSearchPaths
+jest.mock("child_process", () => ({
+  execSync: jest.fn((cmd: string) => {
+    if (cmd.includes("libstdc++-6.dll")) {
+      return Buffer.from("/usr/lib/gcc/x86_64-w64-mingw32/15-posix/libstdc++-6.dll\n");
+    }
+    if (cmd.includes("libwinpthread-1.dll")) {
+      return Buffer.from("/usr/x86_64-w64-mingw32/lib/libwinpthread-1.dll\n");
+    }
+    return Buffer.from("");
+  })
+}));
+
 const mockAddon = require("../native/build/Release/dependency_lister.node");
 const mockedListDependencies = mockAddon.listDependencies as jest.MockedFunction<
   (binaryPaths: string[], searchPaths: string[]) => DependencyResultType
@@ -57,7 +70,6 @@ describe("test Package", () => {
     it("constructs search paths from Config prefix and all targets, including lib and bin", () => {
       const searchPaths = pkg.getSearchPaths();
       const targetKeys = Object.keys(targets);
-      expect(searchPaths.length).toBe(targetKeys.length * 2);
       for (const target of targetKeys) {
         const targetDir = targets[target];
         expect(searchPaths).toContain(
@@ -67,6 +79,9 @@ describe("test Package", () => {
           config.config.prefix + "/" + targetDir + "/bin"
         );
       }
+      // MinGW runtime paths detected from mocked execSync
+      expect(searchPaths).toContain("/usr/lib/gcc/x86_64-w64-mingw32/15-posix");
+      expect(searchPaths).toContain("/usr/x86_64-w64-mingw32/lib");
     });
   });
 
@@ -154,6 +169,45 @@ describe("test Package", () => {
       expect(outputFiles).toContain("libshared.so");
       // 2 binaries + 1 shared lib = 3 files total
       expect(outputFiles.length).toBe(3);
+    });
+  });
+
+  // Transitive dependency resolution: resolved libs are themselves analyzed
+  describe("run - transitive dependencies", () => {
+    it("resolves dependencies of dependencies recursively", () => {
+      const binary = createTempFile(tempDir, "myapp", "binary-content");
+      const libFoo = createTempFile(tempDir, "libfoo.so", "libfoo-content");
+      const libBar = createTempFile(tempDir, "libbar.so", "libbar-content");
+      const outputDir = path.join(tempDir, "my-release");
+
+      // First call: binary depends on libfoo
+      // Second call: libfoo depends on libbar
+      // Third call: libbar has no new resolved deps
+      mockedListDependencies
+        .mockReturnValueOnce({
+          dependencies: { [libFoo]: [binary], "libc.so.6": [binary] },
+          errors: {}
+        })
+        .mockReturnValueOnce({
+          dependencies: { [libBar]: [libFoo], "libc.so.6": [libFoo] },
+          errors: {}
+        })
+        .mockReturnValueOnce({
+          dependencies: { "libc.so.6": [libBar] },
+          errors: {}
+        });
+
+      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [binary]);
+      consoleSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "libfoo.so"))).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "libbar.so"))).toBe(true);
+      expect(fs.readdirSync(outputDir).length).toBe(3);
+      // listDependencies called 3 times (binary, libfoo, libbar)
+      expect(mockedListDependencies).toHaveBeenCalledTimes(3);
     });
   });
 
