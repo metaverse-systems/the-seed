@@ -1,5 +1,6 @@
 import Config from "./Config";
 import { execSync } from "child_process";
+import { BuildStep } from "./types";
 
 export const targets: {
   [key: string]: string;
@@ -85,6 +86,56 @@ class Build {
       console.error(e);
       throw e;
     }
+  };
+
+  /**
+   * Returns an ordered array of BuildStep objects for the given target and mode.
+   * @param target - 'native' or 'windows'
+   * @param fullReconfigure - if true, includes autogen/distclean/configure steps; if false, only compile+install
+   */
+  getSteps = (target: string, fullReconfigure: boolean): BuildStep[] => {
+    const newTarget = targets[target];
+    const prefix = this.config.config.prefix + "/" + newTarget;
+
+    const steps: BuildStep[] = [];
+
+    if (fullReconfigure) {
+      steps.push({
+        label: "autogen",
+        command: "./autogen.sh",
+      });
+
+      steps.push({
+        label: "distclean",
+        command: "make distclean",
+        ignoreExitCode: true,
+      });
+
+      const configureCommand =
+        "PKG_CONFIG_PATH=" +
+        prefix +
+        "/lib/pkgconfig/ " +
+        "./configure --prefix=" +
+        prefix +
+        (target === "windows" ? " --host=" + targets["windows"] : "");
+
+      steps.push({
+        label: "configure",
+        command: configureCommand,
+      });
+    }
+
+    steps.push({
+      label: "compile",
+      command: "make -j",
+    });
+
+    steps.push({
+      label: "install",
+      command: "make install",
+    });
+
+    return steps;
   };
 }
 

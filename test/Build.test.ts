@@ -3,6 +3,7 @@ import path from "path";
 import os from "os";
 import Config from "../src/Config";
 import Build, { targets } from "../src/Build";
+import { BuildStep } from "../src/types";
 
 jest.mock("child_process", () => ({
   execSync: jest.fn(() => Buffer.from(""))
@@ -126,6 +127,97 @@ describe("test Build", () => {
     it("runs make install", () => {
       build.install();
       expect(mockedExecSync).toHaveBeenCalledWith("make install");
+    });
+  });
+
+  describe("getSteps", () => {
+    it("returns 5 steps for full native build", () => {
+      const steps: BuildStep[] = build.getSteps("native", true);
+      expect(steps).toHaveLength(5);
+      expect(steps.map(s => s.label)).toEqual([
+        "autogen", "distclean", "configure", "compile", "install"
+      ]);
+    });
+
+    it("returns 5 steps for full windows build", () => {
+      const steps: BuildStep[] = build.getSteps("windows", true);
+      expect(steps).toHaveLength(5);
+      expect(steps.map(s => s.label)).toEqual([
+        "autogen", "distclean", "configure", "compile", "install"
+      ]);
+    });
+
+    it("returns 2 steps for incremental build (fullReconfigure=false)", () => {
+      const steps: BuildStep[] = build.getSteps("native", false);
+      expect(steps).toHaveLength(2);
+      expect(steps.map(s => s.label)).toEqual(["compile", "install"]);
+    });
+
+    it("native configure step does not contain --host flag", () => {
+      const steps = build.getSteps("native", true);
+      const configureStep = steps.find(s => s.label === "configure");
+      expect(configureStep).toBeDefined();
+      expect(configureStep!.command).not.toContain("--host");
+    });
+
+    it("windows configure step contains --host=x86_64-w64-mingw32", () => {
+      const steps = build.getSteps("windows", true);
+      const configureStep = steps.find(s => s.label === "configure");
+      expect(configureStep).toBeDefined();
+      expect(configureStep!.command).toContain("--host=x86_64-w64-mingw32");
+    });
+
+    it("distclean step has ignoreExitCode set to true", () => {
+      const steps = build.getSteps("native", true);
+      const distcleanStep = steps.find(s => s.label === "distclean");
+      expect(distcleanStep).toBeDefined();
+      expect(distcleanStep!.ignoreExitCode).toBe(true);
+    });
+
+    it("non-distclean steps do not have ignoreExitCode set to true", () => {
+      const steps = build.getSteps("native", true);
+      const nonDistclean = steps.filter(s => s.label !== "distclean");
+      for (const step of nonDistclean) {
+        expect(step.ignoreExitCode).toBeFalsy();
+      }
+    });
+
+    it("configure step includes correct prefix path for native", () => {
+      const steps = build.getSteps("native", true);
+      const configureStep = steps.find(s => s.label === "configure");
+      const expectedPrefix = config.config.prefix + "/x86_64-linux-gnu";
+      expect(configureStep!.command).toContain("--prefix=" + expectedPrefix);
+      expect(configureStep!.command).toContain("PKG_CONFIG_PATH=" + expectedPrefix + "/lib/pkgconfig/");
+    });
+
+    it("configure step includes correct prefix path for windows", () => {
+      const steps = build.getSteps("windows", true);
+      const configureStep = steps.find(s => s.label === "configure");
+      const expectedPrefix = config.config.prefix + "/x86_64-w64-mingw32";
+      expect(configureStep!.command).toContain("--prefix=" + expectedPrefix);
+    });
+
+    it("autogen step command is ./autogen.sh", () => {
+      const steps = build.getSteps("native", true);
+      expect(steps[0].command).toBe("./autogen.sh");
+    });
+
+    it("compile step command is make -j", () => {
+      const steps = build.getSteps("native", true);
+      const compileStep = steps.find(s => s.label === "compile");
+      expect(compileStep!.command).toBe("make -j");
+    });
+
+    it("install step command is make install", () => {
+      const steps = build.getSteps("native", true);
+      const installStep = steps.find(s => s.label === "install");
+      expect(installStep!.command).toBe("make install");
+    });
+
+    it("incremental build for windows returns 2 steps", () => {
+      const steps = build.getSteps("windows", false);
+      expect(steps).toHaveLength(2);
+      expect(steps.map(s => s.label)).toEqual(["compile", "install"]);
     });
   });
 });

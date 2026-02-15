@@ -1,13 +1,13 @@
 {
   "name": "@metaverse-systems/the-seed",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "The Seed",
   "main": "dist/index.js",
   "scripts": {
     "lint": "./node_modules/eslint/bin/eslint.js src/*",
     "lint-fix": "./node_modules/eslint/bin/eslint.js src/* --fix",
     "build": "tsc",
-    "install": "node-gyp rebuild --directory=native",
+    "build-addon": "node-gyp rebuild --directory=native",
     "test": "./node_modules/jest/bin/jest.js"
   },
   "repository": {

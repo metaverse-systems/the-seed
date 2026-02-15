@@ -59,3 +59,12 @@ export interface DependencyResultType {
   dependencies: Record<string, string[]>;
   errors: Record<string, string>;
 }
+
+export interface BuildStep {
+  /** Human-readable step name (e.g., 'autogen', 'configure', 'compile', 'install') */
+  label: string;
+  /** Shell command to execute */
+  command: string;
+  /** If true, non-zero exit codes do not abort the build (used for 'make distclean') */
+  ignoreExitCode?: boolean;
+}
