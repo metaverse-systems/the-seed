@@ -1,6 +1,7 @@
 import Config from "./Config";
 import { execSync } from "child_process";
 import { targets } from "./Build";
+import { BuildStep } from "./types";
 
 const execOptions = { stdio: "pipe" as const, shell: "/bin/bash", env: { ...process.env } };
 const libEcsRepo = "https://github.com/metaverse-systems/libecs-cpp.git";
@@ -70,4 +71,37 @@ export const installLib = (config: Config, repo: string, installDir: string, tar
     return false;
   }
   return true;
+};
+
+/**
+ * Returns an ordered array of BuildStep objects for installing missing libraries.
+ * Checks which libraries are missing and generates clone + build steps for each.
+ * Order: libecs-cpp first, then libthe-seed (compile-time dependency).
+ */
+export const getInstallSteps = (config: Config, target: string): BuildStep[] => {
+  const targetDir = targets[target];
+  const prefix = config.config.prefix + "/" + targetDir;
+  const steps: BuildStep[] = [];
+
+  const libraries: { name: string; repo: string; installDir: string; pkgConfigName: string }[] = [
+    { name: "libecs-cpp", repo: libEcsRepo, installDir: "libecs-cpp", pkgConfigName: "ecs-cpp" },
+    { name: "libthe-seed", repo: libTheSeedRepo, installDir: "libthe-seed", pkgConfigName: "the-seed" },
+  ];
+
+  for (const lib of libraries) {
+    // Skip if already installed
+    if (checkLib(config, lib.pkgConfigName, target)) {
+      continue;
+    }
+
+    const hostFlag = target !== "native" ? " --host=" + targetDir : "";
+
+    steps.push({ label: `clone ${lib.name}`, command: `git clone ${lib.repo}` });
+    steps.push({ label: `${lib.name} autogen`, command: `cd ${lib.installDir} && ./autogen.sh` });
+    steps.push({ label: `${lib.name} configure`, command: `cd ${lib.installDir} && ./configure --prefix=${prefix}${hostFlag}` });
+    steps.push({ label: `${lib.name} compile`, command: `cd ${lib.installDir} && make` });
+    steps.push({ label: `${lib.name} install`, command: `cd ${lib.installDir} && make install` });
+  }
+
+  return steps;
 };
