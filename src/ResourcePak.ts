@@ -68,8 +68,8 @@ class ResourcePak {
     );
   };
 
-  addResource = (name: string, filename: string) => {
-    this.packageDir = process.cwd();
+  addResource = (name: string, filename: string, packageDir?: string) => {
+    this.packageDir = packageDir ?? process.cwd();
     this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json").toString());
     if (!this.package) {
       return;
@@ -83,7 +83,8 @@ class ResourcePak {
       this.package.resources = [];
     }
 
-    const stats = fs.statSync(filename);
+    const fullPath = this.packageDir + "/" + filename;
+    const stats = fs.statSync(fullPath);
     this.package.resources.push({
       name: name,
       filename: filename,
@@ -92,8 +93,8 @@ class ResourcePak {
     this.save();
   };
 
-  build = () => {
-    this.packageDir = process.cwd();
+  build = (packageDir?: string) => {
+    this.packageDir = packageDir ?? process.cwd();
     this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json").toString());
     if (!this.package) {
       return;
@@ -121,7 +122,7 @@ class ResourcePak {
     const [, name] = this.package.name.split("/");
     fs.writeFileSync(this.packageDir + "/" + name + ".pak", JSON.stringify(header) + "\n");
     this.package.resources.forEach((r) => {
-      fs.appendFileSync(name + ".pak", fs.readFileSync(r.filename));
+      fs.appendFileSync(this.packageDir + "/" + name + ".pak", fs.readFileSync(this.packageDir + "/" + r.filename));
     });
   };
 }
