@@ -147,20 +147,33 @@ class Signing {
   }
 
   /**
-   * Read config.json to get subject fields for certificate.
+   * Get available scope names from config.
    */
-  _getSubjectFromConfig(): CertSubject {
+  getScopes(): string[] {
+    const config = new Config(this.configDir);
+    return Object.keys(config.config.scopes || {});
+  }
+
+  /**
+   * Read config.json to get subject fields for certificate from a scope.
+   */
+  _getSubjectFromConfig(scope: string): CertSubject {
     const config = new Config(this.configDir);
     const configData = config.config;
+    const scopeData = configData.scopes?.[scope];
 
-    if (!configData.name) {
-      throw new Error("Required config field 'name' is missing. Run 'the-seed config edit' to set it.");
+    if (!scopeData) {
+      throw new Error(`Scope '${scope}' not found in config. Run 'the-seed config edit' to set it up.`);
+    }
+
+    if (!scopeData.author?.name) {
+      throw new Error(`Required author name is missing for scope '${scope}'. Run 'the-seed config edit' to set it.`);
     }
 
     return {
-      commonName: configData.name,
-      email: configData.email || undefined,
-      organization: configData.org || undefined,
+      commonName: scopeData.author.name,
+      email: scopeData.author.email || undefined,
+      organization: scope,
     };
   }
 
@@ -170,7 +183,10 @@ class Signing {
    * Stores cert.pem and key.pem in configDir/signing/.
    */
   async createCert(options?: CertOptions): Promise<CertInfo> {
-    const subject = this._getSubjectFromConfig();
+    if (!options?.scope) {
+      throw new Error("A scope must be specified for certificate creation.");
+    }
+    const subject = this._getSubjectFromConfig(options.scope);
     const validityDays = options?.validityDays || 365;
 
     // Set the crypto provider for @peculiar/x509 to use Node.js webcrypto

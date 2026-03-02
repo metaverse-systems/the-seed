@@ -15,9 +15,6 @@ export interface ScopesType {
 export interface ConfigType {
   prefix: string;
   scopes: ScopesType;
-  name?: string;
-  email?: string;
-  org?: string;
 }
 
 export interface ScriptArgsType {
@@ -82,6 +79,7 @@ export interface CertSubject {
 
 export interface CertOptions {
   validityDays?: number; // default: 365
+  scope?: string;        // scope name to use for subject fields
 }
 
 export interface CertInfo {

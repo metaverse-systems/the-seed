@@ -1,5 +1,6 @@
 import inquirer from "inquirer";
 import Signing from "../Signing";
+import Config from "../Config";
 import { ScriptArgsType } from "../types";
 
 const SigningCLI = async (scriptConfig: ScriptArgsType) => {
@@ -32,6 +33,29 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
       const force = hasFlag("--force");
 
       try {
+        // Prompt for scope selection
+        const scopes = signing.getScopes();
+        if (scopes.length === 0) {
+          console.error("Error: No scopes configured. Run 'the-seed config add-scope' to add one.");
+          process.exit(3);
+          return;
+        }
+
+        let scope: string;
+        if (scopes.length === 1) {
+          scope = scopes[0];
+        } else {
+          const answer = await inquirer.prompt([
+            {
+              type: "list",
+              name: "scope",
+              message: "Which scope should be used for the certificate?",
+              choices: scopes,
+            },
+          ]);
+          scope = answer.scope;
+        }
+
         // Check if cert already exists
         if (signing.hasCert() && !force) {
           const { overwrite } = await inquirer.prompt([
@@ -49,7 +73,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           }
         }
 
-        const certInfo = await signing.createCert({ validityDays });
+        const certInfo = await signing.createCert({ validityDays, scope });
         const subjectStr = signing._formatSubject(certInfo.subject);
         const validFrom = certInfo.notBefore.toISOString().split("T")[0];
         const validTo = certInfo.notAfter.toISOString().split("T")[0];
@@ -61,13 +85,8 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
         console.log(`  Stored:       ${certInfo.certPath}`);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("name")) {
-          console.error("Error: " + message);
-          process.exit(3);
-        } else {
-          console.error("Error: " + message);
-          process.exit(2);
-        }
+        console.error("Error: " + message);
+        process.exit(2);
       }
       break;
     }

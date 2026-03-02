@@ -18,11 +18,22 @@ function createTempDir(): string {
 }
 
 /**
- * Write a minimal config.json with name/email/org.
+ * Write a minimal config.json with a scope containing author info.
  */
-function writeConfig(configDir: string, data: { prefix?: string; name?: string; email?: string; org?: string }) {
+function writeConfig(configDir: string, data: { prefix?: string; scope?: string; name?: string; email?: string }) {
   const configPath = path.join(configDir, "config.json");
-  const full = { prefix: data.prefix || "", scopes: {}, ...data };
+  const scopeName = data.scope || "@test";
+  const scopes: Record<string, { author: { name: string; email: string; url: string } }> = {};
+  if (data.name) {
+    scopes[scopeName] = {
+      author: {
+        name: data.name,
+        email: data.email || "",
+        url: "",
+      },
+    };
+  }
+  const full = { prefix: data.prefix || "", scopes };
   fs.writeFileSync(configPath, JSON.stringify(full, null, 2));
 }
 
@@ -50,7 +61,7 @@ describe("Signing", () => {
 
   beforeEach(() => {
     configDir = createTempDir();
-    writeConfig(configDir, { name: "Test User", email: "test@example.com", org: "TestOrg" });
+    writeConfig(configDir, { name: "Test User", email: "test@example.com" });
     signing = new Signing(configDir);
   });
 
@@ -66,7 +77,7 @@ describe("Signing", () => {
     });
 
     it("returns true after certificate is created", async () => {
-      await signing.createCert();
+      await signing.createCert({ scope: "@test" });
       expect(signing.hasCert()).toBe(true);
     });
   });
@@ -79,14 +90,14 @@ describe("Signing", () => {
     });
 
     it("parses all fields from a created cert", async () => {
-      await signing.createCert({ validityDays: 90 });
+      await signing.createCert({ validityDays: 90, scope: "@test" });
       const info = signing.getCertInfo();
       expect(info).not.toBeNull();
       const certInfo = info as CertInfo;
 
       expect(certInfo.subject.commonName).toBe("Test User");
       expect(certInfo.subject.email).toBe("test@example.com");
-      expect(certInfo.subject.organization).toBe("TestOrg");
+      expect(certInfo.subject.organization).toBe("@test");
       expect(certInfo.issuer).toBe("self-signed");
       expect(certInfo.fingerprint).toMatch(/^SHA256:[0-9a-f]+$/);
       expect(certInfo.keyType).toBe("ECDSA P-256");
@@ -123,7 +134,7 @@ describe("Signing", () => {
 
   describe("createCert", () => {
     it("creates cert.pem and key.pem", async () => {
-      const info = await signing.createCert();
+      const info = await signing.createCert({ scope: "@test" });
 
       expect(fs.existsSync(signing.certPath)).toBe(true);
       expect(fs.existsSync(signing.keyPath)).toBe(true);
@@ -138,38 +149,48 @@ describe("Signing", () => {
       expect(keyPem).toContain("PRIVATE KEY");
     });
 
-    it("populates subject from config", async () => {
-      const info = await signing.createCert();
+    it("populates subject from scope config", async () => {
+      const info = await signing.createCert({ scope: "@test" });
       expect(info.subject.commonName).toBe("Test User");
       expect(info.subject.email).toBe("test@example.com");
-      expect(info.subject.organization).toBe("TestOrg");
+      expect(info.subject.organization).toBe("@test");
     });
 
     it("sets key.pem permissions to 0600 on non-Windows", async () => {
       if (process.platform === "win32") return; // skip on Windows
 
-      await signing.createCert();
+      await signing.createCert({ scope: "@test" });
       const stat = fs.statSync(signing.keyPath);
       const mode = stat.mode & 0o777;
       expect(mode).toBe(0o600);
     });
 
     it("uses custom validity days", async () => {
-      const info = await signing.createCert({ validityDays: 30 });
+      const info = await signing.createCert({ validityDays: 30, scope: "@test" });
       const diffMs = info.notAfter.getTime() - info.notBefore.getTime();
       const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
       expect(diffDays).toBeGreaterThanOrEqual(29);
       expect(diffDays).toBeLessThanOrEqual(31);
     });
 
-    it("throws when config name is missing", async () => {
-      writeConfig(configDir, { name: undefined as unknown as string });
+    it("throws when scope is not specified", async () => {
+      await expect(signing.createCert()).rejects.toThrow("scope");
+    });
+
+    it("throws when scope is not found in config", async () => {
+      await expect(signing.createCert({ scope: "@nonexistent" })).rejects.toThrow("not found");
+    });
+
+    it("throws when author name is missing in scope", async () => {
+      const configPath = path.join(configDir, "config.json");
+      const config = { prefix: "", scopes: { "@bad": { author: { name: "", email: "", url: "" } } } };
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
       const s = new Signing(configDir);
-      await expect(s.createCert()).rejects.toThrow("name");
+      await expect(s.createCert({ scope: "@bad" })).rejects.toThrow("author name");
     });
 
     it("returns correct CertInfo fields", async () => {
-      const info = await signing.createCert();
+      const info = await signing.createCert({ scope: "@test" });
       expect(info.fingerprint).toMatch(/^SHA256:/);
       expect(info.keyType).toBe("ECDSA P-256");
       expect(info.isExpired).toBe(false);
@@ -181,7 +202,7 @@ describe("Signing", () => {
 
   describe("signFile", () => {
     beforeEach(async () => {
-      await signing.createCert();
+      await signing.createCert({ scope: "@test" });
     });
 
     it("produces a valid .sig file for a binary file", async () => {
@@ -226,7 +247,7 @@ describe("Signing", () => {
     let testDir: string;
 
     beforeEach(async () => {
-      await signing.createCert();
+      await signing.createCert({ scope: "@test" });
       testDir = path.join(configDir, "build");
       fs.mkdirSync(testDir, { recursive: true });
     });
@@ -278,7 +299,7 @@ describe("Signing", () => {
     let binPath: string;
 
     beforeEach(async () => {
-      await signing.createCert();
+      await signing.createCert({ scope: "@test" });
       binPath = path.join(configDir, "test.bin");
       writeBinaryFile(binPath);
     });
@@ -318,7 +339,7 @@ describe("Signing", () => {
     let testDir: string;
 
     beforeEach(async () => {
-      await signing.createCert();
+      await signing.createCert({ scope: "@test" });
       testDir = path.join(configDir, "build");
       fs.mkdirSync(testDir, { recursive: true });
       writeBinaryFile(path.join(testDir, "a.bin"));
@@ -354,7 +375,7 @@ describe("Signing", () => {
 
   describe("exportCert", () => {
     it("exports the public certificate without private key", async () => {
-      await signing.createCert();
+      await signing.createCert({ scope: "@test" });
       const outPath = path.join(configDir, "pub.pem");
       await signing.exportCert(outPath);
 
@@ -377,9 +398,9 @@ describe("Signing", () => {
     beforeEach(async () => {
       // Create a cert in a separate location to import from
       externalDir = createTempDir();
-      writeConfig(externalDir, { name: "External User", email: "ext@example.com", org: "ExtOrg" });
+      writeConfig(externalDir, { name: "External User", email: "ext@example.com", scope: "@external" });
       const extSigning = new Signing(externalDir);
-      await extSigning.createCert();
+      await extSigning.createCert({ scope: "@external" });
     });
 
     afterEach(() => {
