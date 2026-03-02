@@ -1,7 +1,5 @@
-import fs from "fs";
-import inquirer from "inquirer";
 import Config from "../Config";
-import Build from "../Build";
+import Build, { autoSignIfCertExists } from "../Build";
 import { ScriptArgsType } from "../types";
 import { buildRecursive } from "../RecursiveBuild";
 
@@ -44,11 +42,13 @@ const BuildCLI = async (scriptConfig: ScriptArgsType) => {
         build.reconfigure(command);
         build.compile();
         build.install();
+        await autoSignIfCertExists(scriptConfig.configDir);
       }
       break;
     default:
       build.compile();
       build.install();
+      await autoSignIfCertExists(scriptConfig.configDir);
       break;
   }
 };

@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import Config from "../src/Config";
-import Build, { targets } from "../src/Build";
+import Build, { targets, extractScope } from "../src/Build";
 import { BuildStep } from "../src/types";
 
 jest.mock("child_process", () => ({
@@ -219,5 +219,46 @@ describe("test Build", () => {
       expect(steps).toHaveLength(2);
       expect(steps.map(s => s.label)).toEqual(["compile", "install"]);
     });
+  });
+
+  describe("getInstallPrefix", () => {
+    it("returns correct prefix for native target", () => {
+      build.target = "native";
+      const prefix = build.getInstallPrefix();
+      expect(prefix).toBe(config.config.prefix + "/x86_64-linux-gnu");
+    });
+
+    it("returns correct prefix for windows target", () => {
+      const prefix = build.getInstallPrefix("windows");
+      expect(prefix).toBe(config.config.prefix + "/x86_64-w64-mingw32");
+    });
+
+    it("uses explicit target over instance target", () => {
+      build.target = "native";
+      const prefix = build.getInstallPrefix("windows");
+      expect(prefix).toBe(config.config.prefix + "/x86_64-w64-mingw32");
+    });
+  });
+});
+
+describe("extractScope", () => {
+  it("extracts scope from a scoped package name", () => {
+    expect(extractScope("@metaverse-systems/libecs-cpp")).toBe("@metaverse-systems");
+  });
+
+  it("extracts scope from another scoped package name", () => {
+    expect(extractScope("@imperian-systems/my-lib")).toBe("@imperian-systems");
+  });
+
+  it("returns undefined for an unscoped package name", () => {
+    expect(extractScope("express")).toBeUndefined();
+  });
+
+  it("returns undefined for an empty string", () => {
+    expect(extractScope("")).toBeUndefined();
+  });
+
+  it("returns undefined for @ without a slash", () => {
+    expect(extractScope("@noslash")).toBeUndefined();
   });
 });

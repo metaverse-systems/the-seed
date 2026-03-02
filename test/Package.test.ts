@@ -567,6 +567,83 @@ describe("test Package", () => {
     });
   });
 
+  // .sig file copying
+  describe("run - copies .sig files when they exist", () => {
+    it("copies .sig files alongside their binaries", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      // Create a .sig file next to the binary
+      fs.writeFileSync(binary + ".sig", "signature-data");
+      const outputDir = path.join(tempDir, "my-release");
+
+      mockedListDependencies.mockReturnValue({
+        dependencies: {},
+        errors: {}
+      });
+
+      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      const logCalls = consoleSpy.mock.calls.map(c => c[0]);
+      consoleSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "myapp.sig"))).toBe(true);
+      expect(fs.readFileSync(path.join(outputDir, "myapp.sig"), "utf-8")).toBe("signature-data");
+      expect(logCalls.some(msg => msg.includes("Copying myapp.sig..."))).toBe(true);
+      expect(logCalls.some(msg => msg.includes("signature"))).toBe(true);
+    });
+
+    it("skips .sig files when they do not exist", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      installBuildOutput(projectDir, "myapp", "binary-content");
+      const outputDir = path.join(tempDir, "my-release");
+
+      mockedListDependencies.mockReturnValue({
+        dependencies: {},
+        errors: {}
+      });
+
+      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      consoleSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "myapp.sig"))).toBe(false);
+      expect(fs.readdirSync(outputDir).length).toBe(1);
+    });
+
+    it("copies .sig files for resolved dependencies too", () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      const libFoo = installBuildOutput(projectDir, "libfoo.so", "libfoo-content");
+      // Only the library has a .sig file
+      fs.writeFileSync(libFoo + ".sig", "libfoo-sig");
+      const outputDir = path.join(tempDir, "my-release");
+
+      mockedListDependencies.mockReturnValue({
+        dependencies: {
+          [libFoo]: [binary]
+        },
+        errors: {}
+      });
+
+      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      consoleSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "myapp.sig"))).toBe(false);
+      expect(fs.existsSync(path.join(outputDir, "libfoo.so"))).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "libfoo.so.sig"))).toBe(true);
+    });
+  });
+
   // T016: help subcommand prints usage information (US2)
   describe("PackageCLI - help subcommand", () => {
     it("prints usage information when help subcommand is given", () => {

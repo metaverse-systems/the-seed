@@ -73,10 +73,15 @@ describe("Signing", () => {
 
   describe("hasCert", () => {
     it("returns false when no certificate exists", () => {
-      expect(signing.hasCert()).toBe(false);
+      expect(signing.hasCert("@test")).toBe(false);
     });
 
     it("returns true after certificate is created", async () => {
+      await signing.createCert({ scope: "@test" });
+      expect(signing.hasCert("@test")).toBe(true);
+    });
+
+    it("returns true (any scope) after certificate is created", async () => {
       await signing.createCert({ scope: "@test" });
       expect(signing.hasCert()).toBe(true);
     });
@@ -86,12 +91,12 @@ describe("Signing", () => {
 
   describe("getCertInfo", () => {
     it("returns null when no certificate exists", () => {
-      expect(signing.getCertInfo()).toBeNull();
+      expect(signing.getCertInfo("@test")).toBeNull();
     });
 
     it("parses all fields from a created cert", async () => {
       await signing.createCert({ validityDays: 90, scope: "@test" });
-      const info = signing.getCertInfo();
+      const info = signing.getCertInfo("@test");
       expect(info).not.toBeNull();
       const certInfo = info as CertInfo;
 
@@ -104,7 +109,7 @@ describe("Signing", () => {
       expect(certInfo.notBefore).toBeInstanceOf(Date);
       expect(certInfo.notAfter).toBeInstanceOf(Date);
       expect(certInfo.isExpired).toBe(false);
-      expect(certInfo.certPath).toBe(signing.certPath);
+      expect(certInfo.certPath).toBe(signing.scopeCertPath("@test"));
 
       // Validity should be ~90 days
       const diffMs = certInfo.notAfter.getTime() - certInfo.notBefore.getTime();
@@ -136,16 +141,16 @@ describe("Signing", () => {
     it("creates cert.pem and key.pem", async () => {
       const info = await signing.createCert({ scope: "@test" });
 
-      expect(fs.existsSync(signing.certPath)).toBe(true);
-      expect(fs.existsSync(signing.keyPath)).toBe(true);
+      expect(fs.existsSync(signing.scopeCertPath("@test"))).toBe(true);
+      expect(fs.existsSync(signing.scopeKeyPath("@test"))).toBe(true);
 
       // cert.pem should contain PEM certificate
-      const certPem = fs.readFileSync(signing.certPath, "utf-8");
+      const certPem = fs.readFileSync(signing.scopeCertPath("@test"), "utf-8");
       expect(certPem).toContain("-----BEGIN CERTIFICATE-----");
       expect(certPem).toContain("-----END CERTIFICATE-----");
 
       // key.pem should contain PEM private key
-      const keyPem = fs.readFileSync(signing.keyPath, "utf-8");
+      const keyPem = fs.readFileSync(signing.scopeKeyPath("@test"), "utf-8");
       expect(keyPem).toContain("PRIVATE KEY");
     });
 
@@ -160,7 +165,7 @@ describe("Signing", () => {
       if (process.platform === "win32") return; // skip on Windows
 
       await signing.createCert({ scope: "@test" });
-      const stat = fs.statSync(signing.keyPath);
+      const stat = fs.statSync(signing.scopeKeyPath("@test"));
       const mode = stat.mode & 0o777;
       expect(mode).toBe(0o600);
     });
@@ -194,7 +199,7 @@ describe("Signing", () => {
       expect(info.fingerprint).toMatch(/^SHA256:/);
       expect(info.keyType).toBe("ECDSA P-256");
       expect(info.isExpired).toBe(false);
-      expect(info.certPath).toBe(signing.certPath);
+      expect(info.certPath).toBe(signing.scopeCertPath("@test"));
     });
   });
 
@@ -209,7 +214,7 @@ describe("Signing", () => {
       const binPath = path.join(configDir, "test.bin");
       writeBinaryFile(binPath);
 
-      const result = await signing.signFile(binPath);
+      const result = await signing.signFile(binPath, { scope: "@test" });
       expect(result.filePath).toBe(binPath);
       expect(result.signaturePath).toBe(binPath + ".sig");
       expect(result.fingerprint).toMatch(/^SHA256:/);
@@ -227,7 +232,7 @@ describe("Signing", () => {
       const txtPath = path.join(configDir, "readme.txt");
       writeTextFile(txtPath, "Hello world\n");
 
-      await expect(signing.signFile(txtPath)).rejects.toThrow();
+      await expect(signing.signFile(txtPath, { scope: "@test" })).rejects.toThrow();
     });
 
     it("throws when no certificate exists", async () => {
@@ -237,7 +242,7 @@ describe("Signing", () => {
       const binPath = path.join(configDir, "test.bin");
       writeBinaryFile(binPath);
 
-      await expect(s.signFile(binPath)).rejects.toThrow("No signing certificate");
+      await expect(s.signFile(binPath, { scope: "@test" })).rejects.toThrow("No signing certificate");
     });
   });
 
@@ -257,7 +262,7 @@ describe("Signing", () => {
       writeBinaryFile(path.join(testDir, "engine.dll"));
       writeTextFile(path.join(testDir, "README.md"), "# Build\n");
 
-      const result = await signing.signDirectory(testDir);
+      const result = await signing.signDirectory(testDir, { scope: "@test" });
 
       // manifest should exist
       expect(fs.existsSync(result.manifestPath)).toBe(true);
@@ -279,7 +284,7 @@ describe("Signing", () => {
       writeTextFile(path.join(testDir, "config.txt"), "key=value\n");
       writeTextFile(path.join(testDir, "notes.md"), "# Notes\n");
 
-      const result = await signing.signDirectory(testDir);
+      const result = await signing.signDirectory(testDir, { scope: "@test" });
 
       expect(result.signed.length).toBe(1);
       expect(result.skipped.length).toBe(2);
@@ -289,7 +294,7 @@ describe("Signing", () => {
       writeTextFile(path.join(testDir, "readme.md"), "text only\n");
       writeTextFile(path.join(testDir, "config.yaml"), "key: value\n");
 
-      await expect(signing.signDirectory(testDir)).rejects.toThrow("No binary files");
+      await expect(signing.signDirectory(testDir, { scope: "@test" })).rejects.toThrow("No binary files");
     });
   });
 
@@ -305,7 +310,7 @@ describe("Signing", () => {
     });
 
     it("returns VALID for an unmodified signed file", async () => {
-      await signing.signFile(binPath);
+      await signing.signFile(binPath, { scope: "@test" });
       const result = await signing.verifyFile(binPath);
 
       expect(result.status).toBe("VALID");
@@ -316,7 +321,7 @@ describe("Signing", () => {
     });
 
     it("returns INVALID when file content is modified", async () => {
-      await signing.signFile(binPath);
+      await signing.signFile(binPath, { scope: "@test" });
       // Tamper with the file
       fs.appendFileSync(binPath, Buffer.from([0xff]));
       const result = await signing.verifyFile(binPath);
@@ -347,7 +352,7 @@ describe("Signing", () => {
     });
 
     it("returns aggregated results for signed directory", async () => {
-      await signing.signDirectory(testDir);
+      await signing.signDirectory(testDir, { scope: "@test" });
       const result = await signing.verifyDirectory(testDir);
 
       expect(result.overallPass).toBe(true);
@@ -361,7 +366,7 @@ describe("Signing", () => {
     });
 
     it("detects tampered files in directory", async () => {
-      await signing.signDirectory(testDir);
+      await signing.signDirectory(testDir, { scope: "@test" });
       // Tamper with one file
       fs.appendFileSync(path.join(testDir, "a.bin"), Buffer.from([0x00]));
 
@@ -377,7 +382,7 @@ describe("Signing", () => {
     it("exports the public certificate without private key", async () => {
       await signing.createCert({ scope: "@test" });
       const outPath = path.join(configDir, "pub.pem");
-      await signing.exportCert(outPath);
+      await signing.exportCert(outPath, "@test");
 
       const content = fs.readFileSync(outPath, "utf-8");
       expect(content).toContain("-----BEGIN CERTIFICATE-----");
@@ -386,7 +391,7 @@ describe("Signing", () => {
 
     it("throws when no certificate exists", async () => {
       const outPath = path.join(configDir, "pub.pem");
-      await expect(signing.exportCert(outPath)).rejects.toThrow("No signing certificate");
+      await expect(signing.exportCert(outPath, "@test")).rejects.toThrow("No signing certificate");
     });
   });
 
@@ -408,14 +413,14 @@ describe("Signing", () => {
     });
 
     it("imports certificate and key pair", async () => {
-      const extCertPath = path.join(externalDir, "signing", "cert.pem");
-      const extKeyPath = path.join(externalDir, "signing", "key.pem");
+      const extCertPath = path.join(externalDir, "signing", "@external", "cert.pem");
+      const extKeyPath = path.join(externalDir, "signing", "@external", "key.pem");
 
-      const info = await signing.importCert(extCertPath, extKeyPath);
+      const info = await signing.importCert(extCertPath, extKeyPath, "@test");
 
       expect(info.subject.commonName).toBe("External User");
       expect(info.fingerprint).toMatch(/^SHA256:/);
-      expect(signing.hasCert()).toBe(true);
+      expect(signing.hasCert("@test")).toBe(true);
     });
 
     it("validates ECDSA P-256 key type", async () => {
@@ -433,12 +438,12 @@ describe("Signing", () => {
       fs.writeFileSync(rsaCertPath, certPem);
       fs.writeFileSync(rsaKeyPath, keyPem);
 
-      await expect(signing.importCert(rsaCertPath, rsaKeyPath)).rejects.toThrow("Unsupported");
+      await expect(signing.importCert(rsaCertPath, rsaKeyPath, "@test")).rejects.toThrow("Unsupported");
     });
 
     it("rejects mismatched certificate and key", async () => {
       // Create two different EC key pairs
-      const extCertPath = path.join(externalDir, "signing", "cert.pem");
+      const extCertPath = path.join(externalDir, "signing", "@external", "cert.pem");
 
       // Generate a different EC key
       const { privateKey: otherKey } = crypto.generateKeyPairSync("ec", {
@@ -448,7 +453,7 @@ describe("Signing", () => {
       const mismatchKeyPath = path.join(externalDir, "other-key.pem");
       fs.writeFileSync(mismatchKeyPath, otherKeyPem);
 
-      await expect(signing.importCert(extCertPath, mismatchKeyPath)).rejects.toThrow("do not match");
+      await expect(signing.importCert(extCertPath, mismatchKeyPath, "@test")).rejects.toThrow("do not match");
     });
   });
 

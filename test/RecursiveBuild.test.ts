@@ -13,12 +13,13 @@ jest.mock("child_process", () => ({
 jest.mock("../src/Config", () => {
   return jest.fn().mockImplementation(() => ({
     config: { prefix: "/fake/prefix" },
+    configDir: "/fake/config",
     loadConfig: jest.fn(),
   }));
 });
 
 jest.mock("../src/Build", () => {
-  return jest.fn().mockImplementation(() => ({
+  const MockBuild = jest.fn().mockImplementation(() => ({
     getSteps: jest.fn((target: string, fullReconfigure: boolean) => {
       const steps = [];
       if (fullReconfigure) {
@@ -35,6 +36,11 @@ jest.mock("../src/Build", () => {
       return steps;
     }),
   }));
+  return {
+    __esModule: true,
+    default: MockBuild,
+    autoSignIfCertExists: jest.fn().mockResolvedValue(undefined),
+  };
 });
 
 import { execSync } from "child_process";

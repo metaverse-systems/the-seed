@@ -1,6 +1,6 @@
 import { execSync } from "child_process";
 import Config from "./Config";
-import Build from "./Build";
+import Build, { autoSignIfCertExists } from "./Build";
 import {
   BuildStep,
   BuildableProject,
@@ -130,7 +130,11 @@ export async function buildRecursive(
       return result;
     }
 
-    // Project built successfully
+    // Project built successfully — auto-sign if cert exists
+    const configInstance = new Config();
+    configInstance.loadConfig();
+    await autoSignIfCertExists(configInstance.configDir, project.path);
+
     result.completed.push(project);
     callbacks?.onProjectComplete?.(project, i, total);
     console.log("");

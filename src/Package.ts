@@ -271,15 +271,29 @@ class Package {
     // Create output directory
     fs.mkdirSync(outputDir, { recursive: true });
 
-    // Copy files
+    // Copy files (and their .sig signature files if they exist)
+    let sigCount = 0;
     for (const filePath of filesToCopy) {
       const destPath = path.join(outputDir, path.basename(filePath));
       console.log("Copying " + path.basename(filePath) + "...");
       fs.copyFileSync(filePath, destPath);
+
+      // Copy accompanying .sig file if it exists
+      const sigPath = filePath + ".sig";
+      if (fs.existsSync(sigPath)) {
+        const sigDestPath = path.join(outputDir, path.basename(sigPath));
+        console.log("Copying " + path.basename(sigPath) + "...");
+        fs.copyFileSync(sigPath, sigDestPath);
+        sigCount++;
+      }
     }
 
     // Report summary
-    console.log("Packaged " + filesToCopy.size + " files into " + outputDir + "/");
+    let summary = "Packaged " + filesToCopy.size + " files into " + outputDir + "/";
+    if (sigCount > 0) {
+      summary += " (" + sigCount + " signature" + (sigCount > 1 ? "s" : "") + " included)";
+    }
+    console.log(summary);
     return true;
   };
 }

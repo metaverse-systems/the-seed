@@ -24,14 +24,24 @@ import {
 class Signing {
   configDir: string;
   signingDir: string;
-  certPath: string;
-  keyPath: string;
 
   constructor(configDir?: string) {
     this.configDir = configDir || path.join(os.homedir(), "the-seed");
     this.signingDir = path.join(this.configDir, "signing");
-    this.certPath = path.join(this.signingDir, "cert.pem");
-    this.keyPath = path.join(this.signingDir, "key.pem");
+  }
+
+  /**
+   * Get the cert.pem path for a given scope.
+   */
+  scopeCertPath(scope: string): string {
+    return path.join(this.signingDir, scope, "cert.pem");
+  }
+
+  /**
+   * Get the key.pem path for a given scope.
+   */
+  scopeKeyPath(scope: string): string {
+    return path.join(this.signingDir, scope, "key.pem");
   }
 
   /**
@@ -53,28 +63,41 @@ class Signing {
   }
 
   /**
-   * Check if a signing certificate exists in the config directory.
+   * Check if a signing certificate exists for a given scope.
+   * Without a scope, checks if any scope has a cert.
    */
-  hasCert(): boolean {
-    return fs.existsSync(this.certPath);
+  hasCert(scope?: string): boolean {
+    if (scope) {
+      return fs.existsSync(this.scopeCertPath(scope));
+    }
+    // Check for any scope with a cert
+    if (!fs.existsSync(this.signingDir)) return false;
+    const entries = fs.readdirSync(this.signingDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isDirectory() && fs.existsSync(path.join(this.signingDir, entry.name, "cert.pem"))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
-   * Get certificate information. Returns null if no cert exists.
+   * Get certificate information for a scope. Returns null if no cert exists.
    */
-  getCertInfo(): CertInfo | null {
-    if (!this.hasCert()) {
+  getCertInfo(scope: string): CertInfo | null {
+    const certFilePath = this.scopeCertPath(scope);
+    if (!fs.existsSync(certFilePath)) {
       return null;
     }
 
-    const certPem = fs.readFileSync(this.certPath, "utf-8");
-    const x509 = new crypto.X509Certificate(certPem);
+    const certPem = fs.readFileSync(certFilePath, "utf-8");
+    const x509Cert = new crypto.X509Certificate(certPem);
 
-    const subject = this._parseSubject(x509.subject);
-    const issuer = this._parseIssuerString(x509.issuer, x509.subject);
-    const fingerprint = "SHA256:" + x509.fingerprint256.replace(/:/g, "").toLowerCase();
-    const notBefore = new Date(x509.validFrom);
-    const notAfter = new Date(x509.validTo);
+    const subject = this._parseSubject(x509Cert.subject);
+    const issuer = this._parseIssuerString(x509Cert.issuer, x509Cert.subject);
+    const fingerprint = "SHA256:" + x509Cert.fingerprint256.replace(/:/g, "").toLowerCase();
+    const notBefore = new Date(x509Cert.validFrom);
+    const notAfter = new Date(x509Cert.validTo);
 
     return {
       subject,
@@ -84,7 +107,7 @@ class Signing {
       notBefore,
       notAfter,
       isExpired: new Date() > notAfter,
-      certPath: this.certPath,
+      certPath: certFilePath,
     };
   }
 
@@ -186,7 +209,8 @@ class Signing {
     if (!options?.scope) {
       throw new Error("A scope must be specified for certificate creation.");
     }
-    const subject = this._getSubjectFromConfig(options.scope);
+    const scope = options.scope;
+    const subject = this._getSubjectFromConfig(scope);
     const validityDays = options?.validityDays || 365;
 
     // Set the crypto provider for @peculiar/x509 to use Node.js webcrypto
@@ -238,27 +262,37 @@ class Signing {
     const exportedKey = await webcrypto.subtle.exportKey("pkcs8", keys.privateKey);
     const keyPem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(exportedKey).toString("base64").match(/.{1,64}/g)!.join("\n")}\n-----END PRIVATE KEY-----\n`;
 
-    // Ensure signing directory exists
-    if (!fs.existsSync(this.signingDir)) {
-      fs.mkdirSync(this.signingDir, { recursive: true });
+    // Ensure scope signing directory exists
+    const scopeDir = path.join(this.signingDir, scope);
+    if (!fs.existsSync(scopeDir)) {
+      fs.mkdirSync(scopeDir, { recursive: true });
     }
 
     // Write certificate and key files
-    fs.writeFileSync(this.certPath, certPem, { mode: 0o644 });
-    fs.writeFileSync(this.keyPath, keyPem, { mode: 0o600 });
-    this._setOwnerOnly(this.keyPath);
+    const certPath = this.scopeCertPath(scope);
+    const keyPath = this.scopeKeyPath(scope);
+    fs.writeFileSync(certPath, certPem, { mode: 0o644 });
+    fs.writeFileSync(keyPath, keyPem, { mode: 0o600 });
+    this._setOwnerOnly(keyPath);
 
-    return this.getCertInfo()!;
+    return this.getCertInfo(scope)!;
   }
 
   /**
    * Sign a single binary file. Produces <filePath>.sig.
+   * @param scope - The scope whose certificate to use for signing
    * @throws if no certificate, certificate expired (and force=false), or file is not binary
    */
-  async signFile(filePath: string, options?: { force?: boolean }): Promise<SignResult> {
-    const certInfo = this.getCertInfo();
+  async signFile(filePath: string, options?: { force?: boolean; scope?: string }): Promise<SignResult> {
+    if (!options?.scope) {
+      throw new Error("A scope must be specified for signing.");
+    }
+    const scope = options.scope;
+    const certPath = this.scopeCertPath(scope);
+    const keyPath = this.scopeKeyPath(scope);
+    const certInfo = this.getCertInfo(scope);
     if (!certInfo) {
-      throw new Error("No signing certificate found. Run 'the-seed signing create-cert' first.");
+      throw new Error(`No signing certificate found for scope '${scope}'. Run 'the-seed signing create-cert' first.`);
     }
     if (certInfo.isExpired && !options?.force) {
       throw new Error("Signing certificate is expired. Use --force to sign anyway.");
@@ -275,8 +309,8 @@ class Signing {
     }
 
     // Read certificate and private key
-    const certPem = fs.readFileSync(this.certPath, "utf-8");
-    const keyPem = fs.readFileSync(this.keyPath, "utf-8");
+    const certPem = fs.readFileSync(certPath, "utf-8");
+    const keyPem = fs.readFileSync(keyPath, "utf-8");
     const privateKey = crypto.createPrivateKey(keyPem);
 
     // Stream file through crypto.createSign
@@ -305,12 +339,18 @@ class Signing {
 
   /**
    * Sign all binary files in a directory. Produces .sig files and .signatures.json manifest.
+   * @param scope - The scope whose certificate to use for signing
    * @throws if no certificate or certificate expired (and force=false)
    */
-  async signDirectory(dirPath: string, options?: { force?: boolean }): Promise<DirectorySignResult> {
-    const certInfo = this.getCertInfo();
+  async signDirectory(dirPath: string, options?: { force?: boolean; scope?: string }): Promise<DirectorySignResult> {
+    if (!options?.scope) {
+      throw new Error("A scope must be specified for signing.");
+    }
+    const scope = options.scope;
+    const certPath = this.scopeCertPath(scope);
+    const certInfo = this.getCertInfo(scope);
     if (!certInfo) {
-      throw new Error("No signing certificate found. Run 'the-seed signing create-cert' first.");
+      throw new Error(`No signing certificate found for scope '${scope}'. Run 'the-seed signing create-cert' first.`);
     }
     if (certInfo.isExpired && !options?.force) {
       throw new Error("Signing certificate is expired. Use --force to sign anyway.");
@@ -349,7 +389,7 @@ class Signing {
     }
 
     // Generate .signatures.json manifest
-    const certPem = fs.readFileSync(this.certPath, "utf-8");
+    const certPem = fs.readFileSync(certPath, "utf-8");
     const manifestEntries: SigningManifestEntry[] = signed.map((s) => {
       const sigData: SigFileFormat = JSON.parse(fs.readFileSync(s.signaturePath, "utf-8"));
       return {
@@ -380,28 +420,35 @@ class Signing {
 
   /**
    * Export public certificate (without private key) to a file.
-   * @throws if no certificate exists
+   * @throws if no certificate exists for the given scope
    */
-  async exportCert(outputPath: string): Promise<void> {
-    if (!this.hasCert()) {
-      throw new Error("No signing certificate found.");
+  async exportCert(outputPath: string, scope?: string): Promise<void> {
+    if (!scope) {
+      throw new Error("A scope must be specified for certificate export.");
     }
-    const certPem = fs.readFileSync(this.certPath, "utf-8");
+    if (!this.hasCert(scope)) {
+      throw new Error(`No signing certificate found for scope '${scope}'.`);
+    }
+    const certPem = fs.readFileSync(this.scopeCertPath(scope), "utf-8");
     fs.writeFileSync(outputPath, certPem);
   }
 
   /**
-   * Import an existing PEM certificate and private key.
+   * Import an existing PEM certificate and private key for a scope.
    * Validates that key matches certificate and key is ECDSA P-256.
    * @throws if cert/key mismatch or unsupported key type
    */
-  async importCert(certPath: string, keyPath: string): Promise<CertInfo> {
+  async importCert(certInputPath: string, keyInputPath: string, scope?: string): Promise<CertInfo> {
+    if (!scope) {
+      throw new Error("A scope must be specified for certificate import.");
+    }
+
     // Read and parse certificate
-    const certPem = fs.readFileSync(certPath, "utf-8");
+    const certPem = fs.readFileSync(certInputPath, "utf-8");
     const x509Cert = new crypto.X509Certificate(certPem);
 
     // Read and parse private key
-    const keyPem = fs.readFileSync(keyPath, "utf-8");
+    const keyPem = fs.readFileSync(keyInputPath, "utf-8");
     const privateKey = crypto.createPrivateKey(keyPem);
     // x509Cert.publicKey is already a KeyObject of type 'public'
     const publicKey = x509Cert.publicKey;
@@ -427,17 +474,20 @@ class Signing {
       throw new Error("Certificate and key do not match.");
     }
 
-    // Ensure signing directory exists
-    if (!fs.existsSync(this.signingDir)) {
-      fs.mkdirSync(this.signingDir, { recursive: true });
+    // Ensure scope signing directory exists
+    const scopeDir = path.join(this.signingDir, scope);
+    if (!fs.existsSync(scopeDir)) {
+      fs.mkdirSync(scopeDir, { recursive: true });
     }
 
     // Copy certificate and key
-    fs.writeFileSync(this.certPath, certPem, { mode: 0o644 });
-    fs.writeFileSync(this.keyPath, keyPem, { mode: 0o600 });
-    this._setOwnerOnly(this.keyPath);
+    const certPath = this.scopeCertPath(scope);
+    const keyPath = this.scopeKeyPath(scope);
+    fs.writeFileSync(certPath, certPem, { mode: 0o644 });
+    fs.writeFileSync(keyPath, keyPem, { mode: 0o600 });
+    this._setOwnerOnly(keyPath);
 
-    return this.getCertInfo()!;
+    return this.getCertInfo(scope)!;
   }
 
   /**

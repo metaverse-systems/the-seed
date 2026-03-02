@@ -3,6 +3,29 @@ import Signing from "../Signing";
 import Config from "../Config";
 import { ScriptArgsType } from "../types";
 
+/**
+ * Prompt the user to select a scope. If only one scope exists, auto-selects it.
+ * Returns the selected scope name, or null if no scopes are configured.
+ */
+async function promptForScope(signing: Signing): Promise<string | null> {
+  const scopes = signing.getScopes();
+  if (scopes.length === 0) {
+    return null;
+  }
+  if (scopes.length === 1) {
+    return scopes[0];
+  }
+  const answer = await inquirer.prompt([
+    {
+      type: "list",
+      name: "scope",
+      message: "Which scope should be used?",
+      choices: scopes,
+    },
+  ]);
+  return answer.scope;
+}
+
 const SigningCLI = async (scriptConfig: ScriptArgsType) => {
   const command = scriptConfig.args[3];
   const signing = new Signing(scriptConfig.configDir);
@@ -34,30 +57,15 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
 
       try {
         // Prompt for scope selection
-        const scopes = signing.getScopes();
-        if (scopes.length === 0) {
+        const scope = await promptForScope(signing);
+        if (!scope) {
           console.error("Error: No scopes configured. Run 'the-seed config add-scope' to add one.");
           process.exit(3);
           return;
         }
 
-        let scope: string;
-        if (scopes.length === 1) {
-          scope = scopes[0];
-        } else {
-          const answer = await inquirer.prompt([
-            {
-              type: "list",
-              name: "scope",
-              message: "Which scope should be used for the certificate?",
-              choices: scopes,
-            },
-          ]);
-          scope = answer.scope;
-        }
-
-        // Check if cert already exists
-        if (signing.hasCert() && !force) {
+        // Check if cert already exists for this scope
+        if (signing.hasCert(scope) && !force) {
           const { overwrite } = await inquirer.prompt([
             {
               type: "confirm",
@@ -106,8 +114,16 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
         const resolvedCert = pathMod.resolve(certPathArg);
         const resolvedKey = pathMod.resolve(keyPathArg);
 
-        // Check if cert already exists
-        if (signing.hasCert() && !force) {
+        // Prompt for scope selection
+        const scope = await promptForScope(signing);
+        if (!scope) {
+          console.error("Error: No scopes configured. Run 'the-seed config add-scope' to add one.");
+          process.exit(3);
+          return;
+        }
+
+        // Check if cert already exists for this scope
+        if (signing.hasCert(scope) && !force) {
           const { overwrite } = await inquirer.prompt([
             {
               type: "confirm",
@@ -123,7 +139,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           }
         }
 
-        const certInfo = await signing.importCert(resolvedCert, resolvedKey);
+        const certInfo = await signing.importCert(resolvedCert, resolvedKey, scope);
         const subjectStr = signing._formatSubject(certInfo.subject);
         const validFrom = certInfo.notBefore.toISOString().split("T")[0];
         const validTo = certInfo.notAfter.toISOString().split("T")[0];
@@ -164,8 +180,16 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
         const resolvedPath = require("path").resolve(targetPath);
         const stat = fs.statSync(resolvedPath);
 
+        // Prompt for scope selection
+        const scope = await promptForScope(signing);
+        if (!scope) {
+          console.error("Error: No scopes configured. Run 'the-seed config add-scope' to add one.");
+          process.exit(3);
+          return;
+        }
+
         if (stat.isDirectory()) {
-          const result = await signing.signDirectory(targetPath, { force });
+          const result = await signing.signDirectory(targetPath, { force, scope });
           console.log(`Signing directory: ${targetPath}`);
           for (const signed of result.signed) {
             const relFile = require("path").relative(resolvedPath, signed.filePath);
@@ -179,7 +203,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           console.log(`  Manifest: ${require("path").relative(process.cwd(), result.manifestPath)}`);
           console.log(`  Files signed: ${result.signed.length} | Skipped: ${result.skipped.length}`);
         } else {
-          const result = await signing.signFile(targetPath, { force });
+          const result = await signing.signFile(targetPath, { force, scope });
           console.log(`Signed: ${result.filePath}`);
           console.log(`  Signature:   ${result.signaturePath}`);
           console.log(`  Fingerprint: ${result.fingerprint}`);
@@ -285,9 +309,17 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
       break;
     }
     case "cert-info": {
-      const certInfo = signing.getCertInfo();
+      const scope = await promptForScope(signing);
+      if (!scope) {
+        console.log("No scopes configured.");
+        console.log("  Run 'the-seed config add-scope' to add a scope.");
+        process.exit(1);
+        return;
+      }
+
+      const certInfo = signing.getCertInfo(scope);
       if (!certInfo) {
-        console.log("No signing certificate found.");
+        console.log(`No signing certificate found for scope '${scope}'.`);
         console.log("  Run 'the-seed signing create-cert' to generate one.");
         console.log("  Run 'the-seed signing import-cert' to import an existing certificate.");
         process.exit(1);
@@ -319,16 +351,23 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
       }
 
       try {
-        const certInfo = signing.getCertInfo();
+        const scope = await promptForScope(signing);
+        if (!scope) {
+          console.error("Error: No scopes configured. Run 'the-seed config add-scope' to add one.");
+          process.exit(3);
+          return;
+        }
+
+        const certInfo = signing.getCertInfo(scope);
         if (!certInfo) {
-          console.error("Error: No signing certificate found.");
+          console.error(`Error: No signing certificate found for scope '${scope}'.`);
           process.exit(1);
           return;
         }
 
         const pathMod = require("path");
         const resolvedOutput = pathMod.resolve(outputPath);
-        await signing.exportCert(resolvedOutput);
+        await signing.exportCert(resolvedOutput, scope);
 
         console.log(`Certificate exported to: ${resolvedOutput}`);
         console.log(`  Fingerprint: ${certInfo.fingerprint}`);
