@@ -148,3 +148,78 @@ export interface SigningManifestEntry {
   algorithm: 'SHA256';
   signature: string;       // base64-encoded signature
 }
+
+// ── Recursive Build Types ───────────────────────────────────
+
+/**
+ * Classifies a buildable project's role in the build tier ordering.
+ * Numeric values represent tier rank for priority sorting.
+ */
+export enum ProjectType {
+  /** Library with lib_LTLIBRARIES; configure.ac does NOT reference the-seed in PKG_CHECK_MODULES */
+  Component = 0,
+  /** Library with lib_LTLIBRARIES; configure.ac DOES reference the-seed in PKG_CHECK_MODULES */
+  System = 1,
+  /** Executable with bin_PROGRAMS */
+  Program = 2,
+}
+
+/** A discovered project that can be built with the autotools pipeline. */
+export interface BuildableProject {
+  /** Package name from package.json (e.g., "@org/physics-system") */
+  name: string;
+  /** Absolute filesystem path to the project root directory */
+  path: string;
+  /** Tier classification derived from src/Makefile.am + configure.ac */
+  type: ProjectType;
+  /** Package names of buildable dependencies */
+  dependencies: string[];
+}
+
+/** A directed acyclic graph of BuildableProject nodes. */
+export interface DependencyGraph {
+  /** All discovered projects, keyed by absolute path (deduplicates diamond deps) */
+  projects: Map<string, BuildableProject>;
+  /** Adjacency list: project path → paths of its buildable dependencies */
+  edges: Map<string, string[]>;
+}
+
+/** The outcome of a recursive build execution. */
+export interface RecursiveBuildResult {
+  /** true if all projects built successfully */
+  success: boolean;
+  /** Projects that built successfully, in build order */
+  completed: BuildableProject[];
+  /** The project that failed, or null if all succeeded */
+  failed: BuildableProject | null;
+  /** Stderr/stdout from the failed build step, or null */
+  failureOutput: string | null;
+  /** Projects that were not attempted due to failure */
+  remaining: BuildableProject[];
+  /** true if the build was cancelled by user */
+  cancelled: boolean;
+}
+
+/** Callbacks for reporting recursive build progress. */
+export interface RecursiveBuildCallbacks {
+  /** Called when starting a new project build */
+  onProjectStart?: (project: BuildableProject, index: number, total: number) => void;
+  /** Called when a project build step completes */
+  onStepComplete?: (project: BuildableProject, step: BuildStep) => void;
+  /** Called when a project finishes building successfully */
+  onProjectComplete?: (project: BuildableProject, index: number, total: number) => void;
+}
+
+/** Configuration options for a recursive build execution. */
+export interface RecursiveBuildOptions {
+  /** Build target: 'native' or 'windows' */
+  target: string;
+  /** If true, run full reconfigure (autogen + configure) for each project */
+  fullReconfigure: boolean;
+  /** Absolute path of the root project (cwd for the-seed CLI invocation) */
+  projectDir: string;
+  /** Optional AbortSignal for cancellation support */
+  signal?: AbortSignal;
+  /** Optional progress/status callbacks */
+  callbacks?: RecursiveBuildCallbacks;
+}

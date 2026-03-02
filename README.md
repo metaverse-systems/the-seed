@@ -257,7 +257,9 @@ Build and cross-compile projects using GNU Autotools.
 |------------|-----------|-------------|
 | `help` | | Print usage and available targets |
 | `native` | | Full build for Linux (autogen, configure, make, install) |
+| `native` | `recursive` | Build all transitive dependencies then the current project for Linux |
 | `windows` | | Full cross-compile for Windows (autogen, configure with mingw host, make, install) |
+| `windows` | `recursive` | Build all transitive dependencies then the current project for Windows |
 | (none) | | Incremental build (make + make install only, no reconfigure) |
 
 Target directory mapping:
@@ -278,6 +280,26 @@ Build steps for `native` and `windows`:
 5. `make install`
 
 Running `the-seed build` without a subcommand performs only steps 4 and 5.
+
+#### Recursive Builds
+
+The `recursive` flag discovers all transitive `file:` and `node_modules` dependencies from `package.json`, classifies each project by type (component, system, or program), and builds them in topological order so that dependencies are always installed before their dependents.
+
+```bash
+the-seed build native recursive
+```
+
+Projects are classified by inspecting `src/Makefile.am`:
+
+| Type | Detection | Build Priority |
+|------|-----------|----------------|
+| Component | `lib_LTLIBRARIES` without `the-seed` in name | 0 (first) |
+| System | `lib_LTLIBRARIES` with `the-seed` in name | 1 |
+| Program | `bin_PROGRAMS` | 2 (last) |
+
+Within each tier, projects are sorted alphabetically. The build halts immediately if any project fails (unless the project's `ignoreExitCode` flag is set).
+
+Cancellation is supported via `AbortSignal` when invoked programmatically.
 
 ### dependencies
 
