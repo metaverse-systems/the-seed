@@ -34,12 +34,30 @@ class Config {
         name: "prefix",
         message: "Installation prefix?",
         default: this.config.prefix
+      },
+      {
+        name: "name",
+        message: "Your name (used for code signing certificate CN)?",
+        default: this.config.name || ""
+      },
+      {
+        name: "email",
+        message: "Your email (used for code signing certificate EMAIL)?",
+        default: this.config.email || ""
+      },
+      {
+        name: "org",
+        message: "Your organization (used for code signing certificate O)?",
+        default: this.config.org || ""
       }
     ];
   };
 
-  parseAnswers = (answers: { prefix: string }) => {
+  parseAnswers = (answers: { prefix: string; name?: string; email?: string; org?: string }) => {
     this.config.prefix = answers.prefix;
+    if (answers.name !== undefined) this.config.name = answers.name || undefined;
+    if (answers.email !== undefined) this.config.email = answers.email || undefined;
+    if (answers.org !== undefined) this.config.org = answers.org || undefined;
   };
 }
 
