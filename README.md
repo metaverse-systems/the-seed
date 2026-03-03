@@ -376,6 +376,59 @@ This creates a project directory at `<prefix>/projects/<scope>/<name>/` with a `
 
 `the-seed resource-pak build` reads `package.json` from the current directory and produces a `.pak` file. The file format consists of a JSON header (containing the name, a zero-padded 10-digit header size, and resource metadata) followed by a newline and the concatenated raw resource bytes.
 
+### signing
+
+Sign and verify project files and directories using ECDSA P-256 certificates.
+
+| Subcommand | Arguments | Description |
+|------------|-----------|-------------|
+| `help` | | Show signing subcommands (default) |
+| `create-cert` | | Create a signing certificate for a scope |
+| `sign` | `<file-or-dir>` | Sign a file or directory |
+| `verify` | `<file-or-dir>` | Verify a signed file or directory |
+| `cert-info` | | Display certificate information for a scope |
+
+**Embedded signatures** are automatically applied when signing PE (`.exe`, `.dll`) and Mach-O binaries. The signature is stored inside the binary itself — no separate `.sig` file is created. For all other file types, a detached `.sig` file is produced.
+
+Use `--detached` to force detached signatures even for PE and Mach-O files:
+
+```bash
+# Embedded (default for PE/Mach-O)
+the-seed signing sign myapp.exe
+
+# Detached (forced)
+the-seed signing sign --detached myapp.exe
+
+# Detached (default for non-binary files)
+the-seed signing sign config.json
+```
+
+**Verification** auto-detects the signature type. Embedded signatures are checked first; if none is found, the verifier falls back to looking for a detached `.sig` file.
+
+```bash
+the-seed signing verify myapp.exe    # checks embedded Authenticode signature
+the-seed signing verify config.json  # checks detached .sig file
+```
+
+**Directory signing** produces a `signing-manifest.json` (v2 format) with per-file `signatureType` entries:
+
+```bash
+the-seed signing sign ./dist
+the-seed signing verify ./dist
+```
+
+Manifest v2 example:
+
+```json
+{
+  "version": 2,
+  "entries": [
+    { "file": "myapp.exe", "signatureType": "embedded", "signatureFile": null, "signature": "SHA256:..." },
+    { "file": "readme.txt", "signatureType": "detached", "signatureFile": "readme.txt.sig", "signature": "SHA256:..." }
+  ]
+}
+```
+
 ### installer
 
 Generate Windows `.msi` installer packages from cross-compiled binaries.
@@ -488,6 +541,32 @@ constructor(config: Config)
 | `resolveDependencies(binaryPaths: string[], searchPaths: string[])` | `DependencyResultType` | Analyze shared library dependencies using native addon |
 | `run(outputDir: string, projectDirs: string[])` | `void` | Execute full packaging workflow |
 
+#### Signing
+
+Sign and verify files using ECDSA P-256 certificates with support for embedded (PE Authenticode, Mach-O code signatures) and detached signatures.
+
+```typescript
+constructor(configDir?: string)
+```
+
+**Methods**:
+
+| Method | Return Type | Description |
+|--------|-------------|-------------|
+| `createCert(options?: { validityDays?: number; scope?: string })` | `Promise<CertInfo>` | Create a signing certificate for a scope |
+| `hasCert(scope?: string)` | `boolean` | Check if a certificate exists |
+| `getCertInfo(scope?: string)` | `CertInfo \| null` | Return certificate details |
+| `detectBinaryFormat(filePath: string)` | `FormatDetectionResult` | Detect PE, Mach-O, or other format via magic bytes |
+| `getSigningStrategy(filePath: string, options?: SignOptions)` | `SignatureType` | Return "embedded" or "detached" for a file |
+| `signFile(filePath: string, options?: SignOptions)` | `Promise<SignResult>` | Sign a file (auto-detects format) |
+| `signFileAuthenticode(filePath: string, scope: string)` | `Promise<SignResult>` | Embed an Authenticode signature in a PE binary |
+| `signFileMachO(filePath: string, scope: string)` | `Promise<SignResult>` | Embed a code signature in a Mach-O binary |
+| `signDirectory(dirPath: string, options?: SignOptions)` | `Promise<DirectorySignResult>` | Sign all files and produce a v2 manifest |
+| `verifyFile(filePath: string)` | `Promise<VerifyResult>` | Verify a file (checks embedded first, then detached) |
+| `verifyFileAuthenticode(filePath: string)` | `Promise<VerifyResult>` | Verify an embedded Authenticode signature |
+| `verifyFileMachO(filePath: string)` | `Promise<VerifyResult>` | Verify an embedded Mach-O code signature |
+| `verifyDirectory(dirPath: string)` | `Promise<DirectoryVerifyResult>` | Verify a directory against its signing manifest |
+
 ### Types
 
 ```typescript
@@ -552,6 +631,37 @@ interface DependencyResultType {
   dependencies: Record<string, string[]>;
   errors: Record<string, string>;
 }
+
+type SignatureType = "embedded" | "detached";
+type BinaryFormat = "pe" | "macho" | "other";
+
+interface FormatDetectionResult {
+  format: BinaryFormat;
+  subFormat: "pe32" | "pe32+" | "macho32" | "macho64" | "fat" | null;
+}
+
+interface SignOptions {
+  force?: boolean;
+  scope?: string;
+  detached?: boolean;
+}
+
+interface SignResult {
+  filePath: string;
+  signaturePath: string | null;  // null for embedded signatures
+  fingerprint: string;
+  signatureType: SignatureType;
+  warnings: string[];
+}
+
+interface VerifyResult {
+  valid: boolean;
+  filePath: string;
+  error?: string;
+  fingerprint?: string;
+  signatureType?: SignatureType;
+  warnings?: string[];
+}
 ```
 
 ### Import Example
@@ -561,6 +671,7 @@ import {
   Config,
   Scopes,
   Package,
+  Signing,
   AuthorType,
   ConfigType,
   ScopeType,
@@ -570,7 +681,13 @@ import {
   ResourceType,
   PackageType,
   ScriptArgsType,
-  DependencyResultType
+  DependencyResultType,
+  SignatureType,
+  BinaryFormat,
+  FormatDetectionResult,
+  SignOptions,
+  SignResult,
+  VerifyResult
 } from "@metaverse-systems/the-seed";
 
 // Initialize configuration
@@ -583,6 +700,15 @@ console.log(scopes.getScopes());
 // Package a project
 const pkg = new Package(config);
 pkg.run("./output", ["./my-project"]);
+
+// Sign a binary (auto-detects PE/Mach-O for embedded, detached for others)
+const signing = new Signing();
+const result = await signing.signFile("./dist/myapp.exe", { scope: "@my-project" });
+console.log(result.signatureType); // "embedded"
+
+// Verify a signed file
+const verify = await signing.verifyFile("./dist/myapp.exe");
+console.log(verify.valid, verify.signatureType); // true "embedded"
 ```
 
 ## License

@@ -71,6 +71,25 @@ export interface BuildStep {
 
 // ── Code Signing Types ──────────────────────────────────────
 
+/** How a file's signature is stored */
+export type SignatureType = "embedded" | "detached";
+
+/** Detected binary format */
+export type BinaryFormat = "pe" | "macho" | "other";
+
+/** Detailed format detection result */
+export interface FormatDetectionResult {
+  format: BinaryFormat;
+  subFormat: "pe32" | "pe32+" | "macho32" | "macho64" | "fat" | null;
+}
+
+/** Options for signing operations */
+export interface SignOptions {
+  force?: boolean;
+  scope?: string;
+  detached?: boolean;
+}
+
 export interface CertSubject {
   commonName: string;
   email?: string;
@@ -94,9 +113,11 @@ export interface CertInfo {
 }
 
 export interface SignResult {
-  filePath: string;       // path to the original file
-  signaturePath: string;  // path to the .sig file
-  fingerprint: string;    // certificate fingerprint
+  filePath: string;              // path to the original file
+  signaturePath: string | null;  // path to .sig file, null when embedded
+  fingerprint: string;           // certificate fingerprint
+  signatureType: SignatureType;  // "embedded" or "detached"
+  warnings: string[];            // e.g., "Removed stale .sig file"
 }
 
 export interface DirectorySignResult {
@@ -110,8 +131,10 @@ export type VerifyStatus = 'VALID' | 'INVALID' | 'NOT_FOUND';
 export interface VerifyResult {
   filePath: string;
   status: VerifyStatus;
-  reason?: string;        // human-readable reason for INVALID/NOT_FOUND
-  signer?: CertInfo;      // certificate info of the signer (if signature exists)
+  reason?: string;           // human-readable reason for INVALID/NOT_FOUND
+  signer?: CertInfo;         // certificate info of the signer (if signature exists)
+  signatureType?: SignatureType; // "embedded" or "detached"
+  warnings?: string[];       // e.g., "Both embedded and detached signatures found"
 }
 
 export interface DirectoryVerifyResult {
@@ -133,7 +156,7 @@ export interface SigFileFormat {
 
 /** Structure of .signatures.json manifest */
 export interface SigningManifestFormat {
-  version: 1;
+  version: 1 | 2;
   signedAt: string;        // ISO 8601 timestamp
   certificate: string;     // PEM-encoded X.509 certificate
   certificateFingerprint: string; // "SHA256:<hex>"
@@ -141,10 +164,11 @@ export interface SigningManifestFormat {
 }
 
 export interface SigningManifestEntry {
-  path: string;            // relative path to signed file
-  signatureFile: string;   // relative path to .sig file
+  path: string;                     // relative path to signed file
+  signatureFile: string | null;     // relative path to .sig file, null when embedded
   algorithm: 'SHA256';
-  signature: string;       // base64-encoded signature
+  signature: string;                // base64-encoded signature
+  signatureType: SignatureType;     // "embedded" or "detached"
 }
 
 // ── Recursive Build Types ───────────────────────────────────

@@ -168,6 +168,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
     case "sign": {
       const targetPath = getPositional();
       const force = hasFlag("--force");
+      const detached = hasFlag("--detached");
 
       if (!targetPath) {
         console.error("Error: Missing path argument. Usage: the-seed signing sign <path>");
@@ -189,12 +190,19 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
         }
 
         if (stat.isDirectory()) {
-          const result = await signing.signDirectory(targetPath, { force, scope });
+          const result = await signing.signDirectory(targetPath, { force, scope, detached });
           console.log(`Signing directory: ${targetPath}`);
           for (const signed of result.signed) {
             const relFile = require("path").relative(resolvedPath, signed.filePath);
-            const relSig = require("path").relative(resolvedPath, signed.signaturePath);
-            console.log(`  Signed: ${relFile} → ${relSig}`);
+            if (signed.signatureType === "embedded") {
+              console.log(`  Signed (embedded): ${relFile}`);
+            } else {
+              const relSig = require("path").relative(resolvedPath, signed.signaturePath!);
+              console.log(`  Signed (detached): ${relFile} → ${relSig}`);
+            }
+            for (const warning of signed.warnings) {
+              console.log(`    Warning: ${warning}`);
+            }
           }
           for (const skipped of result.skipped) {
             console.log(`  Skipped (not binary): ${skipped}`);
@@ -203,10 +211,18 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           console.log(`  Manifest: ${require("path").relative(process.cwd(), result.manifestPath)}`);
           console.log(`  Files signed: ${result.signed.length} | Skipped: ${result.skipped.length}`);
         } else {
-          const result = await signing.signFile(targetPath, { force, scope });
+          const result = await signing.signFile(targetPath, { force, scope, detached });
           console.log(`Signed: ${result.filePath}`);
-          console.log(`  Signature:   ${result.signaturePath}`);
+          if (result.signatureType === "embedded") {
+            console.log(`  Type:        embedded`);
+          } else {
+            console.log(`  Signature:   ${result.signaturePath}`);
+            console.log(`  Type:        detached`);
+          }
           console.log(`  Fingerprint: ${result.fingerprint}`);
+          for (const warning of result.warnings) {
+            console.log(`  Warning: ${warning}`);
+          }
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);

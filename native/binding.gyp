@@ -5,7 +5,8 @@
       "sources": ["src/addon.cpp"],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
-        "<!@(pkg-config --cflags-only-I the-seed | sed 's/-I//g')"
+        "<!@(pkg-config --cflags-only-I the-seed | sed 's/-I//g')",
+        "<!@(pkg-config --variable=includedir the-seed)/../external"
       ],
       "libraries": [
         "<!@(pkg-config --libs the-seed)",
