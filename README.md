@@ -40,6 +40,14 @@ These packages are only needed if you intend to cross-compile projects for Windo
 sudo apt install mingw-w64-x86-64-dev g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 wine wine64
 ```
 
+### Optional: Windows MSI Installer Generation
+
+To generate `.msi` installer packages from cross-compiled Windows binaries:
+
+```bash
+sudo apt install msitools
+```
+
 ## Installation
 
 ```bash
@@ -65,6 +73,8 @@ Commands:
   dependencies
   package
   resource-pak
+  signing
+  installer
 ```
 
 ## Quick Start
@@ -365,6 +375,37 @@ This creates a project directory at `<prefix>/projects/<scope>/<name>/` with a `
 `the-seed resource-pak add <name> <filename>` reads `package.json` from the current directory and adds a resource entry with `name`, `filename`, and `size`. If a resource with the same name already exists, it is skipped.
 
 `the-seed resource-pak build` reads `package.json` from the current directory and produces a `.pak` file. The file format consists of a JSON header (containing the name, a zero-padded 10-digit header size, and resource metadata) followed by a newline and the concatenated raw resource bytes.
+
+### installer
+
+Generate Windows `.msi` installer packages from cross-compiled binaries.
+
+| Subcommand | Description |
+|------------|-------------|
+| `help` | Show usage and available targets (default) |
+| `windows` | Generate a Windows MSI installer from `dist/` files |
+
+**Prerequisites**: `msitools` must be installed (`sudo apt install msitools`).
+
+**Usage**:
+
+```bash
+# Cross-compile your project for Windows first
+the-seed build windows
+
+# Package binaries into dist/
+the-seed package dist .
+
+# Generate the MSI installer
+the-seed installer windows
+```
+
+**Output files** (in the project directory):
+
+- `<name>-<version>.wxs` — WiX XML source (retained for inspection)
+- `<name>-<version>.msi` — Windows Installer package
+
+If `dist/` does not exist, the command automatically runs `the-seed package dist .` to populate it before generating the installer. The installer installs files to `C:\Program Files\<name>\` on Windows and uses a deterministic `UpgradeCode` derived from the project name for seamless major-upgrade behavior.
 
 ## API Reference
 
