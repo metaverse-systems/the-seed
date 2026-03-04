@@ -424,7 +424,7 @@ describe("Installer", () => {
   // ── run() ─────────────────────────────────────────────────
 
   describe("run", () => {
-    it("should return false when wixl is not installed", () => {
+    it("should return null when wixl is not installed", () => {
       mockedExecFileSync.mockImplementation((command: string, args?: readonly string[]) => {
         if (command === "which" && args && args[0] === "wixl") {
           throw new Error("not found");
@@ -440,24 +440,24 @@ describe("Installer", () => {
       });
 
       const result = installer.run(projectDir);
-      expect(result).toBe(false);
+      expect(result).toBeNull();
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("wixl is not installed")
       );
       consoleSpy.mockRestore();
     });
 
-    it("should return false when package.json is missing", () => {
+    it("should return null when package.json is missing", () => {
       const emptyDir = path.join(tempDir, "no-pkg");
       fs.mkdirSync(emptyDir, { recursive: true });
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
       const result = installer.run(emptyDir);
-      expect(result).toBe(false);
+      expect(result).toBeNull();
       consoleSpy.mockRestore();
     });
 
-    it("should orchestrate full pipeline and return true on success", () => {
+    it("should orchestrate full pipeline and return MSI path on success", () => {
       const projectDir = createProjectDir(tempDir, {
         name: "my-game",
         version: "1.0.0",
@@ -468,7 +468,7 @@ describe("Installer", () => {
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
       const result = installer.run(projectDir);
 
-      expect(result).toBe(true);
+      expect(result).toBe(path.join(projectDir, "my-game-1.0.0.0.msi"));
 
       // Verify .wxs was created
       expect(fs.existsSync(path.join(projectDir, "my-game-1.0.0.0.wxs"))).toBe(true);

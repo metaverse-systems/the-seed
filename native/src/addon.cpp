@@ -3,6 +3,7 @@
 #include <libthe-seed/PeSigner.hpp>
 #include <libthe-seed/MachOParser.hpp>
 #include <libthe-seed/MachOSigner.hpp>
+#include <libthe-seed/MsiSigner.hpp>
 #include <string>
 #include <vector>
 #include <map>
@@ -136,6 +137,20 @@ Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
             break;
         }
         return result;
+      }
+
+      // Check OLE/CFBF (MSI): magic D0 CF 11 E0 A1 B1 1A E1
+      if (magic[0] == 0xD0 && magic[1] == 0xCF && magic[2] == 0x11 && magic[3] == 0xE0) {
+        // Read remaining 4 magic bytes
+        std::uint8_t magic2[4] = {0};
+        file.read(reinterpret_cast<char*>(magic2), 4);
+        if (file.gcount() >= 4 &&
+            magic2[0] == 0xA1 && magic2[1] == 0xB1 &&
+            magic2[2] == 0x1A && magic2[3] == 0xE1) {
+          result.Set("format", Napi::String::New(env, "msi"));
+          result.Set("subFormat", env.Null());
+          return result;
+        }
       }
     }
 
@@ -353,6 +368,113 @@ Napi::Value MachOHasEmbeddedSignature(const Napi::CallbackInfo& info) {
   }
 }
 
+// ── MSI Signing Operations ──────────────────────────────────
+
+Napi::Value MsiIsMsi(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Expected one string argument: filePath")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string filePath = info[0].As<Napi::String>().Utf8Value();
+
+  try {
+    return Napi::Boolean::New(env, MsiSigner::IsMsi(filePath));
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+Napi::Value MsiComputeDigest(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Expected one string argument: filePath")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string filePath = info[0].As<Napi::String>().Utf8Value();
+
+  try {
+    auto result = MsiSigner::ComputeAuthenticodeDigest(filePath);
+    Napi::Object jsResult = Napi::Object::New(env);
+    jsResult.Set("digest", Napi::Buffer<uint8_t>::Copy(env, result.digest.data(), result.digest.size()));
+    return jsResult;
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+Napi::Value MsiEmbedSignature(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 2 || !info[0].IsString() || !info[1].IsBuffer()) {
+    Napi::TypeError::New(env, "Expected (filePath: string, pkcs7Der: Buffer)")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string filePath = info[0].As<Napi::String>().Utf8Value();
+  Napi::Buffer<uint8_t> buf = info[1].As<Napi::Buffer<uint8_t>>();
+  std::vector<uint8_t> pkcs7Der(buf.Data(), buf.Data() + buf.Length());
+
+  try {
+    MsiSigner::EmbedSignature(filePath, pkcs7Der);
+    return env.Undefined();
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+Napi::Value MsiExtractSignature(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Expected one string argument: filePath")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string filePath = info[0].As<Napi::String>().Utf8Value();
+
+  try {
+    auto result = MsiSigner::ExtractSignature(filePath);
+    if (result.has_value()) {
+      return Napi::Buffer<uint8_t>::Copy(env, result->data(), result->size());
+    }
+    return env.Null();
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+Napi::Value MsiHasEmbeddedSignature(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Expected one string argument: filePath")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string filePath = info[0].As<Napi::String>().Utf8Value();
+
+  try {
+    return Napi::Boolean::New(env, MsiSigner::HasEmbeddedSignature(filePath));
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("listDependencies", Napi::Function::New(env, ListDependencies));
 
@@ -371,6 +493,13 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("machoEmbedSignature", Napi::Function::New(env, MachOEmbedSignature));
   exports.Set("machoExtractSignature", Napi::Function::New(env, MachOExtractSignature));
   exports.Set("machoHasEmbeddedSignature", Napi::Function::New(env, MachOHasEmbeddedSignature));
+
+  // MSI signing operations
+  exports.Set("msiIsMsi", Napi::Function::New(env, MsiIsMsi));
+  exports.Set("msiComputeDigest", Napi::Function::New(env, MsiComputeDigest));
+  exports.Set("msiEmbedSignature", Napi::Function::New(env, MsiEmbedSignature));
+  exports.Set("msiExtractSignature", Napi::Function::New(env, MsiExtractSignature));
+  exports.Set("msiHasEmbeddedSignature", Napi::Function::New(env, MsiHasEmbeddedSignature));
 
   return exports;
 }

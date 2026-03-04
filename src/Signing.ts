@@ -38,6 +38,11 @@ interface NativeAddon {
   machoEmbedSignature(filePath: string, superBlob: Buffer): void;
   machoExtractSignature(filePath: string): Buffer | null;
   machoHasEmbeddedSignature(filePath: string): boolean;
+  msiIsMsi(filePath: string): boolean;
+  msiComputeDigest(filePath: string): { digest: Buffer };
+  msiEmbedSignature(filePath: string, pkcs7Der: Buffer): void;
+  msiExtractSignature(filePath: string): Buffer | null;
+  msiHasEmbeddedSignature(filePath: string): boolean;
 }
 
 function loadNativeAddon(): NativeAddon {
@@ -162,14 +167,14 @@ class Signing {
   /**
    * Determine the signing strategy for a file based on format detection
    * and user flags.
-   * @returns "embedded" if PE/Mach-O and not --detached, otherwise "detached"
+   * @returns "embedded" if PE/Mach-O/MSI and not --detached, otherwise "detached"
    */
   getSigningStrategy(filePath: string, options?: SignOptions): SignatureType {
     if (options?.detached) {
       return "detached";
     }
     const detection = this.detectBinaryFormat(filePath);
-    if (detection.format === "pe" || detection.format === "macho") {
+    if (detection.format === "pe" || detection.format === "macho" || detection.format === "msi") {
       return "embedded";
     }
     return "detached";
@@ -468,6 +473,62 @@ class Signing {
   }
 
   /**
+   * Sign an MSI file by embedding an Authenticode signature.
+   * MSI files use OLE Compound Document format; the signature is stored
+   * in the \x05DigitalSignature stream.
+   * Uses native addon for digest computation and embedding.
+   * @throws if file is not a valid MSI/CFBF
+   */
+  async signFileMsi(filePath: string, scope: string): Promise<SignResult> {
+    const resolvedPath = path.resolve(filePath);
+    const certPath = this.scopeCertPath(scope);
+    const keyPath = this.scopeKeyPath(scope);
+    const certInfo = this.getCertInfo(scope)!;
+    const warnings: string[] = [];
+
+    const addon = loadNativeAddon();
+
+    // Check for existing signature
+    if (addon.msiHasEmbeddedSignature(resolvedPath)) {
+      warnings.push("Replaced existing embedded signature");
+    }
+
+    // Compute MSI Authenticode digest via native addon
+    const digestResult = addon.msiComputeDigest(resolvedPath);
+
+    // Build CMS/PKCS#7 Authenticode SignedData for MSI
+    const certPem = fs.readFileSync(certPath, "utf-8");
+    const keyPem = fs.readFileSync(keyPath, "utf-8");
+    const privateKey = crypto.createPrivateKey(keyPem);
+
+    // Sign the digest with ECDSA-SHA256
+    const sign = crypto.createSign("SHA256");
+    sign.update(digestResult.digest);
+    const signature = sign.sign(privateKey);
+
+    // Build CMS blob with SpcSipInfo for MSI
+    const pkcs7Der = this._buildMsiCms(digestResult.digest, signature, certPem);
+
+    // Embed signature into MSI file via native addon
+    addon.msiEmbedSignature(resolvedPath, Buffer.from(pkcs7Der));
+
+    // Clean up stale .sig file if it exists
+    const staleSigPath = resolvedPath + ".sig";
+    if (fs.existsSync(staleSigPath)) {
+      fs.unlinkSync(staleSigPath);
+      warnings.push("Removed stale .sig file");
+    }
+
+    return {
+      filePath: resolvedPath,
+      signaturePath: null,
+      fingerprint: certInfo.fingerprint,
+      signatureType: "embedded",
+      warnings,
+    };
+  }
+
+  /**
    * Build a minimal CMS/PKCS#7 SignedData for Authenticode.
    * Uses SpcIndirectDataContent (1.3.6.1.4.1.311.2.1.4) as eContentType.
    */
@@ -567,6 +628,86 @@ class Signing {
       this._asn1Set([signerInfo]), // signerInfos
     ]);
 
+    const contentInfo = this._asn1Sequence([
+      oidSignedData,
+      this._asn1Explicit(0, signedData),
+    ]);
+
+    return contentInfo;
+  }
+
+  /**
+   * Build a minimal CMS/PKCS#7 SignedData for MSI Authenticode.
+   * Uses SpcIndirectDataContent (1.3.6.1.4.1.311.2.1.4) as eContentType
+   * with SpcSipInfo (1.3.6.1.4.1.311.2.1.30) as the data type.
+   * The SIP class GUID for MSI is {000C10F1-0000-0000-C000-000000000046}.
+   */
+  _buildMsiCms(digest: Buffer, signature: Buffer, certPem: string): Buffer {
+    const x509Cert = new x509.X509Certificate(certPem);
+    const certDer = Buffer.from(x509Cert.rawData);
+
+    // OIDs
+    const oidSignedData = Buffer.from([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02]); // 1.2.840.113549.1.7.2
+    const oidSpcIndirectData = Buffer.from([0x06, 0x0A, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x01, 0x04]); // 1.3.6.1.4.1.311.2.1.4
+    const oidSha256 = Buffer.from([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]); // 2.16.840.1.101.3.4.2.1
+    const oidEcdsaSha256 = Buffer.from([0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02]); // 1.2.840.10045.4.3.2
+    const oidSpcSipInfo = Buffer.from([0x06, 0x0A, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x01, 0x1E]); // 1.3.6.1.4.1.311.2.1.30
+
+    // MSI SIP class GUID: {000C10F1-0000-0000-C000-000000000046}
+    // Encoded in binary (mixed-endian Microsoft GUID format)
+    const msiSipGuid = Buffer.from([
+      0xF1, 0x10, 0x0C, 0x00,  // Data1 LE
+      0x00, 0x00,                // Data2 LE
+      0x00, 0x00,                // Data3 LE
+      0xC0, 0x00,                // Data4[0..1]
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x46, // Data4[2..7]
+    ]);
+
+    // Build SpcSipInfo SEQUENCE: { a INTEGER, uuid OCTET STRING, b-f INTEGERs }
+    const spcSipInfoValue = this._asn1Sequence([
+      Buffer.from([0x02, 0x03, 0x01, 0x00, 0x00]), // INTEGER 65536 (0x010000)
+      Buffer.concat([Buffer.from([0x04, msiSipGuid.length]), msiSipGuid]), // OCTET STRING (GUID)
+      Buffer.from([0x02, 0x01, 0x00]), // INTEGER 0
+      Buffer.from([0x02, 0x01, 0x00]), // INTEGER 0
+      Buffer.from([0x02, 0x01, 0x00]), // INTEGER 0
+      Buffer.from([0x02, 0x01, 0x00]), // INTEGER 0
+    ]);
+
+    const spcAttributeTypeAndValue = this._asn1Sequence([
+      oidSpcSipInfo,
+      spcSipInfoValue,
+    ]);
+
+    const digestInfo = this._asn1Sequence([
+      this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])]), // AlgorithmIdentifier
+      Buffer.concat([Buffer.from([0x04, digest.length]), digest]), // OCTET STRING
+    ]);
+
+    const spcIndirectDataContent = this._asn1Sequence([
+      spcAttributeTypeAndValue,
+      digestInfo,
+    ]);
+
+    // Build SignerInfo
+    const issuerAndSerialNumber = this._buildIssuerAndSerialNumber(x509Cert);
+    const signerInfo = this._asn1Sequence([
+      Buffer.from([0x02, 0x01, 0x01]), // version 1
+      issuerAndSerialNumber,
+      this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])]), // digestAlgorithm
+      this._asn1Sequence([oidEcdsaSha256, Buffer.from([0x05, 0x00])]), // signatureAlgorithm
+      Buffer.concat([Buffer.from([0x04, signature.length]), signature]), // signature OCTET STRING
+    ]);
+
+    // Build SignedData
+    const signedData = this._asn1Sequence([
+      Buffer.from([0x02, 0x01, 0x01]), // version 1
+      this._asn1Set([this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])])]), // digestAlgorithms
+      this._asn1Sequence([oidSpcIndirectData, this._asn1Explicit(0, spcIndirectDataContent)]), // contentInfo
+      this._asn1Implicit(0, this._asn1Set([certDer])), // certificates [0] IMPLICIT
+      this._asn1Set([signerInfo]), // signerInfos
+    ]);
+
+    // ContentInfo wrapper
     const contentInfo = this._asn1Sequence([
       oidSignedData,
       this._asn1Explicit(0, signedData),
@@ -744,6 +885,8 @@ class Signing {
         return this.signFileAuthenticode(resolvedPath, scope);
       } else if (detection.format === "macho") {
         return this.signFileMachO(resolvedPath, scope);
+      } else if (detection.format === "msi") {
+        return this.signFileMsi(resolvedPath, scope);
       }
     }
 
@@ -966,7 +1109,7 @@ class Signing {
 
   /**
    * Verify a single file's signature.
-   * Checks for embedded signature first (PE/Mach-O), falls back to detached .sig.
+   * Checks for embedded signature first (PE/Mach-O/MSI), falls back to detached .sig.
    * Warns if both embedded and detached exist (FR-008).
    */
   async verifyFile(filePath: string): Promise<VerifyResult> {
@@ -986,6 +1129,8 @@ class Signing {
         hasEmbedded = addon.peHasEmbeddedSignature(resolvedPath);
       } else if (detection.format === "macho") {
         hasEmbedded = addon.machoHasEmbeddedSignature(resolvedPath);
+      } else if (detection.format === "msi") {
+        hasEmbedded = addon.msiHasEmbeddedSignature(resolvedPath);
       }
     } catch {
       // Native addon not available, fall through to detached
@@ -1009,6 +1154,12 @@ class Signing {
         return result;
       } else if (detection.format === "macho") {
         const result = await this.verifyFileMachO(resolvedPath);
+        if (warnings.length > 0) {
+          result.warnings = [...(result.warnings || []), ...warnings];
+        }
+        return result;
+      } else if (detection.format === "msi") {
+        const result = await this.verifyFileMsi(resolvedPath);
         if (warnings.length > 0) {
           result.warnings = [...(result.warnings || []), ...warnings];
         }
@@ -1204,6 +1355,75 @@ class Signing {
         filePath: resolvedPath,
         status: "INVALID",
         reason: `Failed to verify Mach-O signature: ${err instanceof Error ? err.message : String(err)}`,
+        signatureType: "embedded",
+      };
+    }
+  }
+
+  /**
+   * Verify an embedded Authenticode signature in an MSI file.
+   */
+  async verifyFileMsi(filePath: string): Promise<VerifyResult> {
+    const resolvedPath = path.resolve(filePath);
+
+    try {
+      const addon = loadNativeAddon();
+
+      // Extract embedded signature from \x05DigitalSignature stream
+      const pkcs7Der = addon.msiExtractSignature(resolvedPath);
+      if (!pkcs7Der) {
+        return {
+          filePath: resolvedPath,
+          status: "NOT_FOUND",
+          reason: "No embedded MSI Authenticode signature found",
+        };
+      }
+
+      // Parse CMS to extract certificate and signature
+      const cmsInfo = this._parseCmsSignedData(pkcs7Der);
+      if (!cmsInfo) {
+        return {
+          filePath: resolvedPath,
+          status: "INVALID",
+          reason: "Embedded MSI Authenticode signature has invalid CMS structure",
+          signatureType: "embedded",
+        };
+      }
+
+      // Recompute the MSI Authenticode digest
+      const digestResult = addon.msiComputeDigest(resolvedPath);
+
+      // Verify the ECDSA signature over the digest
+      const x509Cert = new crypto.X509Certificate(cmsInfo.certPem);
+      const publicKey = x509Cert.publicKey;
+
+      const verify = crypto.createVerify("SHA256");
+      verify.update(digestResult.digest);
+      const isValid = verify.verify(publicKey, cmsInfo.signature);
+
+      const signer = this._buildSignerInfo(x509Cert);
+
+      if (isValid) {
+        return {
+          filePath: resolvedPath,
+          status: "VALID",
+          signer,
+          signatureType: "embedded",
+        };
+      } else {
+        return {
+          filePath: resolvedPath,
+          status: "INVALID",
+          reason: `Embedded MSI signature invalid: digest mismatch — file may have been modified after signing`,
+          signer,
+          signatureType: "embedded",
+        };
+      }
+    } catch (err) {
+      return {
+        filePath: resolvedPath,
+        status: "INVALID",
+        reason: `Failed to verify MSI Authenticode signature: ${err instanceof Error ? err.message : String(err)}`,
         signatureType: "embedded",
       };
     }

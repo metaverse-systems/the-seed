@@ -75,7 +75,7 @@ export interface BuildStep {
 export type SignatureType = "embedded" | "detached";
 
 /** Detected binary format */
-export type BinaryFormat = "pe" | "macho" | "other";
+export type BinaryFormat = "pe" | "macho" | "msi" | "other";
 
 /** Detailed format detection result */
 export interface FormatDetectionResult {

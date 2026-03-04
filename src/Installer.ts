@@ -262,22 +262,22 @@ ${componentRefs}
    * Full pipeline: validate → ensure dist → generate → compile.
    * Returns true on success.
    */
-  run = (projectDir: string): boolean => {
+  run = (projectDir: string): string | null => {
     // Step 1: Validate wixl is installed
     if (!this.checkWixl()) {
       console.error("Error: wixl is not installed. Install it with: sudo apt install msitools");
-      return false;
+      return null;
     }
 
     // Step 2: Read project metadata
     const metadata = this.readProjectMetadata(projectDir);
     if (!metadata) {
-      return false;
+      return null;
     }
 
     // Step 3: Ensure dist/ directory
     if (!this.ensureDist(projectDir)) {
-      return false;
+      return null;
     }
 
     // Step 4: Read dist/ contents
@@ -289,7 +289,7 @@ ${componentRefs}
 
     if (files.length === 0) {
       console.error("Error: dist/ directory is empty.");
-      return false;
+      return null;
     }
 
     // Step 5: Generate .wxs file
@@ -302,12 +302,12 @@ ${componentRefs}
     const msiPath = path.join(projectDir, msiFilename);
     console.log("Compiling MSI installer...");
     if (!this.compileMsi(projectDir, wxsPath, msiPath)) {
-      return false;
+      return null;
     }
 
     // Step 7: Success
     console.log("Installer created: " + msiFilename);
-    return true;
+    return msiPath;
   };
 }
 

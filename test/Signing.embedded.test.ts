@@ -98,6 +98,12 @@ describe("detectBinaryFormat", () => {
     expect(result.format).toBe("other");
     expect(result.subFormat).toBeNull();
   });
+
+  it("detects MSI format for tiny.msi", () => {
+    const result = signing.detectBinaryFormat(fixturePath("tiny.msi"));
+    expect(result.format).toBe("msi");
+    expect(result.subFormat).toBeNull();
+  });
 });
 
 describe("getSigningStrategy", () => {
@@ -130,6 +136,16 @@ describe("getSigningStrategy", () => {
 
   it("returns detached for Mach-O when --detached flag is set", () => {
     const strategy = signing.getSigningStrategy(fixturePath("tiny-macho-x86_64"), { detached: true });
+    expect(strategy).toBe("detached");
+  });
+
+  it("returns embedded for MSI files", () => {
+    const strategy = signing.getSigningStrategy(fixturePath("tiny.msi"));
+    expect(strategy).toBe("embedded");
+  });
+
+  it("returns detached for MSI when --detached flag is set", () => {
+    const strategy = signing.getSigningStrategy(fixturePath("tiny.msi"), { detached: true });
     expect(strategy).toBe("detached");
   });
 });
@@ -280,5 +296,85 @@ describe("signFile dispatch", () => {
     expect(result.signatureType).toBe("detached");
     expect(result.signaturePath).not.toBeNull();
     expect(fs.existsSync(result.signaturePath as string)).toBe(true);
+  });
+
+  it("dispatches MSI to embedded signing", async () => {
+    const msiFile = copyFixture("tiny.msi", tempDir);
+    const result = await signing.signFile(msiFile, { scope });
+
+    expect(result.signatureType).toBe("embedded");
+    expect(result.signaturePath).toBeNull();
+  });
+
+  it("uses detached signing when --detached flag is set for MSI", async () => {
+    const msiFile = copyFixture("tiny.msi", tempDir);
+    const result = await signing.signFile(msiFile, { scope, detached: true });
+
+    expect(result.signatureType).toBe("detached");
+    expect(result.signaturePath).not.toBeNull();
+    expect(fs.existsSync(result.signaturePath as string)).toBe(true);
+  });
+});
+
+// ── MSI Embedded Signing Tests ──────────────────────────────
+
+describe("signFileMsi", () => {
+  let signing: Signing;
+  let scope: string;
+  let tempDir: string;
+
+  beforeAll(async () => {
+    const setup = await setupSigning();
+    signing = setup.signing;
+    scope = setup.scope;
+  });
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("signs an MSI file with embedded Authenticode signature", async () => {
+    const msiFile = copyFixture("tiny.msi", tempDir);
+    const result = await signing.signFileMsi(msiFile, scope);
+
+    expect(result.signatureType).toBe("embedded");
+    expect(result.signaturePath).toBeNull();
+    expect(result.fingerprint).toMatch(/^SHA256:/);
+    expect(result.warnings).toEqual(expect.any(Array));
+  });
+
+  it("removes stale .sig file when embedding", async () => {
+    const msiFile = copyFixture("tiny.msi", tempDir);
+    fs.writeFileSync(msiFile + ".sig", "stale sig data");
+
+    const result = await signing.signFileMsi(msiFile, scope);
+
+    expect(result.signatureType).toBe("embedded");
+    expect(fs.existsSync(msiFile + ".sig")).toBe(false);
+    expect(result.warnings).toContain("Removed stale .sig file");
+  });
+
+  it("signs and verifies an MSI file round-trip", async () => {
+    const msiFile = copyFixture("tiny.msi", tempDir);
+    const signResult = await signing.signFileMsi(msiFile, scope);
+    expect(signResult.signatureType).toBe("embedded");
+
+    const verifyResult = await signing.verifyFileMsi(msiFile);
+    expect(verifyResult.status).toBe("VALID");
+    expect(verifyResult.signatureType).toBe("embedded");
+  });
+
+  it("re-signs an already-signed MSI file", async () => {
+    const msiFile = copyFixture("tiny.msi", tempDir);
+    await signing.signFileMsi(msiFile, scope);
+    const result = await signing.signFileMsi(msiFile, scope);
+
+    expect(result.signatureType).toBe("embedded");
+    const verifyResult = await signing.verifyFileMsi(msiFile);
+    expect(verifyResult.status).toBe("VALID");
   });
 });
