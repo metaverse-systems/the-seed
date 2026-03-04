@@ -1,6 +1,5 @@
 #include <napi.h>
 #include <libthe-seed/DependencyLister.hpp>
-#include <libthe-seed/PeParser.hpp>
 #include <libthe-seed/PeSigner.hpp>
 #include <libthe-seed/MachOParser.hpp>
 #include <libthe-seed/MachOSigner.hpp>

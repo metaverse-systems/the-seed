@@ -231,9 +231,13 @@ export async function autoSignIfCertExists(configDir: string, projectDir?: strin
   for (const filePath of candidates) {
     try {
       if (await signing.isBinaryFile(filePath)) {
-        await signing.signFile(filePath, { scope });
+        const result = await signing.signFile(filePath, { scope });
         const rel = path.relative(dir, filePath);
-        console.log(`  Signed: ${rel}`);
+        if (result.signatureType === "embedded") {
+          console.log(`  Signed (embedded): ${rel}`);
+        } else {
+          console.log(`  Signed (detached): ${rel} → ${path.basename(result.signaturePath!)}`);
+        }
         signedCount++;
       }
     } catch {

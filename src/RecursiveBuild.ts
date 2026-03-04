@@ -120,6 +120,14 @@ export async function buildRecursive(
         stepFailed = true;
         break;
       }
+
+      // Sign after compile but before install so embedded signatures
+      // are included in the installed copies
+      if (step.label === "compile") {
+        const signConfig = new Config();
+        signConfig.loadConfig();
+        await autoSignIfCertExists(signConfig.configDir, project.path);
+      }
     }
 
     if (stepFailed) {
@@ -130,11 +138,7 @@ export async function buildRecursive(
       return result;
     }
 
-    // Project built successfully — auto-sign if cert exists
-    const configInstance = new Config();
-    configInstance.loadConfig();
-    await autoSignIfCertExists(configInstance.configDir, project.path);
-
+    // Project built successfully
     result.completed.push(project);
     callbacks?.onProjectComplete?.(project, i, total);
     console.log("");

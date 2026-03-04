@@ -41,14 +41,14 @@ const BuildCLI = async (scriptConfig: ScriptArgsType) => {
       } else {
         build.reconfigure(command);
         build.compile();
-        build.install();
         await autoSignIfCertExists(scriptConfig.configDir);
+        build.install();
       }
       break;
     default:
       build.compile();
-      build.install();
       await autoSignIfCertExists(scriptConfig.configDir);
+      build.install();
       break;
   }
 };
