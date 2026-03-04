@@ -176,6 +176,25 @@ describe("signFileAuthenticode", () => {
     expect(fs.existsSync(peFile + ".sig")).toBe(false);
     expect(result.warnings).toContain("Removed stale .sig file");
   });
+
+  it("signs and verifies a PE file whose size is not 8-byte aligned", async () => {
+    // Copy the fixture and append extra bytes to make it non-8-byte-aligned.
+    // This reproduces the bug where EmbedSignature adds alignment padding
+    // that isn't included in the signing digest but IS included during
+    // verification, causing a digest mismatch.
+    const peFile = copyFixture("tiny.exe", tempDir);
+    // tiny.exe is 1024 bytes (aligned). Append 3 bytes → 1027 (1027 % 8 = 3).
+    const fd = fs.openSync(peFile, "a");
+    fs.writeSync(fd, Buffer.from([0xAA, 0xBB, 0xCC]));
+    fs.closeSync(fd);
+    expect(fs.statSync(peFile).size % 8).not.toBe(0);
+
+    const result = await signing.signFileAuthenticode(peFile, scope);
+    expect(result.signatureType).toBe("embedded");
+
+    const verifyResult = await signing.verifyFileAuthenticode(peFile);
+    expect(verifyResult.status).toBe("VALID");
+  });
 });
 
 // ── Mach-O Embedded Signing Tests ────────────────────────────

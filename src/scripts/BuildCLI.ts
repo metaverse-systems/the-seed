@@ -50,17 +50,17 @@ const BuildCLI = async (scriptConfig: ScriptArgsType) => {
       } else {
         build.reconfigure(command);
         build.compile();
+        build.install();
         if (release) {
           await stripBinaries(process.cwd(), command);
         }
         await autoSignIfCertExists(scriptConfig.configDir);
-        build.install();
       }
       break;
     default:
       build.compile();
-      await autoSignIfCertExists(scriptConfig.configDir);
       build.install();
+      await autoSignIfCertExists(scriptConfig.configDir);
       break;
   }
 };

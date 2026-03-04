@@ -121,9 +121,9 @@ export async function buildRecursive(
         break;
       }
 
-      // Strip and sign after compile but before install so embedded signatures
-      // are included in the installed copies
-      if (step.label === "compile") {
+      // Strip and sign after install — libtool relinks binaries during
+      // "make install", which would invalidate any earlier embedded signatures.
+      if (step.label === "install") {
         if (release) {
           await stripBinaries(project.path, target);
         }

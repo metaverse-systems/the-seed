@@ -353,6 +353,22 @@ class Signing {
     if (addon.peHasEmbeddedSignature(resolvedPath)) {
       // We re-sign by embedding over — EmbedSignature handles replacement
       warnings.push("Replaced existing embedded signature");
+    } else {
+      // First-time signing: EmbedSignature pads the file to 8-byte alignment
+      // before writing the certificate table. Those padding bytes fall within
+      // the Authenticode hash range during verification. Pre-pad here so the
+      // signing digest covers the same bytes the verification digest will.
+      const stat = fs.statSync(resolvedPath);
+      const remainder = stat.size % 8;
+      if (remainder !== 0) {
+        const pad = 8 - remainder;
+        const fd = fs.openSync(resolvedPath, "a");
+        try {
+          fs.writeSync(fd, Buffer.alloc(pad, 0));
+        } finally {
+          fs.closeSync(fd);
+        }
+      }
     }
 
     // Compute Authenticode digest via native addon

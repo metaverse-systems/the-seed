@@ -113,7 +113,7 @@ describe("BuildCLI --release flag parsing", () => {
     );
   });
 
-  it("calls stripBinaries between compile and sign for non-recursive build", async () => {
+  it("calls stripBinaries between install and sign for non-recursive build", async () => {
     const callOrder: string[] = [];
     mockCompile.mockImplementation(() => callOrder.push("compile"));
     mockedStripBinaries.mockImplementation(async () => {
@@ -127,6 +127,6 @@ describe("BuildCLI --release flag parsing", () => {
 
     await BuildCLI(makeArgs(["native", "--release"]));
 
-    expect(callOrder).toEqual(["compile", "strip", "sign", "install"]);
+    expect(callOrder).toEqual(["compile", "install", "strip", "sign"]);
   });
 });

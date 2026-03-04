@@ -291,7 +291,7 @@ describe("RecursiveBuild", () => {
   });
 
   describe("buildRecursive with release=true", () => {
-    it("calls stripBinaries after compile for each project when release=true", async () => {
+    it("calls stripBinaries after install for each project when release=true", async () => {
       await buildRecursive({
         target: "native",
         fullReconfigure: true,
