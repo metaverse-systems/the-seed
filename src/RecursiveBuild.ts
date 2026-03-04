@@ -1,6 +1,6 @@
 import { execSync } from "child_process";
 import Config from "./Config";
-import Build, { autoSignIfCertExists } from "./Build";
+import Build, { autoSignIfCertExists, stripBinaries } from "./Build";
 import {
   BuildStep,
   BuildableProject,
@@ -33,7 +33,7 @@ import {
 export async function buildRecursive(
   options: RecursiveBuildOptions
 ): Promise<RecursiveBuildResult> {
-  const { target, fullReconfigure, projectDir, signal, callbacks } = options;
+  const { target, fullReconfigure, projectDir, signal, callbacks, release } = options;
 
   // Discover dependency graph and resolve build order
   const graph = await walkDependencies(projectDir);
@@ -121,9 +121,12 @@ export async function buildRecursive(
         break;
       }
 
-      // Sign after compile but before install so embedded signatures
+      // Strip and sign after compile but before install so embedded signatures
       // are included in the installed copies
       if (step.label === "compile") {
+        if (release) {
+          await stripBinaries(project.path, target);
+        }
         const signConfig = new Config();
         signConfig.loadConfig();
         await autoSignIfCertExists(signConfig.configDir, project.path);

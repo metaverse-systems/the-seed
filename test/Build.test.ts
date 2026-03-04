@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import Config from "../src/Config";
-import Build, { targets, extractScope } from "../src/Build";
+import Build, { targets, extractScope, getStripTool, isBinaryByMagic, stripBinaries, findBuiltOutputs } from "../src/Build";
 import { BuildStep } from "../src/types";
 
 jest.mock("child_process", () => ({
@@ -260,5 +260,185 @@ describe("extractScope", () => {
 
   it("returns undefined for @ without a slash", () => {
     expect(extractScope("@noslash")).toBeUndefined();
+  });
+});
+
+describe("getStripTool", () => {
+  it("returns 'strip' for native target", () => {
+    expect(getStripTool("native")).toBe("strip");
+  });
+
+  it("returns 'x86_64-w64-mingw32-strip' for windows target", () => {
+    expect(getStripTool("windows")).toBe("x86_64-w64-mingw32-strip");
+  });
+});
+
+describe("isBinaryByMagic", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "magic-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it("returns true for ELF binary (\\x7fELF magic)", () => {
+    const filePath = path.join(tmpDir, "test.so");
+    const elfMagic = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]);
+    fs.writeFileSync(filePath, elfMagic);
+    expect(isBinaryByMagic(filePath)).toBe(true);
+  });
+
+  it("returns true for PE binary (MZ magic)", () => {
+    const filePath = path.join(tmpDir, "test.dll");
+    const peMagic = Buffer.from([0x4d, 0x5a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    fs.writeFileSync(filePath, peMagic);
+    expect(isBinaryByMagic(filePath)).toBe(true);
+  });
+
+  it("returns false for a text file", () => {
+    const filePath = path.join(tmpDir, "test.txt");
+    fs.writeFileSync(filePath, "#!/bin/bash\necho hello\n");
+    expect(isBinaryByMagic(filePath)).toBe(false);
+  });
+
+  it("returns false for a file smaller than 4 bytes", () => {
+    const filePath = path.join(tmpDir, "tiny");
+    fs.writeFileSync(filePath, Buffer.from([0x7f]));
+    expect(isBinaryByMagic(filePath)).toBe(false);
+  });
+
+  it("returns false for an empty file", () => {
+    const filePath = path.join(tmpDir, "empty");
+    fs.writeFileSync(filePath, "");
+    expect(isBinaryByMagic(filePath)).toBe(false);
+  });
+});
+
+describe("stripBinaries", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "strip-test-"));
+    mockedExecSync.mockClear();
+    mockedExecSync.mockReturnValue(Buffer.from(""));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it("throws if strip tool is not found", async () => {
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (String(cmd).includes("command -v")) {
+        throw new Error("not found");
+      }
+      return Buffer.from("");
+    });
+
+    await expect(stripBinaries(tmpDir, "native")).rejects.toThrow(
+      "Strip tool 'strip' not found on this system"
+    );
+  });
+
+  it("throws if strip tool not found for windows target", async () => {
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (String(cmd).includes("command -v")) {
+        throw new Error("not found");
+      }
+      return Buffer.from("");
+    });
+
+    await expect(stripBinaries(tmpDir, "windows")).rejects.toThrow(
+      "x86_64-w64-mingw32-strip"
+    );
+  });
+
+  it("returns empty result when no binary files found", async () => {
+    // Create src dir with only a text file
+    const srcDir = path.join(tmpDir, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "wrapper.sh"), "#!/bin/bash\necho hello\n");
+
+    const result = await stripBinaries(tmpDir, "native");
+    expect(result.strippedFiles).toEqual([]);
+    expect(result.stripTool).toBe("strip");
+  });
+
+  it("strips ELF binaries found in src/.libs/", async () => {
+    const libsDir = path.join(tmpDir, "src", ".libs");
+    fs.mkdirSync(libsDir, { recursive: true });
+
+    // Create a fake ELF binary
+    const elfFile = path.join(libsDir, "libfoo.so.0.0.0");
+    const elfMagic = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]);
+    fs.writeFileSync(elfFile, elfMagic);
+
+    const result = await stripBinaries(tmpDir, "native");
+    expect(result.strippedFiles).toContain(elfFile);
+    expect(result.stripTool).toBe("strip");
+
+    // Verify strip --strip-unneeded was called
+    const stripCalls = mockedExecSync.mock.calls.filter(
+      (call) => String(call[0]).includes("strip --strip-unneeded")
+    );
+    expect(stripCalls.length).toBe(1);
+    expect(String(stripCalls[0][0])).toContain(elfFile);
+  });
+
+  it("strips PE binaries with windows target using mingw strip", async () => {
+    const libsDir = path.join(tmpDir, "src", ".libs");
+    fs.mkdirSync(libsDir, { recursive: true });
+
+    // Create a fake PE binary
+    const peFile = path.join(libsDir, "libfoo-0.dll");
+    const peMagic = Buffer.from([0x4d, 0x5a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    fs.writeFileSync(peFile, peMagic);
+
+    const result = await stripBinaries(tmpDir, "windows");
+    expect(result.strippedFiles).toContain(peFile);
+    expect(result.stripTool).toBe("x86_64-w64-mingw32-strip");
+
+    // Verify the correct strip tool was used
+    const stripCalls = mockedExecSync.mock.calls.filter(
+      (call) => String(call[0]).includes("x86_64-w64-mingw32-strip --strip-unneeded")
+    );
+    expect(stripCalls.length).toBe(1);
+  });
+
+  it("skips non-binary files silently", async () => {
+    const libsDir = path.join(tmpDir, "src", ".libs");
+    fs.mkdirSync(libsDir, { recursive: true });
+
+    // A libtool wrapper script (text, not binary)
+    fs.writeFileSync(path.join(libsDir, "libfoo.la"), "# libtool script\n");
+    // An actual ELF binary
+    const elfFile = path.join(libsDir, "libfoo.so");
+    fs.writeFileSync(elfFile, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]));
+
+    const result = await stripBinaries(tmpDir, "native");
+    // Only the ELF file should be stripped (la is excluded by findBuiltOutputs, but even if it weren't it would fail magic check)
+    expect(result.strippedFiles).toContain(elfFile);
+  });
+
+  it("throws when strip fails on a file", async () => {
+    const libsDir = path.join(tmpDir, "src", ".libs");
+    fs.mkdirSync(libsDir, { recursive: true });
+
+    const elfFile = path.join(libsDir, "libfoo.so");
+    fs.writeFileSync(elfFile, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]));
+
+    mockedExecSync.mockImplementation((cmd: string) => {
+      if (String(cmd).includes("strip --strip-unneeded")) {
+        throw new Error("File format not recognized");
+      }
+      return Buffer.from("");
+    });
+
+    await expect(stripBinaries(tmpDir, "native")).rejects.toThrow(
+      "strip failed on"
+    );
   });
 });

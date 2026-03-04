@@ -40,6 +40,7 @@ jest.mock("../src/Build", () => {
     __esModule: true,
     default: MockBuild,
     autoSignIfCertExists: jest.fn().mockResolvedValue(undefined),
+    stripBinaries: jest.fn().mockResolvedValue({ strippedFiles: [], stripTool: "strip" }),
   };
 });
 
@@ -62,6 +63,9 @@ jest.mock("../src/DependencyWalker", () => ({
 
 import { walkDependencies, resolveBuildOrder } from "../src/DependencyWalker";
 import { buildRecursive, getRecursiveBuildSteps } from "../src/RecursiveBuild";
+import { stripBinaries } from "../src/Build";
+
+const mockedStripBinaries = stripBinaries as jest.MockedFunction<typeof stripBinaries>;
 
 const mockedWalkDependencies = walkDependencies as jest.MockedFunction<
   typeof walkDependencies
@@ -283,6 +287,72 @@ describe("RecursiveBuild", () => {
         expect(entry.steps[0].label).toBe("compile");
         expect(entry.steps[1].label).toBe("install");
       }
+    });
+  });
+
+  describe("buildRecursive with release=true", () => {
+    it("calls stripBinaries after compile for each project when release=true", async () => {
+      await buildRecursive({
+        target: "native",
+        fullReconfigure: true,
+        projectDir: prog.path,
+        release: true,
+      });
+
+      // stripBinaries should be called once per project (3 projects)
+      expect(mockedStripBinaries).toHaveBeenCalledTimes(3);
+      expect(mockedStripBinaries).toHaveBeenCalledWith(comp.path, "native");
+      expect(mockedStripBinaries).toHaveBeenCalledWith(sys.path, "native");
+      expect(mockedStripBinaries).toHaveBeenCalledWith(prog.path, "native");
+    });
+
+    it("does not call stripBinaries when release is false", async () => {
+      await buildRecursive({
+        target: "native",
+        fullReconfigure: true,
+        projectDir: prog.path,
+        release: false,
+      });
+
+      expect(mockedStripBinaries).not.toHaveBeenCalled();
+    });
+
+    it("does not call stripBinaries when release is omitted", async () => {
+      await buildRecursive({
+        target: "native",
+        fullReconfigure: true,
+        projectDir: prog.path,
+      });
+
+      expect(mockedStripBinaries).not.toHaveBeenCalled();
+    });
+
+    it("calls stripBinaries before autoSignIfCertExists in order", async () => {
+      const callOrder: string[] = [];
+      mockedStripBinaries.mockImplementation(async () => {
+        callOrder.push("strip");
+        return { strippedFiles: [], stripTool: "strip" };
+      });
+      const { autoSignIfCertExists } = require("../src/Build");
+      (autoSignIfCertExists as jest.Mock).mockImplementation(async () => {
+        callOrder.push("sign");
+      });
+
+      // Only 1 project to simplify ordering check
+      mockedResolveBuildOrder.mockReturnValue([comp]);
+
+      await buildRecursive({
+        target: "native",
+        fullReconfigure: true,
+        projectDir: comp.path,
+        release: true,
+      });
+
+      // strip should come before sign
+      const stripIdx = callOrder.indexOf("strip");
+      const signIdx = callOrder.indexOf("sign");
+      expect(stripIdx).toBeGreaterThanOrEqual(0);
+      expect(signIdx).toBeGreaterThan(stripIdx);
     });
   });
 });

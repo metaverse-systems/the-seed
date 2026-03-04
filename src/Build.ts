@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import Config from "./Config";
 import { execSync } from "child_process";
-import { BuildStep } from "./types";
+import { BuildStep, StripResult } from "./types";
 import Signing from "./Signing";
 
 export const targets: {
@@ -248,6 +248,89 @@ export async function autoSignIfCertExists(configDir: string, projectDir?: strin
   if (signedCount > 0) {
     console.log(`\nAuto-signed ${signedCount} file(s) using scope '${scope}'`);
   }
+}
+
+/**
+ * Returns the appropriate strip tool name for the given build target.
+ * @internal Exported for unit testing
+ */
+export function getStripTool(target: string): string {
+  if (target === "native") {
+    return "strip";
+  }
+  return targets[target] + "-strip";
+}
+
+/**
+ * Checks if a file is an ELF or PE binary by reading the first 4 bytes.
+ * Returns true if the file starts with ELF magic (\x7fELF) or PE magic (MZ).
+ * @internal Exported for unit testing
+ */
+export function isBinaryByMagic(filePath: string): boolean {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buf = Buffer.alloc(4);
+    const bytesRead = fs.readSync(fd, buf, 0, 4, 0);
+    if (bytesRead < 4) return false;
+
+    // ELF magic: 0x7f 'E' 'L' 'F'
+    if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) {
+      return true;
+    }
+    // PE magic: 'M' 'Z'
+    if (buf[0] === 0x4d && buf[1] === 0x5a) {
+      return true;
+    }
+
+    return false;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Strips debug symbols from all binary outputs in a project.
+ * Verifies the strip tool exists, finds binary outputs, filters by magic bytes,
+ * and runs `strip --strip-unneeded` on each binary.
+ */
+export async function stripBinaries(projectDir: string, target: string): Promise<StripResult> {
+  const stripTool = getStripTool(target);
+
+  // Verify strip tool exists
+  try {
+    execSync(`command -v ${stripTool}`, { stdio: "pipe" });
+  } catch {
+    const hint = target === "windows"
+      ? `\nInstall the MinGW binutils package (e.g., binutils-mingw-w64-x86-64) and try again.`
+      : "";
+    throw new Error(`Strip tool '${stripTool}' not found on this system.${hint}`);
+  }
+
+  console.log(`[strip] Using strip tool: ${stripTool}`);
+
+  const candidates = findBuiltOutputs(projectDir);
+  const strippedFiles: string[] = [];
+
+  for (const filePath of candidates) {
+    if (!isBinaryByMagic(filePath)) continue;
+
+    const rel = path.relative(projectDir, filePath);
+    process.stdout.write(`[strip] Stripping ${rel}... `);
+
+    try {
+      execSync(`${stripTool} --strip-unneeded ${filePath}`, { stdio: "pipe" });
+      console.log("done");
+      strippedFiles.push(filePath);
+    } catch (e: unknown) {
+      console.log("FAILED");
+      const err = e as { message?: string };
+      throw new Error(`strip failed on ${rel}: ${err.message ?? "Unknown error"}`);
+    }
+  }
+
+  console.log(`[strip] Stripped ${strippedFiles.length} file(s)`);
+
+  return { strippedFiles, stripTool };
 }
 
 export default Build;
