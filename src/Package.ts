@@ -100,24 +100,36 @@ class Package {
 
     const binaryPaths: string[] = [];
     const libsDir = path.join(projectDir, "src", ".libs");
-
-    if (!fs.existsSync(libsDir)) {
-      return binaryPaths;
-    }
+    const srcDir = path.join(projectDir, "src");
 
     if (parsed.type === "program") {
-      // Native binary (no extension)
-      const nativePath = path.join(libsDir, parsed.name);
-      if (fs.existsSync(nativePath) && fs.statSync(nativePath).isFile()) {
-        binaryPaths.push(nativePath);
+      // Check .libs/ first (libtool-wrapped programs), then src/ (non-libtool programs)
+      const candidates = [
+        path.join(libsDir, parsed.name),
+        path.join(srcDir, parsed.name),
+      ];
+      for (const candidate of candidates) {
+        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+          binaryPaths.push(candidate);
+          break;
+        }
       }
       // Cross-compiled Windows binary (.exe)
-      const windowsPath = path.join(libsDir, parsed.name + ".exe");
-      if (fs.existsSync(windowsPath)) {
-        binaryPaths.push(windowsPath);
+      const windowsCandidates = [
+        path.join(libsDir, parsed.name + ".exe"),
+        path.join(srcDir, parsed.name + ".exe"),
+      ];
+      for (const candidate of windowsCandidates) {
+        if (fs.existsSync(candidate)) {
+          binaryPaths.push(candidate);
+          break;
+        }
       }
     } else {
-      // library
+      // library — only .libs/ is relevant for libtool libraries
+      if (!fs.existsSync(libsDir)) {
+        return binaryPaths;
+      }
       const files = fs.readdirSync(libsDir);
       for (const file of files) {
         // Native shared library (.so)
