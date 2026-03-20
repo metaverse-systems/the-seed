@@ -9,7 +9,7 @@ void run(int argc, char *argv[])
 
     while(ECS->IsRunning())
     {
-        usleep(100000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
 
