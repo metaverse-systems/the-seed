@@ -8,4 +8,4 @@ Description: AUTHOR_URL
 Version: @PACKAGE_VERSION@
 Libs: -L${libdir} -lSKELETON
 Cflags: -I${includedir}
-Requires: ecs-cpp
+Requires: ecs-cpp >= 1.0.0

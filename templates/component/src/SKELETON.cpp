@@ -10,7 +10,7 @@ SKELETON_::SKELETON_(nlohmann::json config)
     this->Type = "SKELETON";
 }
 
-nlohmann::json SKELETON_::Export()
+nlohmann::json SKELETON_::Export() const
 {
     nlohmann::json config;
     return config;
