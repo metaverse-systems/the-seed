@@ -2,12 +2,12 @@
 
 SKELETON_::SKELETON_() 
 { 
-    this->Type = "SKELETON";
+    this->Type = "SCOPE/SKELETON";
 }
 
 SKELETON_::SKELETON_(nlohmann::json config)
 {
-    this->Type = "SKELETON";
+    this->Type = "SCOPE/SKELETON";
 }
 
 nlohmann::json SKELETON_::Export() const

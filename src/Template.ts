@@ -58,6 +58,7 @@ class Template {
     } = {
       "AUTHOR_EMAIL": author.email,
       "AUTHOR_URL": author.url,
+      "SCOPE": scope,
       "SKELETON_": underscoreName,
       "SKELETON": name
     };

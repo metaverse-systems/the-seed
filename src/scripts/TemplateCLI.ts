@@ -1,4 +1,3 @@
-import fs from "fs";
 import inquirer from "inquirer";
 import Config from "../Config";
 import Template from "../Template";
@@ -11,8 +10,11 @@ const TemplateCLI = (scriptConfig: ScriptArgsType) => {
 
   const template = new Template(config);
 
-  switch(command)
-  {
+  let packageName = "";
+  let scope = "";
+  let name = "";
+
+  switch (command) {
     case "help":
       console.log("Available template(s):");
       console.log("  component");
@@ -23,8 +25,17 @@ const TemplateCLI = (scriptConfig: ScriptArgsType) => {
     case "system":
     case "program":
       template.type = command;
-      inquirer.prompt(template.askName())
-      .then((answers) => {
+      packageName = scriptConfig.args[4];
+      if (packageName) {
+        const [scopeName, templateName] = packageName.split("/");
+        scope = scopeName;
+        name = templateName;
+      }
+      if(scope && name) {
+        template.createPackage(scope, name);
+        break;
+      }
+      inquirer.prompt(template.askName()).then((answers) => {
         template.createPackage(answers.scopeName, answers.templateName);
       });
       break;
