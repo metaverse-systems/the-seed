@@ -1,12 +1,12 @@
 #include <SKELETON.hpp>
 
 SKELETON_::SKELETON_():
-  System("SKELETON") 
+  System("SCOPE/SKELETON") 
 { 
 }
 
 SKELETON_::SKELETON_(nlohmann::json config):
-  System("SKELETON") 
+  System("SCOPE/SKELETON") 
 {
 }
 
