@@ -11,6 +11,9 @@ void run(int argc, char *argv[])
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+
+    // Stops the worlds and waits for their threads to end
+    ECS->Shutdown();
 }
 
 int main(int argc, char *argv[])
