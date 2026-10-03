@@ -1,11 +1,12 @@
 #include "SKELETON.hpp"
 #include <iostream>
+#include <chrono>
 
 void run(int argc, char *argv[])
 {
     auto world = ECS->Container();
 
-    world->Start(1000000 / 30);
+    world->Start(std::chrono::microseconds(1000000 / 30));
 
     while(ECS->IsRunning())
     {

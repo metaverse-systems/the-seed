@@ -26,8 +26,9 @@ void SKELETON_::Shutdown()
 
 void SKELETON_::Update()
 {
-    auto dt = this->DeltaTimeGet();
-    // It's been dt milliseconds since the last Update()
+    double dt = this->ElapsedSecondsGet();
+    // dt is the length of this update in seconds: the same however often it is read, and the configured
+    // interval on the first update. It is not clamped after a stall, so cap it yourself if you need to.
     // Do some work
 }
 
