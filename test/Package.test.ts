@@ -531,6 +531,172 @@ describe("test Package", () => {
     });
   });
 
+  // Libraries that could not be read are reported in libraryErrors
+  describe("run - library read errors", () => {
+    function setupProject(): { binary: string; libGood: string; libBroken: string; outputDir: string; projectDir: string } {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      const libGood = installBuildOutput(projectDir, "libgood.so", "libgood-content");
+      const libBroken = installBuildOutput(projectDir, "libbroken.so", "not a library");
+      const outputDir = path.join(tempDir, "my-release");
+      return { binary, libGood, libBroken, outputDir, projectDir };
+    }
+
+    it("behaves as before when the result has no libraryErrors field", () => {
+      const { binary, libGood, outputDir, projectDir } = setupProject();
+
+      mockedListDependencies
+        .mockReturnValueOnce({ dependencies: { [libGood]: [binary] }, errors: {} })
+        .mockReturnValueOnce({ dependencies: {}, errors: {} });
+
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation();
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      const warnCalls = warnSpy.mock.calls.length;
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(warnCalls).toBe(0);
+      expect(fs.existsSync(path.join(outputDir, "libgood.so"))).toBe(true);
+      expect(mockedListDependencies).toHaveBeenCalledTimes(2);
+    });
+
+    it("behaves as before when libraryErrors is empty", () => {
+      const { binary, libGood, outputDir, projectDir } = setupProject();
+
+      mockedListDependencies
+        .mockReturnValueOnce({ dependencies: { [libGood]: [binary] }, errors: {}, libraryErrors: {} })
+        .mockReturnValueOnce({ dependencies: {}, errors: {}, libraryErrors: {} });
+
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation();
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      const warnCalls = warnSpy.mock.calls.length;
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(warnCalls).toBe(0);
+      expect(fs.existsSync(path.join(outputDir, "libgood.so"))).toBe(true);
+    });
+
+    it("warns with path, reason and affected inputs, does not re-queue the library and still packages it", () => {
+      const { binary, libGood, libBroken, outputDir, projectDir } = setupProject();
+
+      mockedListDependencies
+        .mockReturnValueOnce({
+          dependencies: { [libGood]: [binary], [libBroken]: [binary] },
+          errors: {},
+          libraryErrors: { [libBroken]: { reason: "Not a recognized library format", inputs: [binary] } }
+        })
+        // second round: only the good library is analyzed
+        .mockReturnValueOnce({ dependencies: {}, errors: {}, libraryErrors: {} })
+        // a third round would mean the unreadable library was queued
+        .mockReturnValue({ dependencies: {}, errors: {}, libraryErrors: {} });
+
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation();
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      const warnings = warnSpy.mock.calls.map(c => c.join(" ")).join("\n");
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(warnings).toContain("Warning: Library could not be read: " + libBroken);
+      expect(warnings).toContain("Not a recognized library format");
+      expect(warnings).toContain(binary);
+
+      // the unreadable library is never passed as an analysis input
+      expect(mockedListDependencies).toHaveBeenCalledTimes(2);
+      for (const call of mockedListDependencies.mock.calls) {
+        expect(call[0]).not.toContain(libBroken);
+      }
+      expect(mockedListDependencies.mock.calls[1][0]).toEqual([libGood]);
+
+      // but it is still copied
+      expect(fs.existsSync(path.join(outputDir, "libbroken.so"))).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "libgood.so"))).toBe(true);
+      expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
+    });
+
+    it("warns once per unreadable library", () => {
+      const { binary, libGood, libBroken, outputDir, projectDir } = setupProject();
+
+      mockedListDependencies
+        .mockReturnValueOnce({
+          dependencies: { [libGood]: [binary], [libBroken]: [binary, libGood] },
+          errors: {},
+          libraryErrors: {
+            [libBroken]: { reason: "Truncated file", inputs: [binary, libGood] }
+          }
+        })
+        .mockReturnValue({ dependencies: {}, errors: {}, libraryErrors: {} });
+
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation();
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      const warnings = warnSpy.mock.calls.map(c => c.join(" ")).join("\n");
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(warnings.split("Library could not be read: " + libBroken).length - 1).toBe(1);
+      expect(warnings).toContain("Truncated file");
+      expect(warnings).toContain(libGood);
+    });
+
+    it("warns once for a library that later rounds report again", () => {
+      const { binary, libGood, libBroken, outputDir, projectDir } = setupProject();
+      const report = { [libBroken]: { reason: "Truncated file", inputs: [binary] } };
+
+      mockedListDependencies
+        .mockReturnValueOnce({
+          dependencies: { [libGood]: [binary], [libBroken]: [binary] },
+          errors: {},
+          libraryErrors: report
+        })
+        .mockReturnValueOnce({
+          dependencies: { [libBroken]: [libGood] },
+          errors: {},
+          libraryErrors: { [libBroken]: { reason: "Truncated file", inputs: [libGood] } }
+        })
+        .mockReturnValue({ dependencies: {}, errors: {}, libraryErrors: {} });
+
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation();
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      const warnings = warnSpy.mock.calls.map(c => c.join(" ")).join("\n");
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(warnings.split("Library could not be read: " + libBroken).length - 1).toBe(1);
+    });
+
+    it("still aborts when errors is non-empty, even with libraryErrors present", () => {
+      const { binary, libBroken, outputDir, projectDir } = setupProject();
+
+      mockedListDependencies.mockReturnValue({
+        dependencies: { [libBroken]: [binary] },
+        errors: { [binary]: "Failed to parse ELF header" },
+        libraryErrors: { [libBroken]: { reason: "Not a recognized library format", inputs: [binary] } }
+      });
+
+      const errorSpy = jest.spyOn(console, "error").mockImplementation();
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      const errorCalls = errorSpy.mock.calls.map(c => c[0]);
+      errorSpy.mockRestore();
+      warnSpy.mockRestore();
+
+      expect(result).toBe(false);
+      expect(fs.existsSync(outputDir)).toBe(false);
+      expect(errorCalls.some(msg => msg.includes("Failed to analyze binary"))).toBe(true);
+    });
+  });
+
   // T022a: input path is not a directory shows error (US3)
   describe("run - input is not a directory", () => {
     it("shows error when input path is a file instead of a directory", () => {

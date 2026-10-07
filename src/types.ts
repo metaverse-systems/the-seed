@@ -58,6 +58,8 @@ export interface ScopeDefaultsType {
 export interface DependencyResultType {
   dependencies: Record<string, string[]>;
   errors: Record<string, string>;
+  /** Libraries that were found but could not be read; absent when an older addon is used */
+  libraryErrors?: Record<string, { reason: string; inputs: string[] }>;
 }
 
 export interface BuildStep {

@@ -244,6 +244,7 @@ class Package {
     // Iteratively resolve until no new dependencies are found
     let toAnalyze = [...binaryPaths];
     const analyzed = new Set<string>();
+    const warnedLibraries = new Set<string>();
 
     while (toAnalyze.length > 0) {
       const result = this.resolveDependencies(toAnalyze, searchPaths);
@@ -258,6 +259,18 @@ class Package {
         return false;
       }
 
+      // Libraries that were found but could not be read: warn, keep packaging them
+      const libraryErrors = result.libraryErrors ?? {};
+      for (const libPath of Object.keys(libraryErrors)) {
+        if (warnedLibraries.has(libPath)) {
+          continue;
+        }
+        warnedLibraries.add(libPath);
+        console.warn("Warning: Library could not be read: " + libPath);
+        console.warn("  " + libraryErrors[libPath].reason);
+        console.warn("  Needed by: " + libraryErrors[libPath].inputs.join(", "));
+      }
+
       // Mark current batch as analyzed
       for (const p of toAnalyze) {
         analyzed.add(path.resolve(p));
@@ -270,7 +283,7 @@ class Package {
           if (!filesToCopy.has(depPath)) {
             filesToCopy.add(depPath);
             // If not yet analyzed, queue for transitive resolution
-            if (!analyzed.has(depPath)) {
+            if (!analyzed.has(depPath) && !(depPath in libraryErrors)) {
               nextBatch.push(depPath);
             }
           }
