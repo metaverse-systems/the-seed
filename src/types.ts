@@ -85,6 +85,21 @@ export interface FormatDetectionResult {
   subFormat: "pe32" | "pe32+" | "macho32" | "macho64" | "fat" | null;
 }
 
+/** The CodeDirectory of one slice of a Mach-O file, as computed by the library */
+export interface MachOPreparedSlice {
+  cpuType: number;
+  cpuSubtype: number;
+  codeDirectory: Buffer;
+  cdHash: Buffer;
+}
+
+/** What machoPrepareSignature returns and machoCompleteSignature takes back */
+export interface MachOPreparedSignature {
+  identity: string;
+  cmsCapacity: number;
+  slices: MachOPreparedSlice[];
+}
+
 /** Options for signing operations */
 export interface SignOptions {
   force?: boolean;

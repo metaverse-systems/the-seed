@@ -23,6 +23,7 @@ import {
   BinaryFormat,
   FormatDetectionResult,
   SignOptions,
+  MachOPreparedSignature,
 } from "./types";
 
 // Native addon interface for binary signing operations
@@ -33,9 +34,10 @@ interface NativeAddon {
   peEmbedSignature(filePath: string, pkcs7Der: Buffer): void;
   peExtractSignature(filePath: string): Buffer | null;
   peHasEmbeddedSignature(filePath: string): boolean;
-  machoComputeCodeDirectory(filePath: string, identity: string): { codeDirectory: Buffer; cdHash: Buffer };
+  machoPrepareSignature(filePath: string, identity: string, cmsCapacity: number): MachOPreparedSignature;
+  machoCompleteSignature(filePath: string, prepared: MachOPreparedSignature, cmsSignatures: Buffer[]): void;
+  machoStripSignature(filePath: string): void;
   machoBuildSuperBlob(codeDirectory: Buffer, cmsSignature: Buffer): Buffer;
-  machoEmbedSignature(filePath: string, superBlob: Buffer): void;
   machoExtractSignature(filePath: string): Buffer | null;
   machoHasEmbeddedSignature(filePath: string): boolean;
   msiIsMsi(filePath: string): boolean;
@@ -435,26 +437,32 @@ class Signing {
     // Use cert CN as code signing identity
     const identity = certInfo.subject.commonName || "the-seed";
 
-    // Compute CodeDirectory via native addon
-    const cdResult = addon.machoComputeCodeDirectory(resolvedPath, identity);
-
-    // Sign raw CodeDirectory bytes with ECDSA-SHA256
     const keyPem = fs.readFileSync(keyPath, "utf-8");
     const certPem = fs.readFileSync(certPath, "utf-8");
     const privateKey = crypto.createPrivateKey(keyPem);
 
-    const sign = crypto.createSign("SHA256");
-    sign.update(cdResult.codeDirectory);
-    const signature = sign.sign(privateKey);
+    // Reserve room for the CMS of any slice, then let the library compute the
+    // CodeDirectory of every slice for the file as it will be after signing
+    const capacity = this._cmsCapacityFor(certPem, privateKey);
+    const prepared = addon.machoPrepareSignature(resolvedPath, identity, capacity);
 
-    // Build CMS SignedData for Mach-O (RFC 5652 detached, eContent absent)
-    const cmsDer = this._buildMachOCms(cdResult.codeDirectory, signature, certPem);
+    // Sign each raw CodeDirectory with ECDSA-SHA256 and wrap it in a detached CMS
+    // (RFC 5652, eContent absent)
+    const cmsSignatures = prepared.slices.map((slice) => {
+      const sign = crypto.createSign("SHA256");
+      sign.update(slice.codeDirectory);
+      const signature = sign.sign(privateKey);
+      return Buffer.from(this._buildMachOCms(slice.codeDirectory, signature, certPem));
+    });
 
-    // Build SuperBlob with CodeDirectory + CMS
-    const superBlob = addon.machoBuildSuperBlob(cdResult.codeDirectory, Buffer.from(cmsDer));
+    // The file is replaced here, once, with every slice signed
+    addon.machoCompleteSignature(resolvedPath, prepared, cmsSignatures);
 
-    // Embed signature into Mach-O file
-    addon.machoEmbedSignature(resolvedPath, superBlob);
+    if (prepared.slices.length > 1) {
+      for (const slice of prepared.slices) {
+        warnings.push(`Signed slice ${this._machoArchName(slice.cpuType)}`);
+      }
+    }
 
     // Clean up stale .sig file if it exists
     const staleSigPath = resolvedPath + ".sig";
@@ -597,6 +605,55 @@ class Signing {
     return contentInfo;
   }
 
+  /** Name of a Mach-O CPU type as printed by lipo, or its hex value */
+  _machoArchName(cpuType: number): string {
+    switch (cpuType >>> 0) {
+      case 0x0100000c:
+        return "arm64";
+      case 0x01000007:
+        return "x86_64";
+      default:
+        return "0x" + (cpuType >>> 0).toString(16);
+    }
+  }
+
+  /**
+   * Upper bound, in bytes, of the DER CMS that _buildMachOCms produces for this
+   * key and certificate. The CMS does not contain the CodeDirectory, so it is
+   * built once from a placeholder and an all-zero signature of the longest
+   * length the key can give, plus 16 bytes for the length encodings. Falls back
+   * to 8192 when no bound can be established.
+   */
+  _cmsCapacityFor(certPem: string, privateKey: crypto.KeyObject): number {
+    const fallback = 8192;
+    try {
+      let maxSignature = 0;
+      const details = privateKey.asymmetricKeyDetails;
+      if (privateKey.asymmetricKeyType === "ec") {
+        const curve = details?.namedCurve;
+        const bits: Record<string, number> = {
+          prime256v1: 256,
+          secp256k1: 256,
+          secp384r1: 384,
+          secp521r1: 521,
+        };
+        const orderBits = curve ? bits[curve] : undefined;
+        if (orderBits) {
+          maxSignature = 2 * Math.ceil(orderBits / 8) + 9;
+        }
+      } else if (privateKey.asymmetricKeyType === "rsa" && details?.modulusLength) {
+        maxSignature = Math.ceil(details.modulusLength / 8);
+      }
+      if (maxSignature === 0) {
+        return fallback;
+      }
+      const placeholder = this._buildMachOCms(Buffer.alloc(0), Buffer.alloc(maxSignature), certPem);
+      return placeholder.length + 16;
+    } catch {
+      return fallback;
+    }
+  }
+
   /**
    * Build a minimal CMS SignedData for Mach-O code signing.
    * Uses id-data (1.2.840.113549.1.7.1) as eContentType, detached (no eContent).
@@ -616,7 +673,7 @@ class Signing {
       issuerAndSerialNumber,
       this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])]), // digestAlgorithm
       this._asn1Sequence([oidEcdsaSha256, Buffer.from([0x05, 0x00])]), // signatureAlgorithm
-      Buffer.concat([Buffer.from([0x04, signature.length]), signature]), // signature OCTET STRING
+      Buffer.concat([Buffer.from([0x04]), this._asn1EncodeLength(signature.length), signature]), // signature OCTET STRING
     ]);
 
     // Detached SignedData — no eContent in contentInfo
