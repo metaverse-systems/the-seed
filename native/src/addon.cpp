@@ -54,6 +54,20 @@ Napi::Value ListDependencies(const Napi::CallbackInfo& info) {
   }
   jsResult.Set("errors", jsErrors);
 
+  // Convert libraryErrors map: Record<string, { reason: string, inputs: string[] }>
+  Napi::Object jsLibraryErrors = Napi::Object::New(env);
+  for (const auto& [libPath, libraryError] : result.libraryErrors) {
+    Napi::Object jsEntry = Napi::Object::New(env);
+    jsEntry.Set("reason", Napi::String::New(env, libraryError.reason));
+    Napi::Array jsInputs = Napi::Array::New(env, libraryError.inputs.size());
+    for (size_t i = 0; i < libraryError.inputs.size(); i++) {
+      jsInputs.Set(i, Napi::String::New(env, libraryError.inputs[i]));
+    }
+    jsEntry.Set("inputs", jsInputs);
+    jsLibraryErrors.Set(libPath, jsEntry);
+  }
+  jsResult.Set("libraryErrors", jsLibraryErrors);
+
   return jsResult;
 }
 
