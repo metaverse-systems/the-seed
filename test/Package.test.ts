@@ -647,6 +647,34 @@ describe("test Package", () => {
       expect(warnings).toContain(libGood);
     });
 
+    it("warns once for a library that later rounds report again", () => {
+      const { binary, libGood, libBroken, outputDir, projectDir } = setupProject();
+      const report = { [libBroken]: { reason: "Truncated file", inputs: [binary] } };
+
+      mockedListDependencies
+        .mockReturnValueOnce({
+          dependencies: { [libGood]: [binary], [libBroken]: [binary] },
+          errors: {},
+          libraryErrors: report
+        })
+        .mockReturnValueOnce({
+          dependencies: { [libBroken]: [libGood] },
+          errors: {},
+          libraryErrors: { [libBroken]: { reason: "Truncated file", inputs: [libGood] } }
+        })
+        .mockReturnValue({ dependencies: {}, errors: {}, libraryErrors: {} });
+
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation();
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = pkg.run(outputDir, [projectDir]);
+      const warnings = warnSpy.mock.calls.map(c => c.join(" ")).join("\n");
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+
+      expect(result).toBe(true);
+      expect(warnings.split("Library could not be read: " + libBroken).length - 1).toBe(1);
+    });
+
     it("still aborts when errors is non-empty, even with libraryErrors present", () => {
       const { binary, libBroken, outputDir, projectDir } = setupProject();
 
