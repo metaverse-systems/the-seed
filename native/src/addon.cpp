@@ -711,7 +711,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("msiEmbedSignature", Napi::Function::New(env, MsiEmbedSignature));
   exports.Set("msiCheckSignature", Napi::Function::New(env, MsiCheckSignature));
   exports.Set("msiStripSignature", Napi::Function::New(env, MsiStripSignature));
-  exports.Set("msiExtractSignature",Napi::Function::New(env, MsiExtractSignature));
+  exports.Set("msiExtractSignature", Napi::Function::New(env, MsiExtractSignature));
   exports.Set("msiHasEmbeddedSignature", Napi::Function::New(env, MsiHasEmbeddedSignature));
 
   return exports;
