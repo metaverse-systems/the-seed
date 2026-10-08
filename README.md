@@ -390,6 +390,18 @@ Sign and verify project files and directories using ECDSA P-256 certificates.
 
 **Embedded signatures** are automatically applied when signing PE (`.exe`, `.dll`) and Mach-O binaries. The signature is stored inside the binary itself — no separate `.sig` file is created. For all other file types, a detached `.sig` file is produced.
 
+**Mac programs.** `sign` handles 64-bit little-endian arm64 and x86-64 programs, alone or in a universal file (every slice is signed, or none). The page fingerprints are computed over the finished file, so the order is fixed: the library prepares the layout and returns the CodeDirectory of each slice, the-seed signs each one with the scope's key, and the library writes the result in one step. Signing an already signed program replaces its signature in place (the warning "Replaced existing embedded signature" is shown) and the file does not grow. When something cannot be signed the command prints the library's message, exits non-zero and leaves the file as it was:
+
+* No room for the signature command: `<path>: no room for the code signature command: 16 bytes needed, <n> available ...; relink with extra header space (for example -headerpad 0x20)`.
+* Big-endian or 32-bit programs, or a universal file with such a slice: `<path>: <kind> Mac programs are not supported (supported: 64-bit little-endian arm64 and x86-64, alone or in a universal file)`.
+* Data after the existing signature: the file is refused.
+
+What was checked: page fingerprints in a signature produced by this library match the finished file (an independent checker and values recorded from Python's hashlib); the checker accepts the ad-hoc signature written by ld64.lld, a different producer; the structure of signed files parses with llvm-otool, llvm-objdump and llvm-lipo.
+
+Nobody has checked a signature produced by this library with the platform's own verifier (`codesign --verify`) or by running a signed program on a Mac. What was checked is described above. The CMS part of the signature is the minimal one the-seed has always produced and is not known to be accepted by Apple's tools. Programs signed by earlier versions of the-seed are malformed after re-signing and may need to be rebuilt from their unsigned originals: rebuild from the unsigned original, then sign again.
+
+Version 1.10.0 also fixes `_buildMachOCms`, which wrote the signature OCTET STRING length as a single byte; it now uses the DER length encoding, so signatures of 128 bytes or more are no longer malformed. The addon exports `machoComputeCodeDirectory` and `machoEmbedSignature` were removed (they always throw); see `structure.md` for the new exports.
+
 Use `--detached` to force detached signatures even for PE and Mach-O files:
 
 ```bash
@@ -560,7 +572,7 @@ constructor(configDir?: string)
 | `getSigningStrategy(filePath: string, options?: SignOptions)` | `SignatureType` | Return "embedded" or "detached" for a file |
 | `signFile(filePath: string, options?: SignOptions)` | `Promise<SignResult>` | Sign a file (auto-detects format) |
 | `signFileAuthenticode(filePath: string, scope: string)` | `Promise<SignResult>` | Embed an Authenticode signature in a PE binary |
-| `signFileMachO(filePath: string, scope: string)` | `Promise<SignResult>` | Embed a code signature in a Mach-O binary |
+| `signFileMachO(filePath: string, scope: string)` | `Promise<SignResult>` | Embed a code signature in a Mach-O binary (prepare, sign each CodeDirectory, complete; see "Mac programs" above for what is and is not verified) |
 | `signDirectory(dirPath: string, options?: SignOptions)` | `Promise<DirectorySignResult>` | Sign all files and produce a v2 manifest |
 | `verifyFile(filePath: string)` | `Promise<VerifyResult>` | Verify a file (checks embedded first, then detached) |
 | `verifyFileAuthenticode(filePath: string)` | `Promise<VerifyResult>` | Verify an embedded Authenticode signature |
