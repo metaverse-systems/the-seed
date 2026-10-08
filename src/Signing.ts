@@ -488,6 +488,12 @@ class Signing {
    * @throws if file is not a valid MSI/CFBF
    */
   async signFileMsi(filePath: string, scope: string): Promise<SignResult> {
+    // Temporary refusal: remove this block once the installer signer produces
+    // signatures that standard verifiers accept.
+    throw new Error(
+      "Windows installer signing is unavailable in this version: the signature it produced was not accepted by standard verifiers; see docs/reviews/libthe-seed-1.md findings 4, 5 and 12"
+    );
+
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
     const keyPath = this.scopeKeyPath(scope);

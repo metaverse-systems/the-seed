@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -544,7 +545,8 @@ describe("signFile dispatch", () => {
     expect(fs.existsSync(result.signaturePath as string)).toBe(true);
   });
 
-  it("dispatches MSI to embedded signing", async () => {
+  // Returns in Phase 7: skipped only while installer signing is refused.
+  it.skip("[skipped while installer signing is refused; returns in Phase 7] dispatches MSI to embedded signing", async () => {
     const msiFile = copyFixture("tiny.msi", tempDir);
     const result = await signing.signFile(msiFile, { scope });
 
@@ -583,7 +585,8 @@ describe("signFileMsi", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it("signs an MSI file with embedded Authenticode signature", async () => {
+  // Returns in Phase 7: skipped only while installer signing is refused.
+  it.skip("[skipped while installer signing is refused; returns in Phase 7] signs an MSI file with embedded Authenticode signature", async () => {
     const msiFile = copyFixture("tiny.msi", tempDir);
     const result = await signing.signFileMsi(msiFile, scope);
 
@@ -593,7 +596,8 @@ describe("signFileMsi", () => {
     expect(result.warnings).toEqual(expect.any(Array));
   });
 
-  it("removes stale .sig file when embedding", async () => {
+  // Returns in Phase 7: skipped only while installer signing is refused.
+  it.skip("[skipped while installer signing is refused; returns in Phase 7] removes stale .sig file when embedding", async () => {
     const msiFile = copyFixture("tiny.msi", tempDir);
     fs.writeFileSync(msiFile + ".sig", "stale sig data");
 
@@ -604,7 +608,8 @@ describe("signFileMsi", () => {
     expect(result.warnings).toContain("Removed stale .sig file");
   });
 
-  it("signs and verifies an MSI file round-trip", async () => {
+  // Returns in Phase 7: skipped only while installer signing is refused.
+  it.skip("[skipped while installer signing is refused; returns in Phase 7] signs and verifies an MSI file round-trip", async () => {
     const msiFile = copyFixture("tiny.msi", tempDir);
     const signResult = await signing.signFileMsi(msiFile, scope);
     expect(signResult.signatureType).toBe("embedded");
@@ -614,7 +619,8 @@ describe("signFileMsi", () => {
     expect(verifyResult.signatureType).toBe("embedded");
   });
 
-  it("re-signs an already-signed MSI file", async () => {
+  // Returns in Phase 7: skipped only while installer signing is refused.
+  it.skip("[skipped while installer signing is refused; returns in Phase 7] re-signs an already-signed MSI file", async () => {
     const msiFile = copyFixture("tiny.msi", tempDir);
     await signing.signFileMsi(msiFile, scope);
     const result = await signing.signFileMsi(msiFile, scope);
@@ -622,5 +628,53 @@ describe("signFileMsi", () => {
     expect(result.signatureType).toBe("embedded");
     const verifyResult = await signing.verifyFileMsi(msiFile);
     expect(verifyResult.status).toBe("VALID");
+  });
+});
+
+// ── Interim guard ───────────────────────────────────────────
+
+describe("installer signing is refused in this version", () => {
+  let signing: Signing;
+  let scope: string;
+  let tempDir: string;
+
+  const refusal = /^Windows installer signing is unavailable in this version/;
+
+  function sha256(file: string): string {
+    return crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  }
+
+  beforeAll(async () => {
+    const setup = await setupSigning();
+    signing = setup.signing;
+    scope = setup.scope;
+  });
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("signFile rejects and leaves the package byte-identical", async () => {
+    const msiFile = copyFixture("tiny.msi", tempDir);
+    const before = sha256(msiFile);
+
+    await expect(signing.signFile(msiFile, { scope })).rejects.toThrow(refusal);
+
+    expect(sha256(msiFile)).toBe(before);
+    expect(fs.readdirSync(tempDir)).toEqual(["tiny.msi"]);
+  });
+
+  it("signFileMsi rejects and leaves the package byte-identical", async () => {
+    const msiFile = copyFixture("tiny.msi", tempDir);
+    const before = sha256(msiFile);
+
+    await expect(signing.signFileMsi(msiFile, scope)).rejects.toThrow(refusal);
+
+    expect(sha256(msiFile)).toBe(before);
+    expect(fs.readdirSync(tempDir)).toEqual(["tiny.msi"]);
   });
 });
