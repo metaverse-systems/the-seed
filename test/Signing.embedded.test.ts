@@ -1,7 +1,9 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
+import { checkMachO } from "./helpers/MachOChecker";
 
 /**
  * Create a temporary directory for test isolation.
@@ -35,6 +37,35 @@ function writeConfig(configDir: string, data: { scope?: string; name?: string; e
  */
 function fixturePath(name: string): string {
   return path.join(__dirname, "fixtures", "binaries", name);
+}
+
+/**
+ * Get path to a genuine Mac sample (built by a real linker) in the fixtures.
+ */
+function genuinePath(name: string): string {
+  return path.join(__dirname, "fixtures", "binaries", "genuine", name);
+}
+
+/**
+ * Copy a genuine Mac sample to a temp directory for safe mutation.
+ */
+function copyGenuine(name: string, destDir: string): string {
+  const dest = path.join(destDir, name);
+  fs.copyFileSync(genuinePath(name), dest);
+  return dest;
+}
+
+/**
+ * Run the independent Python checker of libthe-seed on a file when the
+ * superproject checkout provides it. Returns null when it is not there.
+ */
+function runPythonChecker(file: string): { status: number | null; output: string } | null {
+  const checker = path.join(__dirname, "..", "..", "libthe-seed", "tests", "fixtures", "check_pages.py");
+  if (!fs.existsSync(checker)) {
+    return null;
+  }
+  const run = spawnSync("python3", [checker, file], { encoding: "utf8" });
+  return { status: run.status, output: run.stdout + run.stderr };
 }
 
 /**
@@ -234,8 +265,10 @@ describe("signFileMachO", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  // The older stub files in binaries/ are byte-swapped (big-endian) images that
+  // the library now declines, so these three cases use the genuine samples.
   it("signs a Mach-O file with embedded code signature", async () => {
-    const machoFile = copyFixture("tiny-macho-x86_64", tempDir);
+    const machoFile = copyGenuine("tiny-macho-x86_64", tempDir);
     const result = await signing.signFileMachO(machoFile, scope);
 
     expect(result.signatureType).toBe("embedded");
@@ -244,11 +277,224 @@ describe("signFileMachO", () => {
   });
 
   it("signs an arm64 Mach-O file", async () => {
-    const machoFile = copyFixture("tiny-macho-arm64", tempDir);
+    const machoFile = copyGenuine("tiny-macho-arm64", tempDir);
     const result = await signing.signFileMachO(machoFile, scope);
 
     expect(result.signatureType).toBe("embedded");
     expect(result.signaturePath).toBeNull();
+  });
+});
+
+describe("_buildMachOCms signature length", () => {
+  let signing: Signing;
+  let scope: string;
+  let certPem: string;
+
+  beforeAll(async () => {
+    const setup = await setupSigning();
+    signing = setup.signing;
+    scope = setup.scope;
+    certPem = fs.readFileSync(signing.scopeCertPath(scope), "utf-8");
+  });
+
+  /** Read one DER header at offset: tag, content length, header size. */
+  function readHeader(buf: Buffer, offset: number): { tag: number; length: number; header: number } {
+    const tag = buf[offset];
+    const first = buf[offset + 1];
+    if (first < 0x80) {
+      return { tag, length: first, header: 2 };
+    }
+    const count = first & 0x7f;
+    let length = 0;
+    for (let i = 0; i < count; i++) {
+      length = length * 256 + buf[offset + 2 + i];
+    }
+    return { tag, length, header: 2 + count };
+  }
+
+  /** Walk the whole DER value and check every length stays inside its parent. */
+  function checkNesting(buf: Buffer, start: number, end: number): void {
+    let at = start;
+    while (at < end) {
+      const h = readHeader(buf, at);
+      const next = at + h.header + h.length;
+      expect(next).toBeLessThanOrEqual(end);
+      if (h.tag & 0x20) {
+        checkNesting(buf, at + h.header, next);
+      }
+      at = next;
+    }
+    expect(at).toBe(end);
+  }
+
+  it("writes a 70-byte signature with the one-byte length and a 200-byte one with the long form", () => {
+    const cd = Buffer.alloc(32, 7);
+
+    for (const size of [70, 200]) {
+      const signature = Buffer.alloc(size, 0xab);
+      const cms = signing._buildMachOCms(cd, signature, certPem);
+
+      // The whole value is one well-formed DER tree
+      const top = readHeader(cms, 0);
+      expect(top.header + top.length).toBe(cms.length);
+      checkNesting(cms, 0, cms.length);
+
+      const expectedHeader = size < 128 ? Buffer.from([0x04, size]) : Buffer.from([0x04, 0x81, size]);
+      const at = cms.indexOf(Buffer.concat([expectedHeader, signature]));
+      expect(at).toBeGreaterThan(0);
+      // The signature is the last element of the SignerInfo, so it ends the CMS
+      expect(at + expectedHeader.length + size).toBe(cms.length);
+    }
+  });
+});
+
+// ── Mach-O signing of genuine samples (real addon) ──────────
+
+describe("signFileMachO on genuine samples", () => {
+  let signing: Signing;
+  let scope: string;
+  let tempDir: string;
+
+  beforeAll(async () => {
+    const setup = await setupSigning();
+    signing = setup.signing;
+    scope = setup.scope;
+  });
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  /** Check a signed file with both independent checkers. */
+  function expectConsistent(file: string, sliceCount: number) {
+    const report = checkMachO(fs.readFileSync(file));
+    expect(report.problems).toEqual([]);
+    expect(report.slices).toHaveLength(sliceCount);
+    for (const slice of report.slices) {
+      expect(slice.signatureCommands).toBe(1);
+      expect(slice.pagesChecked).toBeGreaterThan(0);
+      expect(slice.pagesMismatched).toBe(0);
+    }
+    const python = runPythonChecker(file);
+    if (python !== null) {
+      expect(python.output).toContain("result ok");
+      expect(python.status).toBe(0);
+    }
+    return report;
+  }
+
+  it("the checker accepts the linker's own ad-hoc signatures", () => {
+    expectConsistent(genuinePath("tiny-macho-arm64-adhoc"), 1);
+    expectConsistent(genuinePath("tiny-macho-x86_64-adhoc"), 1);
+    expectConsistent(genuinePath("tiny-macho-universal-adhoc"), 2);
+  });
+
+  it("signs a thin arm64 program so that every page hash is correct", async () => {
+    const file = copyGenuine("tiny-macho-arm64", tempDir);
+    const result = await signing.signFileMachO(file, scope);
+
+    expect(result.signatureType).toBe("embedded");
+    expectConsistent(file, 1);
+  });
+
+  it("signs a thin x86-64 program so that every page hash is correct", async () => {
+    const file = copyGenuine("tiny-macho-x86_64", tempDir);
+    const result = await signing.signFileMachO(file, scope);
+
+    expect(result.signatureType).toBe("embedded");
+    expectConsistent(file, 1);
+  });
+
+  it("signs every slice of a universal program and reports each one", async () => {
+    const file = copyGenuine("tiny-macho-universal", tempDir);
+    const result = await signing.signFileMachO(file, scope);
+
+    expect(result.signatureType).toBe("embedded");
+    expectConsistent(file, 2);
+    expect(result.warnings).toContain("Signed slice arm64");
+    expect(result.warnings).toContain("Signed slice x86_64");
+  });
+
+  it.each(["tiny-macho-arm64", "tiny-macho-x86_64", "tiny-macho-universal"])(
+    "signing %s again replaces the signature and keeps the length",
+    async (name) => {
+      const file = copyGenuine(name, tempDir);
+      await signing.signFileMachO(file, scope);
+      const lengthAfterFirst = fs.statSync(file).size;
+
+      const second = await signing.signFileMachO(file, scope);
+      expect(second.warnings).toContain("Replaced existing embedded signature");
+      expect(fs.statSync(file).size).toBe(lengthAfterFirst);
+
+      const third = await signing.signFileMachO(file, scope);
+      expect(third.warnings).toContain("Replaced existing embedded signature");
+      expect(fs.statSync(file).size).toBe(lengthAfterFirst);
+
+      const report = expectConsistent(file, name.includes("universal") ? 2 : 1);
+      for (const slice of report.slices) {
+        expect(slice.signatureCommands).toBe(1);
+      }
+    }
+  );
+
+  it.each([
+    ["tiny-macho-arm64-adhoc", 1],
+    ["tiny-macho-x86_64-adhoc", 1],
+    ["tiny-macho-universal-adhoc", 2],
+  ] as const)("replaces the foreign ad-hoc signature of %s", async (name, sliceCount) => {
+    const file = copyGenuine(name, tempDir);
+    const before = fs.readFileSync(file);
+    const adhoc = checkMachO(before);
+
+    const result = await signing.signFileMachO(file, scope);
+
+    expect(result.warnings).toContain("Replaced existing embedded signature");
+    const after = checkMachO(fs.readFileSync(file));
+    expectConsistent(file, sliceCount);
+    expect(fs.readFileSync(file).equals(before)).toBe(false);
+    // The new signature carries a certificate signature, so it is larger.
+    expect(after.slices[0].superBlobLength).toBeGreaterThan(adhoc.slices[0].superBlobLength);
+  });
+
+  it("refuses the program without room for the signature command and leaves it byte-identical", async () => {
+    const file = copyGenuine("tiny-macho-x86_64-nospace", tempDir);
+    const before = fs.readFileSync(file);
+
+    await expect(signing.signFileMachO(file, scope)).rejects.toThrow(/no room for the code signature command/);
+    await expect(signing.signFileMachO(file, scope)).rejects.toThrow(/-headerpad/);
+
+    expect(fs.readFileSync(file).equals(before)).toBe(true);
+    expect(fs.existsSync(file + ".sig")).toBe(false);
+  });
+
+  describe("removed addon exports", () => {
+    // The real addon is loaded directly; there is no mock.
+    const addon = require("../native/build/Release/dependency_lister.node") as Record<
+      string,
+      (...args: unknown[]) => unknown
+    >;
+
+    it("machoComputeCodeDirectory throws and names the replacement", () => {
+      expect(() => addon.machoComputeCodeDirectory(copyGenuine("tiny-macho-arm64", tempDir), "id")).toThrow(
+        "machoComputeCodeDirectory was removed in libthe-seed 0.6.0: use machoPrepareSignature and machoCompleteSignature"
+      );
+    });
+
+    it("machoEmbedSignature throws and names the replacement", () => {
+      expect(() => addon.machoEmbedSignature(copyGenuine("tiny-macho-arm64", tempDir), Buffer.alloc(8))).toThrow(
+        "machoEmbedSignature was removed in libthe-seed 0.6.0: use machoPrepareSignature and machoCompleteSignature"
+      );
+    });
+
+    it("exposes the three new calls", () => {
+      expect(typeof addon.machoPrepareSignature).toBe("function");
+      expect(typeof addon.machoCompleteSignature).toBe("function");
+      expect(typeof addon.machoStripSignature).toBe("function");
+    });
   });
 });
 
@@ -282,7 +528,7 @@ describe("signFile dispatch", () => {
   });
 
   it("dispatches Mach-O to embedded signing", async () => {
-    const machoFile = copyFixture("tiny-macho-x86_64", tempDir);
+    const machoFile = copyGenuine("tiny-macho-x86_64", tempDir);
     const result = await signing.signFile(machoFile, { scope });
 
     expect(result.signatureType).toBe("embedded");

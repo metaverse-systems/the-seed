@@ -4,6 +4,7 @@
 #include <libthe-seed/MachOParser.hpp>
 #include <libthe-seed/MachOSigner.hpp>
 #include <libthe-seed/MsiSigner.hpp>
+#include <cmath>
 #include <string>
 #include <vector>
 #include <map>
@@ -117,24 +118,16 @@ Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
       }
     }
 
-    // Check Mach-O
+    // Check Mach-O: the library decides, from the same rules it signs by
     if (bytesRead >= 4) {
-      std::uint32_t magic32 = (static_cast<std::uint32_t>(magic[0]) << 24) |
-                               (static_cast<std::uint32_t>(magic[1]) << 16) |
-                               (static_cast<std::uint32_t>(magic[2]) << 8) |
-                               static_cast<std::uint32_t>(magic[3]);
-      std::uint32_t magic32le = (static_cast<std::uint32_t>(magic[3]) << 24) |
-                                 (static_cast<std::uint32_t>(magic[2]) << 16) |
-                                 (static_cast<std::uint32_t>(magic[1]) << 8) |
-                                 static_cast<std::uint32_t>(magic[0]);
+      MachOParser::Format fmt = MachOParser::Format::NotMachO;
+      try {
+        fmt = MachOParser::DetectFormat(filePath);
+      } catch (...) {
+        fmt = MachOParser::Format::NotMachO;
+      }
 
-      // Mach-O magics: FEEDFACE (32), FEEDFACF (64), CAFEBABE (fat), reverse endian variants
-      bool isMacho = (magic32 == 0xFEEDFACE || magic32 == 0xFEEDFACF ||
-                      magic32 == 0xCAFEBABE || magic32le == 0xFEEDFACE ||
-                      magic32le == 0xFEEDFACF);
-
-      if (isMacho) {
-        auto fmt = MachOParser::DetectFormat(filePath);
+      if (fmt != MachOParser::Format::NotMachO) {
         result.Set("format", Napi::String::New(env, "macho"));
         switch (fmt) {
           case MachOParser::Format::MachO32:
@@ -270,28 +263,186 @@ Napi::Value PeHasEmbeddedSignature(const Napi::CallbackInfo& info) {
 
 // ── Mach-O Signing Operations ───────────────────────────────
 
-Napi::Value MachOComputeCodeDirectory(const Napi::CallbackInfo& info) {
+// Reads the prepared-signature object that machoPrepareSignature returned.
+// Throws Napi::TypeError naming the first missing or mistyped field.
+static MachOSigner::PreparedSignature ReadPreparedSignature(Napi::Env env, const Napi::Value& value) {
+  if (!value.IsObject() || value.IsArray() || value.IsBuffer()) {
+    throw Napi::TypeError::New(env, "prepared must be the object returned by machoPrepareSignature");
+  }
+  Napi::Object obj = value.As<Napi::Object>();
+
+  Napi::Value identity = obj.Get("identity");
+  if (!identity.IsString()) {
+    throw Napi::TypeError::New(env, "prepared.identity must be a string");
+  }
+  Napi::Value capacity = obj.Get("cmsCapacity");
+  if (!capacity.IsNumber()) {
+    throw Napi::TypeError::New(env, "prepared.cmsCapacity must be a number");
+  }
+  double capValue = capacity.As<Napi::Number>().DoubleValue();
+  if (!(capValue >= 0) || capValue >= 2147483648.0 || capValue != std::floor(capValue)) {
+    throw Napi::TypeError::New(env, "prepared.cmsCapacity must be a non-negative integer below 2^31");
+  }
+  Napi::Value slices = obj.Get("slices");
+  if (!slices.IsArray()) {
+    throw Napi::TypeError::New(env, "prepared.slices must be an array");
+  }
+
+  MachOSigner::PreparedSignature prepared;
+  prepared.identity = identity.As<Napi::String>().Utf8Value();
+  prepared.cms_capacity = static_cast<std::uint32_t>(capValue);
+
+  Napi::Array sliceArray = slices.As<Napi::Array>();
+  for (uint32_t i = 0; i < sliceArray.Length(); i++) {
+    std::string where = "prepared.slices[" + std::to_string(i) + "]";
+    Napi::Value item = sliceArray.Get(i);
+    if (!item.IsObject()) {
+      throw Napi::TypeError::New(env, where + " must be an object");
+    }
+    Napi::Object sliceObj = item.As<Napi::Object>();
+
+    Napi::Value cpuType = sliceObj.Get("cpuType");
+    if (!cpuType.IsNumber()) {
+      throw Napi::TypeError::New(env, where + ".cpuType must be a number");
+    }
+    Napi::Value cpuSubtype = sliceObj.Get("cpuSubtype");
+    if (!cpuSubtype.IsNumber()) {
+      throw Napi::TypeError::New(env, where + ".cpuSubtype must be a number");
+    }
+    Napi::Value codeDirectory = sliceObj.Get("codeDirectory");
+    if (!codeDirectory.IsBuffer()) {
+      throw Napi::TypeError::New(env, where + ".codeDirectory must be a Buffer");
+    }
+    Napi::Value cdHash = sliceObj.Get("cdHash");
+    if (!cdHash.IsBuffer()) {
+      throw Napi::TypeError::New(env, where + ".cdHash must be a Buffer");
+    }
+
+    MachOSigner::PreparedSlice slice;
+    slice.cpu_type = static_cast<std::uint32_t>(cpuType.As<Napi::Number>().Int64Value());
+    slice.cpu_subtype = static_cast<std::uint32_t>(cpuSubtype.As<Napi::Number>().Int64Value());
+    Napi::Buffer<uint8_t> cdBuf = codeDirectory.As<Napi::Buffer<uint8_t>>();
+    slice.code_directory.assign(cdBuf.Data(), cdBuf.Data() + cdBuf.Length());
+    Napi::Buffer<uint8_t> hashBuf = cdHash.As<Napi::Buffer<uint8_t>>();
+    slice.cd_hash.assign(hashBuf.Data(), hashBuf.Data() + hashBuf.Length());
+    prepared.slices.push_back(std::move(slice));
+  }
+  return prepared;
+}
+
+Napi::Value MachOPrepareSignature(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
-  if (info.Length() < 2 || !info[0].IsString() || !info[1].IsString()) {
-    Napi::TypeError::New(env, "Expected (filePath: string, identity: string)")
+  if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsNumber()) {
+    Napi::TypeError::New(env, "Expected (filePath: string, identity: string, cmsCapacity: number)")
         .ThrowAsJavaScriptException();
     return env.Null();
   }
 
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
   std::string identity = info[1].As<Napi::String>().Utf8Value();
+  double capValue = info[2].As<Napi::Number>().DoubleValue();
+  if (!(capValue >= 0) || capValue >= 2147483648.0 || capValue != std::floor(capValue)) {
+    Napi::TypeError::New(env, "cmsCapacity must be a non-negative integer below 2^31")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
 
   try {
-    auto result = MachOSigner::ComputeCodeDirectory(filePath, identity);
+    auto prepared = MachOSigner::PrepareSignature(filePath, identity, static_cast<std::uint32_t>(capValue));
     Napi::Object jsResult = Napi::Object::New(env);
-    jsResult.Set("codeDirectory", Napi::Buffer<uint8_t>::Copy(env, result.code_directory.data(), result.code_directory.size()));
-    jsResult.Set("cdHash", Napi::Buffer<uint8_t>::Copy(env, result.cd_hash.data(), result.cd_hash.size()));
+    jsResult.Set("identity", Napi::String::New(env, prepared.identity));
+    jsResult.Set("cmsCapacity", Napi::Number::New(env, static_cast<double>(prepared.cms_capacity)));
+    Napi::Array slices = Napi::Array::New(env, prepared.slices.size());
+    for (size_t i = 0; i < prepared.slices.size(); i++) {
+      const auto& slice = prepared.slices[i];
+      Napi::Object jsSlice = Napi::Object::New(env);
+      jsSlice.Set("cpuType", Napi::Number::New(env, static_cast<double>(slice.cpu_type)));
+      jsSlice.Set("cpuSubtype", Napi::Number::New(env, static_cast<double>(slice.cpu_subtype)));
+      jsSlice.Set("codeDirectory", Napi::Buffer<uint8_t>::Copy(env, slice.code_directory.data(), slice.code_directory.size()));
+      jsSlice.Set("cdHash", Napi::Buffer<uint8_t>::Copy(env, slice.cd_hash.data(), slice.cd_hash.size()));
+      slices.Set(static_cast<uint32_t>(i), jsSlice);
+    }
+    jsResult.Set("slices", slices);
     return jsResult;
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
+}
+
+Napi::Value MachOCompleteSignature(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 3 || !info[0].IsString() || !info[2].IsArray()) {
+    Napi::TypeError::New(env, "Expected (filePath: string, prepared: object, cmsSignatures: Buffer[])")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string filePath = info[0].As<Napi::String>().Utf8Value();
+
+  MachOSigner::PreparedSignature prepared;
+  try {
+    prepared = ReadPreparedSignature(env, info[1]);
+  } catch (const Napi::Error& e) {
+    e.ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  Napi::Array cmsArray = info[2].As<Napi::Array>();
+  std::vector<std::vector<std::uint8_t>> cmsSignatures;
+  for (uint32_t i = 0; i < cmsArray.Length(); i++) {
+    Napi::Value item = cmsArray.Get(i);
+    if (!item.IsBuffer()) {
+      Napi::TypeError::New(env, "cmsSignatures[" + std::to_string(i) + "] must be a Buffer")
+          .ThrowAsJavaScriptException();
+      return env.Null();
+    }
+    Napi::Buffer<uint8_t> buf = item.As<Napi::Buffer<uint8_t>>();
+    cmsSignatures.emplace_back(buf.Data(), buf.Data() + buf.Length());
+  }
+
+  try {
+    MachOSigner::CompleteSignature(filePath, prepared, cmsSignatures);
+    return env.Undefined();
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+Napi::Value MachOStripSignature(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Expected (filePath: string)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string filePath = info[0].As<Napi::String>().Utf8Value();
+
+  try {
+    MachOSigner::StripSignature(filePath);
+    return env.Undefined();
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
+// Removed in libthe-seed 0.6.0: the CodeDirectory must be computed after the
+// file reaches its final layout, so these two calls never run.
+static Napi::Value ThrowRemoved(const Napi::CallbackInfo& info, const char* name) {
+  Napi::Env env = info.Env();
+  Napi::Error::New(env, std::string(name) +
+                            " was removed in libthe-seed 0.6.0: use machoPrepareSignature and machoCompleteSignature")
+      .ThrowAsJavaScriptException();
+  return env.Null();
+}
+
+Napi::Value MachOComputeCodeDirectory(const Napi::CallbackInfo& info) {
+  return ThrowRemoved(info, "machoComputeCodeDirectory");
 }
 
 Napi::Value MachOBuildSuperBlob(const Napi::CallbackInfo& info) {
@@ -319,25 +470,7 @@ Napi::Value MachOBuildSuperBlob(const Napi::CallbackInfo& info) {
 }
 
 Napi::Value MachOEmbedSignature(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 2 || !info[0].IsString() || !info[1].IsBuffer()) {
-    Napi::TypeError::New(env, "Expected (filePath: string, superBlob: Buffer)")
-        .ThrowAsJavaScriptException();
-    return env.Null();
-  }
-
-  std::string filePath = info[0].As<Napi::String>().Utf8Value();
-  Napi::Buffer<uint8_t> buf = info[1].As<Napi::Buffer<uint8_t>>();
-  std::vector<uint8_t> superBlob(buf.Data(), buf.Data() + buf.Length());
-
-  try {
-    MachOSigner::EmbedSignature(filePath, superBlob);
-    return env.Undefined();
-  } catch (const std::exception& e) {
-    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
-    return env.Null();
-  }
+  return ThrowRemoved(info, "machoEmbedSignature");
 }
 
 Napi::Value MachOExtractSignature(const Napi::CallbackInfo& info) {
@@ -502,6 +635,9 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("peHasEmbeddedSignature", Napi::Function::New(env, PeHasEmbeddedSignature));
 
   // Mach-O signing operations
+  exports.Set("machoPrepareSignature", Napi::Function::New(env, MachOPrepareSignature));
+  exports.Set("machoCompleteSignature", Napi::Function::New(env, MachOCompleteSignature));
+  exports.Set("machoStripSignature", Napi::Function::New(env, MachOStripSignature));
   exports.Set("machoComputeCodeDirectory", Napi::Function::New(env, MachOComputeCodeDirectory));
   exports.Set("machoBuildSuperBlob", Napi::Function::New(env, MachOBuildSuperBlob));
   exports.Set("machoEmbedSignature", Napi::Function::New(env, MachOEmbedSignature));
