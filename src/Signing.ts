@@ -26,6 +26,14 @@ import {
   MachOPreparedSignature,
 } from "./types";
 
+// Result of reading an installer signature back from the package
+interface MsiSignatureCheck {
+  state: "none" | "matches" | "mismatch" | "unreadable";
+  storedDigest: Buffer;
+  computedDigest: Buffer;
+  detail: string;
+}
+
 // Native addon interface for binary signing operations
 interface NativeAddon {
   listDependencies(binaryPaths: string[], searchPaths: string[]): unknown;
@@ -42,7 +50,9 @@ interface NativeAddon {
   machoHasEmbeddedSignature(filePath: string): boolean;
   msiIsMsi(filePath: string): boolean;
   msiComputeDigest(filePath: string): { digest: Buffer };
-  msiEmbedSignature(filePath: string, pkcs7Der: Buffer): void;
+  msiEmbedSignature(filePath: string, pkcs7Der: Buffer, requireMatchingDigest?: boolean): void;
+  msiCheckSignature(filePath: string): MsiSignatureCheck;
+  msiStripSignature(filePath: string): boolean;
   msiExtractSignature(filePath: string): Buffer | null;
   msiHasEmbeddedSignature(filePath: string): boolean;
 }
@@ -496,8 +506,9 @@ class Signing {
 
     const addon = loadNativeAddon();
 
-    // Check for existing signature
-    if (addon.msiHasEmbeddedSignature(resolvedPath)) {
+    // Check for an existing signature; the check also reports a stored signature
+    // that cannot be read (written by an earlier version), which is replaced too
+    if (addon.msiCheckSignature(resolvedPath).state !== "none") {
       warnings.push("Replaced existing embedded signature");
     }
 
@@ -518,7 +529,19 @@ class Signing {
     const pkcs7Der = this._buildMsiCms(digestResult.digest, signature, certPem);
 
     // Embed signature into MSI file via native addon
-    addon.msiEmbedSignature(resolvedPath, Buffer.from(pkcs7Der));
+    // The library refuses a blob whose fingerprint differs from the package's
+    addon.msiEmbedSignature(resolvedPath, Buffer.from(pkcs7Der), true);
+
+    // Read the signature back from the finished file
+    const check = addon.msiCheckSignature(resolvedPath);
+    if (check.state !== "matches") {
+      throw new Error(
+        `Installer signature was written but does not read back (${check.detail || check.state})`
+      );
+    }
+    warnings.push(
+      "Installer fingerprint and structure were verified by reading the signature back; certificate trust is not checked"
+    );
 
     // Clean up stale .sig file if it exists
     const staleSigPath = resolvedPath + ".sig";
@@ -1425,6 +1448,32 @@ class Signing {
 
     try {
       const addon = loadNativeAddon();
+
+      // Read the signature back and compare its fingerprint with the package
+      const check = addon.msiCheckSignature(resolvedPath);
+      if (check.state === "none") {
+        return {
+          filePath: resolvedPath,
+          status: "NOT_FOUND",
+          reason: "No embedded MSI Authenticode signature found",
+        };
+      }
+      if (check.state === "mismatch") {
+        return {
+          filePath: resolvedPath,
+          status: "INVALID",
+          reason: "signature present but does not match the package contents; the package may have been modified after signing",
+          signatureType: "embedded",
+        };
+      }
+      if (check.state === "unreadable") {
+        return {
+          filePath: resolvedPath,
+          status: "INVALID",
+          reason: `signature present but could not be read (${check.detail})`,
+          signatureType: "embedded",
+        };
+      }
 
       // Extract embedded signature from \x05DigitalSignature stream
       const pkcs7Der = addon.msiExtractSignature(resolvedPath);
