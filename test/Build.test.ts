@@ -9,8 +9,19 @@ jest.mock("child_process", () => ({
   execSync: jest.fn(() => Buffer.from(""))
 }));
 
+jest.mock("../src/ProcessRunner", () => ({
+  ...jest.requireActual("../src/ProcessRunner"),
+  runCommand: jest.fn(),
+}));
+
 import { execSync } from "child_process";
+import { runCommand, CommandResult } from "../src/ProcessRunner";
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
+const mockedRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
+
+function commandResult(overrides: Partial<CommandResult> = {}): CommandResult {
+  return { exitCode: 0, signal: null, stdout: "", stderr: "", killed: false, ...overrides };
+}
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "build-test-"));
@@ -219,6 +230,32 @@ describe("test Build", () => {
       expect(steps).toHaveLength(2);
       expect(steps.map(s => s.label)).toEqual(["compile", "install"]);
     });
+
+    it("keeps make -j for every target and mode when jobs is not given", () => {
+      for (const target of ["native", "windows"]) {
+        for (const fullReconfigure of [true, false]) {
+          const compileStep = build.getSteps(target, fullReconfigure).find(s => s.label === "compile");
+          expect(compileStep!.command).toBe("make -j");
+        }
+      }
+    });
+
+    it("uses make -j<jobs> when jobs is given and changes no other step", () => {
+      for (const target of ["native", "windows"]) {
+        for (const fullReconfigure of [true, false]) {
+          const unbounded = build.getSteps(target, fullReconfigure);
+          const bounded = build.getSteps(target, fullReconfigure, 3);
+          expect(bounded).toHaveLength(unbounded.length);
+          for (let i = 0; i < bounded.length; i++) {
+            if (bounded[i].label === "compile") {
+              expect(bounded[i].command).toBe("make -j3");
+            } else {
+              expect(bounded[i]).toEqual(unbounded[i]);
+            }
+          }
+        }
+      }
+    });
   });
 
   describe("getInstallPrefix", () => {
@@ -320,23 +357,33 @@ describe("isBinaryByMagic", () => {
 describe("stripBinaries", () => {
   let tmpDir: string;
 
+  function runCommandCalls(): string[] {
+    return mockedRunCommand.mock.calls.map((call) => String(call[0]));
+  }
+
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "strip-test-"));
     mockedExecSync.mockClear();
-    mockedExecSync.mockReturnValue(Buffer.from(""));
+    mockedRunCommand.mockReset();
+    mockedRunCommand.mockResolvedValue(commandResult());
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true });
   });
 
+  function writeElf(fileName: string): string {
+    const libsDir = path.join(tmpDir, "src", ".libs");
+    fs.mkdirSync(libsDir, { recursive: true });
+    const filePath = path.join(libsDir, fileName);
+    fs.writeFileSync(filePath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]));
+    return filePath;
+  }
+
   it("throws if strip tool is not found", async () => {
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (String(cmd).includes("command -v")) {
-        throw new Error("not found");
-      }
-      return Buffer.from("");
-    });
+    mockedRunCommand.mockImplementation(async (cmd: string) =>
+      cmd.includes("command -v") ? commandResult({ exitCode: 1 }) : commandResult()
+    );
 
     await expect(stripBinaries(tmpDir, "native")).rejects.toThrow(
       "Strip tool 'strip' not found on this system"
@@ -344,16 +391,19 @@ describe("stripBinaries", () => {
   });
 
   it("throws if strip tool not found for windows target", async () => {
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (String(cmd).includes("command -v")) {
-        throw new Error("not found");
-      }
-      return Buffer.from("");
-    });
+    mockedRunCommand.mockImplementation(async (cmd: string) =>
+      cmd.includes("command -v") ? commandResult({ exitCode: 1 }) : commandResult()
+    );
 
     await expect(stripBinaries(tmpDir, "windows")).rejects.toThrow(
       "x86_64-w64-mingw32-strip"
     );
+  });
+
+  it("checks for the strip tool through the process runner", async () => {
+    await stripBinaries(tmpDir, "native");
+    expect(runCommandCalls()[0]).toBe("command -v strip");
+    expect(mockedExecSync).not.toHaveBeenCalled();
   });
 
   it("returns empty result when no binary files found", async () => {
@@ -368,24 +418,16 @@ describe("stripBinaries", () => {
   });
 
   it("strips ELF binaries found in src/.libs/", async () => {
-    const libsDir = path.join(tmpDir, "src", ".libs");
-    fs.mkdirSync(libsDir, { recursive: true });
-
-    // Create a fake ELF binary
-    const elfFile = path.join(libsDir, "libfoo.so.0.0.0");
-    const elfMagic = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]);
-    fs.writeFileSync(elfFile, elfMagic);
+    const elfFile = writeElf("libfoo.so.0.0.0");
 
     const result = await stripBinaries(tmpDir, "native");
     expect(result.strippedFiles).toContain(elfFile);
     expect(result.stripTool).toBe("strip");
 
     // Verify strip --strip-unneeded was called
-    const stripCalls = mockedExecSync.mock.calls.filter(
-      (call) => String(call[0]).includes("strip --strip-unneeded")
-    );
-    expect(stripCalls.length).toBe(1);
-    expect(String(stripCalls[0][0])).toContain(elfFile);
+    const stripCalls = runCommandCalls().filter((cmd) => cmd.includes("strip --strip-unneeded"));
+    expect(stripCalls).toEqual([`strip --strip-unneeded ${elfFile}`]);
+    expect(mockedExecSync).not.toHaveBeenCalled();
   });
 
   it("strips PE binaries with windows target using mingw strip", async () => {
@@ -402,8 +444,8 @@ describe("stripBinaries", () => {
     expect(result.stripTool).toBe("x86_64-w64-mingw32-strip");
 
     // Verify the correct strip tool was used
-    const stripCalls = mockedExecSync.mock.calls.filter(
-      (call) => String(call[0]).includes("x86_64-w64-mingw32-strip --strip-unneeded")
+    const stripCalls = runCommandCalls().filter(
+      (cmd) => cmd.includes("x86_64-w64-mingw32-strip --strip-unneeded")
     );
     expect(stripCalls.length).toBe(1);
   });
@@ -415,30 +457,94 @@ describe("stripBinaries", () => {
     // A libtool wrapper script (text, not binary)
     fs.writeFileSync(path.join(libsDir, "libfoo.la"), "# libtool script\n");
     // An actual ELF binary
-    const elfFile = path.join(libsDir, "libfoo.so");
-    fs.writeFileSync(elfFile, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]));
+    const elfFile = writeElf("libfoo.so");
 
     const result = await stripBinaries(tmpDir, "native");
     // Only the ELF file should be stripped (la is excluded by findBuiltOutputs, but even if it weren't it would fail magic check)
-    expect(result.strippedFiles).toContain(elfFile);
+    expect(result.strippedFiles).toEqual([elfFile]);
   });
 
   it("throws when strip fails on a file", async () => {
-    const libsDir = path.join(tmpDir, "src", ".libs");
-    fs.mkdirSync(libsDir, { recursive: true });
+    const elfFile = writeElf("libfoo.so");
 
-    const elfFile = path.join(libsDir, "libfoo.so");
-    fs.writeFileSync(elfFile, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]));
-
-    mockedExecSync.mockImplementation((cmd: string) => {
-      if (String(cmd).includes("strip --strip-unneeded")) {
-        throw new Error("File format not recognized");
-      }
-      return Buffer.from("");
-    });
+    mockedRunCommand.mockImplementation(async (cmd: string) =>
+      cmd.includes("strip --strip-unneeded")
+        ? commandResult({ exitCode: 1, stderr: "File format not recognized\n" })
+        : commandResult()
+    );
 
     await expect(stripBinaries(tmpDir, "native")).rejects.toThrow(
-      "strip failed on"
+      `strip failed on src/.libs/libfoo.so: Command failed: strip --strip-unneeded ${elfFile}\nFile format not recognized\n`
     );
+  });
+
+  it("forwards the signal to every runner call", async () => {
+    writeElf("libfoo.so");
+    writeElf("libbar.so");
+    const controller = new AbortController();
+
+    await stripBinaries(tmpDir, "native", controller.signal);
+
+    expect(mockedRunCommand).toHaveBeenCalledTimes(3);
+    for (const call of mockedRunCommand.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({ signal: controller.signal }));
+    }
+  });
+
+  it("stops stripping further files once the signal is aborted", async () => {
+    writeElf("liba.so");
+    writeElf("libb.so");
+    writeElf("libc.so");
+    const controller = new AbortController();
+
+    let stripCount = 0;
+    mockedRunCommand.mockImplementation(async (cmd: string) => {
+      if (cmd.includes("--strip-unneeded")) {
+        stripCount++;
+        controller.abort();
+      }
+      return commandResult();
+    });
+
+    await expect(stripBinaries(tmpDir, "native", controller.signal)).rejects.toThrow();
+    expect(stripCount).toBe(1);
+  });
+});
+
+describe("stripBinaries with a line logger", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "strip-log-test-"));
+    mockedRunCommand.mockReset();
+    mockedRunCommand.mockResolvedValue(commandResult());
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true });
+  });
+
+  it("sends whole lines to the logger and writes nothing itself", async () => {
+    const libsDir = path.join(tmpDir, "src", ".libs");
+    fs.mkdirSync(libsDir, { recursive: true });
+    fs.writeFileSync(path.join(libsDir, "libfoo.so"), Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]));
+    const lines: string[] = [];
+    const logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+    const writeSpy = jest.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    try {
+      await stripBinaries(tmpDir, "native", undefined, (line) => lines.push(line));
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(writeSpy).not.toHaveBeenCalled();
+    } finally {
+      logSpy.mockRestore();
+      writeSpy.mockRestore();
+    }
+
+    expect(lines).toEqual([
+      "Using strip tool: strip",
+      "Stripping src/.libs/libfoo.so... done",
+      "Stripped 1 file(s)",
+    ]);
   });
 });

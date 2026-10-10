@@ -4,6 +4,7 @@ import Config from "./Config";
 import { execSync } from "child_process";
 import { BuildStep, StripResult } from "./types";
 import Signing from "./Signing";
+import { runCommand, commandFailedMessage } from "./ProcessRunner";
 
 export const targets: {
   [key: string]: string;
@@ -95,8 +96,9 @@ class Build {
    * Returns an ordered array of BuildStep objects for the given target and mode.
    * @param target - 'native' or 'windows'
    * @param fullReconfigure - if true, includes autogen/distclean/configure steps; if false, only compile+install
+   * @param jobs - compile job limit; when omitted the compile step is an unbounded "make -j"
    */
-  getSteps = (target: string, fullReconfigure: boolean): BuildStep[] => {
+  getSteps = (target: string, fullReconfigure: boolean, jobs?: number): BuildStep[] => {
     const newTarget = targets[target];
     const prefix = this.config.config.prefix + "/" + newTarget;
 
@@ -130,7 +132,7 @@ class Build {
 
     steps.push({
       label: "compile",
-      command: "make -j",
+      command: jobs === undefined ? "make -j" : `make -j${jobs}`,
     });
 
     steps.push({
@@ -201,8 +203,13 @@ export function findBuiltOutputs(projectDir: string): string[] {
  *
  * @param configDir - Path to the-seed config directory
  * @param projectDir - Path to the project directory (defaults to process.cwd())
+ * @param log - Receives each progress line whole, instead of it being printed
  */
-export async function autoSignIfCertExists(configDir: string, projectDir?: string): Promise<void> {
+export async function autoSignIfCertExists(
+  configDir: string,
+  projectDir?: string,
+  log?: (line: string) => void
+): Promise<void> {
   const dir = projectDir || process.cwd();
   const pkgPath = path.join(dir, "package.json");
   if (!fs.existsSync(pkgPath)) return;
@@ -233,10 +240,13 @@ export async function autoSignIfCertExists(configDir: string, projectDir?: strin
       if (await signing.isBinaryFile(filePath)) {
         const result = await signing.signFile(filePath, { scope });
         const rel = path.relative(dir, filePath);
-        if (result.signatureType === "embedded") {
-          console.log(`  Signed (embedded): ${rel}`);
+        const line = result.signatureType === "embedded"
+          ? `Signed (embedded): ${rel}`
+          : `Signed (detached): ${rel} → ${path.basename(result.signaturePath!)}`;
+        if (log) {
+          log(line);
         } else {
-          console.log(`  Signed (detached): ${rel} → ${path.basename(result.signaturePath!)}`);
+          console.log(`  ${line}`);
         }
         signedCount++;
       }
@@ -246,7 +256,12 @@ export async function autoSignIfCertExists(configDir: string, projectDir?: strin
   }
 
   if (signedCount > 0) {
-    console.log(`\nAuto-signed ${signedCount} file(s) using scope '${scope}'`);
+    const line = `Auto-signed ${signedCount} file(s) using scope '${scope}'`;
+    if (log) {
+      log(line);
+    } else {
+      console.log(`\n${line}`);
+    }
   }
 }
 
@@ -292,21 +307,37 @@ export function isBinaryByMagic(filePath: string): boolean {
  * Strips debug symbols from all binary outputs in a project.
  * Verifies the strip tool exists, finds binary outputs, filters by magic bytes,
  * and runs `strip --strip-unneeded` on each binary.
+ *
+ * Aborting `signal` stops the strip command that is running and strips no
+ * further files; the promise then rejects.
+ *
+ * When `log` is given it receives each progress line whole and nothing is
+ * printed, so a caller building several projects at once can attribute the
+ * lines without another project's output landing mid-line.
  */
-export async function stripBinaries(projectDir: string, target: string): Promise<StripResult> {
+export async function stripBinaries(
+  projectDir: string,
+  target: string,
+  signal?: AbortSignal,
+  log?: (line: string) => void
+): Promise<StripResult> {
   const stripTool = getStripTool(target);
 
   // Verify strip tool exists
-  try {
-    execSync(`command -v ${stripTool}`, { stdio: "pipe" });
-  } catch {
+  const probe = await runCommand(`command -v ${stripTool}`, { signal });
+  if (probe.killed) {
+    throw new Error("Strip cancelled");
+  }
+  if (probe.exitCode !== 0) {
     const hint = target === "windows"
-      ? `\nInstall the MinGW binutils package (e.g., binutils-mingw-w64-x86-64) and try again.`
+      ? "\nInstall the MinGW binutils package (e.g., binutils-mingw-w64-x86-64) and try again."
       : "";
     throw new Error(`Strip tool '${stripTool}' not found on this system.${hint}`);
   }
 
-  console.log(`[strip] Using strip tool: ${stripTool}`);
+  const report = (line: string) => (log ? log(line) : console.log(`[strip] ${line}`));
+
+  report(`Using strip tool: ${stripTool}`);
 
   const candidates = findBuiltOutputs(projectDir);
   const strippedFiles: string[] = [];
@@ -314,21 +345,32 @@ export async function stripBinaries(projectDir: string, target: string): Promise
   for (const filePath of candidates) {
     if (!isBinaryByMagic(filePath)) continue;
 
-    const rel = path.relative(projectDir, filePath);
-    process.stdout.write(`[strip] Stripping ${rel}... `);
-
-    try {
-      execSync(`${stripTool} --strip-unneeded ${filePath}`, { stdio: "pipe" });
-      console.log("done");
-      strippedFiles.push(filePath);
-    } catch (e: unknown) {
-      console.log("FAILED");
-      const err = e as { message?: string };
-      throw new Error(`strip failed on ${rel}: ${err.message ?? "Unknown error"}`);
+    if (signal?.aborted) {
+      throw new Error("Strip cancelled");
     }
+
+    const rel = path.relative(projectDir, filePath);
+    if (!log) {
+      process.stdout.write(`[strip] Stripping ${rel}... `);
+    }
+    // Completes the line begun above, or reports it whole to the logger.
+    const finishLine = (status: string) => (log ? log(`Stripping ${rel}... ${status}`) : console.log(status));
+
+    const command = `${stripTool} --strip-unneeded ${filePath}`;
+    const result = await runCommand(command, { signal });
+    if (result.killed) {
+      finishLine("cancelled");
+      throw new Error("Strip cancelled");
+    }
+    if (result.exitCode !== 0) {
+      finishLine("FAILED");
+      throw new Error(`strip failed on ${rel}: ${commandFailedMessage(command, result.stderr)}`);
+    }
+    finishLine("done");
+    strippedFiles.push(filePath);
   }
 
-  console.log(`[strip] Stripped ${strippedFiles.length} file(s)`);
+  report(`Stripped ${strippedFiles.length} file(s)`);
 
   return { strippedFiles, stripTool };
 }

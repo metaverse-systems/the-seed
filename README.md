@@ -263,14 +263,28 @@ The `component` and `system` templates include a `.pc.in` file for pkg-config. T
 
 Build and cross-compile projects using GNU Autotools.
 
+```text
+the-seed build <target> [--recursive] [--parallel N] [--release]
+```
+
 | Subcommand | Arguments | Description |
 |------------|-----------|-------------|
-| `help` | | Print usage and available targets |
+| `help` | | Print usage, options and examples |
 | `native` | | Full build for Linux (autogen, configure, make, install) |
-| `native` | `recursive` | Build all transitive dependencies then the current project for Linux |
+| `native` | `--recursive` | Build all transitive dependencies then the current project for Linux |
 | `windows` | | Full cross-compile for Windows (autogen, configure with mingw host, make, install) |
-| `windows` | `recursive` | Build all transitive dependencies then the current project for Windows |
+| `windows` | `--recursive` | Build all transitive dependencies then the current project for Windows |
 | (none) | | Incremental build (make + make install only, no reconfigure) |
+
+Options go after the target, in any order:
+
+| Option | Description |
+|--------|-------------|
+| `--recursive` | Build every buildable dependency first, then the current project (see [Recursive Builds](#recursive-builds)) |
+| `--parallel N` | With `--recursive`, build up to `N` independent projects at once. Default 1. Also accepted as `--parallel=N`. `N` must be a positive whole number; values above the processor count are reduced to it |
+| `--release` | Strip debug symbols from the built binaries after install, before signing |
+
+Any other argument is rejected with exit status 1 and a message naming it, before anything is built. That includes a misspelled option (`--recursve`), `--parallel` without `--recursive`, an invalid or repeated `--parallel` value, an option given without a target (`the-seed build --release`) and an unknown target.
 
 Target directory mapping:
 
@@ -293,10 +307,12 @@ Running `the-seed build` without a subcommand performs only steps 4 and 5.
 
 #### Recursive Builds
 
-The `recursive` flag discovers all transitive `file:` and `node_modules` dependencies from `package.json`, classifies each project by type (component, system, or program), and builds them in topological order so that dependencies are always installed before their dependents.
+The `--recursive` option discovers all transitive `file:` and `node_modules` dependencies from `package.json`, classifies each project by type (component, system, or program), and builds them in topological order so that dependencies are always installed before their dependents.
 
 ```bash
-the-seed build native recursive
+the-seed build native --recursive
+the-seed build windows --recursive --release
+the-seed build native --recursive --parallel 4 --release
 ```
 
 Projects are classified by inspecting `src/Makefile.am`:
@@ -307,9 +323,30 @@ Projects are classified by inspecting `src/Makefile.am`:
 | System | `lib_LTLIBRARIES` with `the-seed` in name | 1 |
 | Program | `bin_PROGRAMS` | 2 (last) |
 
-Within each tier, projects are sorted alphabetically. The build halts immediately if any project fails (unless the project's `ignoreExitCode` flag is set).
+Within each tier, projects are sorted alphabetically.
 
-Cancellation is supported via `AbortSignal` when invoked programmatically.
+By default (`--parallel 1`) projects build one at a time in that order, with the same commands as a plain build, including an unbounded `make -j`. With `--parallel N`, up to `N` projects build at once (never more than the processor count), and the ordering guarantees still hold:
+
+- A project starts only after each of its dependencies has finished installing.
+- Every component finishes before any system starts, and every system before any program. A project that depends on a higher tier than its own waits with that tier.
+- Among projects that are ready, the one earliest in the build order starts first.
+- Installs never overlap. Each project's `make install`, strip (with `--release`) and signing run as one phase that no other project's install phase can interleave with.
+- When more than one project builds at once, each tier's projects share the processors as `make -j<jobs>`, so the compile jobs running at once never add up to more than the processor count. `MAKEFLAGS` and `MFLAGS` are removed from the build environment so an inherited `-j` cannot override the share.
+
+Every progress line names its project, for example `[@org/physics-system] compile... done`. Build output is captured, not streamed; when the build ends, a report lists the projects that completed, failed, were interrupted or never started, and each failure's full output appears as one block between `===== <project> failed at <step> =====` and `===== end of <project> output =====`.
+
+The build stops starting new projects at the first failure; projects already building run to the end and are reported. A failed build exits with status 1.
+
+Cancelling:
+
+- The first Ctrl+C stops every running autogen, distclean, configure and compile step, and starts nothing new. An install phase already in progress finishes, so the prefix is never left half-written.
+- A second Ctrl+C also stops the install phase in progress; that project is reported as interrupted.
+- `SIGTERM` and `SIGHUP` act like two presses.
+- A cancelled build exits with 130 after Ctrl+C, 143 after `SIGTERM` and 129 after `SIGHUP`.
+
+When invoked programmatically, `buildRecursive` accepts an `AbortSignal` (`signal`, the graceful kind) and an optional `forceSignal`; cancelling from the VS Code extension is always the graceful kind.
+
+The bare word `recursive` (without dashes) is deprecated. It still requests a recursive build but prints a warning; use `--recursive` instead.
 
 ### dependencies
 

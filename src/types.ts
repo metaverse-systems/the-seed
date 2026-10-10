@@ -233,10 +233,29 @@ export interface RecursiveBuildResult {
   failed: BuildableProject | null;
   /** Stderr/stdout from the failed build step, or null */
   failureOutput: string | null;
-  /** Projects that were not attempted due to failure */
+  /**
+   * Every project that is neither completed nor the first failure, in build
+   * order, so that completed + remaining + (failed ? 1 : 0) equals the total.
+   */
   remaining: BuildableProject[];
   /** true if the build was cancelled by user */
   cancelled: boolean;
+  /** Every failure in the order it happened; `failed` and `failureOutput` describe the first */
+  failures: ProjectFailure[];
+  /** Projects that had started and were stopped by cancellation */
+  interrupted: BuildableProject[];
+  /** Projects that never began because the build stopped first */
+  notStarted: BuildableProject[];
+}
+
+/** One project's failure in a recursive build. */
+export interface ProjectFailure {
+  /** The project that failed */
+  project: BuildableProject;
+  /** Label of the step that failed (autogen, configure, compile, install, strip or sign) */
+  step: string;
+  /** Full captured output of the failed command, or the error message for strip and sign */
+  output: string;
 }
 
 /** Callbacks for reporting recursive build progress. */
@@ -273,4 +292,31 @@ export interface RecursiveBuildOptions {
   callbacks?: RecursiveBuildCallbacks;
   /** When true, strip binaries after compile and before sign. Defaults to false. */
   release?: boolean;
+  /**
+   * Maximum number of projects to build at once (a positive integer, capped
+   * at the processor count). Defaults to 1, which builds one project at a time.
+   */
+  parallel?: number;
+  /**
+   * Optional second, forced cancellation. Aborting `signal` stops running
+   * steps but lets an install in progress finish; aborting this also stops
+   * the install.
+   */
+  forceSignal?: AbortSignal;
+}
+
+/** The parsed arguments of `the-seed build`. */
+export interface BuildRequest {
+  /** "incremental" when no target is given, "full" for native or windows */
+  mode: "help" | "incremental" | "full";
+  /** Set only when mode is "full" */
+  target?: "native" | "windows";
+  /** Build every buildable dependency first */
+  recursive: boolean;
+  /** Strip binaries after install, before signing */
+  release: boolean;
+  /** Maximum number of projects to build at once; 1 unless --parallel was given */
+  parallel: number;
+  /** The deprecated bare word "recursive" was used */
+  deprecatedBareWord: boolean;
 }
