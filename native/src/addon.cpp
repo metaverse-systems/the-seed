@@ -32,7 +32,7 @@ Napi::Value ListDependencies(const Napi::CallbackInfo& info) {
     searchPaths.push_back(jsSearchPaths.Get(i).As<Napi::String>().Utf8Value());
   }
 
-  DependencyLister lister;
+  the_seed::DependencyLister lister;
   auto result = lister.ListDependencies(binaryPaths, searchPaths);
 
   Napi::Object jsResult = Napi::Object::New(env);
@@ -109,7 +109,7 @@ Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
     if (magic[0] == 0x4D && magic[1] == 0x5A) {
       // Validate PE header by trying to compute digest
       try {
-        auto digestResult = PeSigner::ComputeAuthenticodeDigest(filePath);
+        auto digestResult = the_seed::PeSigner::ComputeAuthenticodeDigest(filePath);
         result.Set("format", Napi::String::New(env, "pe"));
         result.Set("subFormat", Napi::String::New(env, digestResult.is_pe32_plus ? "pe32+" : "pe32"));
         return result;
@@ -120,23 +120,23 @@ Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
 
     // Check Mach-O: the library decides, from the same rules it signs by
     if (bytesRead >= 4) {
-      MachOParser::Format fmt = MachOParser::Format::NotMachO;
+      the_seed::MachOParser::Format fmt = the_seed::MachOParser::Format::NotMachO;
       try {
-        fmt = MachOParser::DetectFormat(filePath);
+        fmt = the_seed::MachOParser::DetectFormat(filePath);
       } catch (...) {
-        fmt = MachOParser::Format::NotMachO;
+        fmt = the_seed::MachOParser::Format::NotMachO;
       }
 
-      if (fmt != MachOParser::Format::NotMachO) {
+      if (fmt != the_seed::MachOParser::Format::NotMachO) {
         result.Set("format", Napi::String::New(env, "macho"));
         switch (fmt) {
-          case MachOParser::Format::MachO32:
+          case the_seed::MachOParser::Format::MachO32:
             result.Set("subFormat", Napi::String::New(env, "macho32"));
             break;
-          case MachOParser::Format::MachO64:
+          case the_seed::MachOParser::Format::MachO64:
             result.Set("subFormat", Napi::String::New(env, "macho64"));
             break;
-          case MachOParser::Format::Fat:
+          case the_seed::MachOParser::Format::Fat:
             result.Set("subFormat", Napi::String::New(env, "fat"));
             break;
           default:
@@ -186,7 +186,7 @@ Napi::Value PeComputeDigest(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    auto result = PeSigner::ComputeAuthenticodeDigest(filePath);
+    auto result = the_seed::PeSigner::ComputeAuthenticodeDigest(filePath);
     Napi::Object jsResult = Napi::Object::New(env);
     jsResult.Set("digest", Napi::Buffer<uint8_t>::Copy(env, result.digest.data(), result.digest.size()));
     jsResult.Set("isPe32Plus", Napi::Boolean::New(env, result.is_pe32_plus));
@@ -211,7 +211,7 @@ Napi::Value PeEmbedSignature(const Napi::CallbackInfo& info) {
   std::vector<uint8_t> pkcs7Der(buf.Data(), buf.Data() + buf.Length());
 
   try {
-    PeSigner::EmbedSignature(filePath, pkcs7Der);
+    the_seed::PeSigner::EmbedSignature(filePath, pkcs7Der);
     return env.Undefined();
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
@@ -231,7 +231,7 @@ Napi::Value PeExtractSignature(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    auto result = PeSigner::ExtractSignature(filePath);
+    auto result = the_seed::PeSigner::ExtractSignature(filePath);
     if (result.has_value()) {
       return Napi::Buffer<uint8_t>::Copy(env, result->data(), result->size());
     }
@@ -254,7 +254,7 @@ Napi::Value PeHasEmbeddedSignature(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    return Napi::Boolean::New(env, PeSigner::HasEmbeddedSignature(filePath));
+    return Napi::Boolean::New(env, the_seed::PeSigner::HasEmbeddedSignature(filePath));
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
@@ -265,7 +265,7 @@ Napi::Value PeHasEmbeddedSignature(const Napi::CallbackInfo& info) {
 
 // Reads the prepared-signature object that machoPrepareSignature returned.
 // Throws Napi::TypeError naming the first missing or mistyped field.
-static MachOSigner::PreparedSignature ReadPreparedSignature(Napi::Env env, const Napi::Value& value) {
+static the_seed::MachOSigner::PreparedSignature ReadPreparedSignature(Napi::Env env, const Napi::Value& value) {
   if (!value.IsObject() || value.IsArray() || value.IsBuffer()) {
     throw Napi::TypeError::New(env, "prepared must be the object returned by machoPrepareSignature");
   }
@@ -288,7 +288,7 @@ static MachOSigner::PreparedSignature ReadPreparedSignature(Napi::Env env, const
     throw Napi::TypeError::New(env, "prepared.slices must be an array");
   }
 
-  MachOSigner::PreparedSignature prepared;
+  the_seed::MachOSigner::PreparedSignature prepared;
   prepared.identity = identity.As<Napi::String>().Utf8Value();
   prepared.cms_capacity = static_cast<std::uint32_t>(capValue);
 
@@ -318,7 +318,7 @@ static MachOSigner::PreparedSignature ReadPreparedSignature(Napi::Env env, const
       throw Napi::TypeError::New(env, where + ".cdHash must be a Buffer");
     }
 
-    MachOSigner::PreparedSlice slice;
+    the_seed::MachOSigner::PreparedSlice slice;
     slice.cpu_type = static_cast<std::uint32_t>(cpuType.As<Napi::Number>().Int64Value());
     slice.cpu_subtype = static_cast<std::uint32_t>(cpuSubtype.As<Napi::Number>().Int64Value());
     Napi::Buffer<uint8_t> cdBuf = codeDirectory.As<Napi::Buffer<uint8_t>>();
@@ -349,7 +349,7 @@ Napi::Value MachOPrepareSignature(const Napi::CallbackInfo& info) {
   }
 
   try {
-    auto prepared = MachOSigner::PrepareSignature(filePath, identity, static_cast<std::uint32_t>(capValue));
+    auto prepared = the_seed::MachOSigner::PrepareSignature(filePath, identity, static_cast<std::uint32_t>(capValue));
     Napi::Object jsResult = Napi::Object::New(env);
     jsResult.Set("identity", Napi::String::New(env, prepared.identity));
     jsResult.Set("cmsCapacity", Napi::Number::New(env, static_cast<double>(prepared.cms_capacity)));
@@ -382,7 +382,7 @@ Napi::Value MachOCompleteSignature(const Napi::CallbackInfo& info) {
 
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
-  MachOSigner::PreparedSignature prepared;
+  the_seed::MachOSigner::PreparedSignature prepared;
   try {
     prepared = ReadPreparedSignature(env, info[1]);
   } catch (const Napi::Error& e) {
@@ -404,7 +404,7 @@ Napi::Value MachOCompleteSignature(const Napi::CallbackInfo& info) {
   }
 
   try {
-    MachOSigner::CompleteSignature(filePath, prepared, cmsSignatures);
+    the_seed::MachOSigner::CompleteSignature(filePath, prepared, cmsSignatures);
     return env.Undefined();
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
@@ -423,7 +423,7 @@ Napi::Value MachOStripSignature(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    MachOSigner::StripSignature(filePath);
+    the_seed::MachOSigner::StripSignature(filePath);
     return env.Undefined();
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
@@ -461,7 +461,7 @@ Napi::Value MachOBuildSuperBlob(const Napi::CallbackInfo& info) {
   std::vector<uint8_t> cmsSignature(cmsBuf.Data(), cmsBuf.Data() + cmsBuf.Length());
 
   try {
-    auto result = MachOSigner::BuildSuperBlob(codeDirectory, cmsSignature);
+    auto result = the_seed::MachOSigner::BuildSuperBlob(codeDirectory, cmsSignature);
     return Napi::Buffer<uint8_t>::Copy(env, result.data(), result.size());
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
@@ -485,7 +485,7 @@ Napi::Value MachOExtractSignature(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    auto result = MachOSigner::ExtractSignature(filePath);
+    auto result = the_seed::MachOSigner::ExtractSignature(filePath);
     if (result.has_value()) {
       return Napi::Buffer<uint8_t>::Copy(env, result->data(), result->size());
     }
@@ -508,7 +508,7 @@ Napi::Value MachOHasEmbeddedSignature(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    return Napi::Boolean::New(env, MachOSigner::HasEmbeddedSignature(filePath));
+    return Napi::Boolean::New(env, the_seed::MachOSigner::HasEmbeddedSignature(filePath));
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
@@ -529,7 +529,7 @@ Napi::Value MsiIsMsi(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    return Napi::Boolean::New(env, MsiSigner::IsMsi(filePath));
+    return Napi::Boolean::New(env, the_seed::MsiSigner::IsMsi(filePath));
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
@@ -548,7 +548,7 @@ Napi::Value MsiComputeDigest(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    auto result = MsiSigner::ComputeAuthenticodeDigest(filePath);
+    auto result = the_seed::MsiSigner::ComputeAuthenticodeDigest(filePath);
     Napi::Object jsResult = Napi::Object::New(env);
     jsResult.Set("digest", Napi::Buffer<uint8_t>::Copy(env, result.digest.data(), result.digest.size()));
     return jsResult;
@@ -582,7 +582,7 @@ Napi::Value MsiEmbedSignature(const Napi::CallbackInfo& info) {
   std::vector<uint8_t> pkcs7Der(buf.Data(), buf.Data() + buf.Length());
 
   try {
-    MsiSigner::EmbedSignature(filePath, pkcs7Der, requireMatchingDigest);
+    the_seed::MsiSigner::EmbedSignature(filePath, pkcs7Der, requireMatchingDigest);
     return env.Undefined();
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
@@ -602,13 +602,13 @@ Napi::Value MsiCheckSignature(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    auto check = MsiSigner::CheckSignature(filePath);
+    auto check = the_seed::MsiSigner::CheckSignature(filePath);
     const char* state = "none";
     switch (check.state) {
-      case MsiSigner::SignatureState::None: state = "none"; break;
-      case MsiSigner::SignatureState::Matches: state = "matches"; break;
-      case MsiSigner::SignatureState::Mismatch: state = "mismatch"; break;
-      case MsiSigner::SignatureState::Unreadable: state = "unreadable"; break;
+      case the_seed::MsiSigner::SignatureState::None: state = "none"; break;
+      case the_seed::MsiSigner::SignatureState::Matches: state = "matches"; break;
+      case the_seed::MsiSigner::SignatureState::Mismatch: state = "mismatch"; break;
+      case the_seed::MsiSigner::SignatureState::Unreadable: state = "unreadable"; break;
     }
     Napi::Object jsResult = Napi::Object::New(env);
     jsResult.Set("state", Napi::String::New(env, state));
@@ -634,7 +634,7 @@ Napi::Value MsiStripSignature(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    return Napi::Boolean::New(env, MsiSigner::StripSignature(filePath));
+    return Napi::Boolean::New(env, the_seed::MsiSigner::StripSignature(filePath));
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
@@ -653,7 +653,7 @@ Napi::Value MsiExtractSignature(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    auto result = MsiSigner::ExtractSignature(filePath);
+    auto result = the_seed::MsiSigner::ExtractSignature(filePath);
     if (result.has_value()) {
       return Napi::Buffer<uint8_t>::Copy(env, result->data(), result->size());
     }
@@ -676,7 +676,7 @@ Napi::Value MsiHasEmbeddedSignature(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
 
   try {
-    return Napi::Boolean::New(env, MsiSigner::HasEmbeddedSignature(filePath));
+    return Napi::Boolean::New(env, the_seed::MsiSigner::HasEmbeddedSignature(filePath));
   } catch (const std::exception& e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
