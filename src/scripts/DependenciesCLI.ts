@@ -8,6 +8,12 @@ const DependenciesCLI = async (scriptConfig: ScriptArgsType) => {
   const command = scriptConfig.args[3];
   const target = scriptConfig.args[4] ? scriptConfig.args[4] : "native";
 
+  if ((command === "check" || command === "install") && target !== "native" && target !== "windows") {
+    console.error(`Unrecognized target "${target}"; expected native or windows.`);
+    process.exitCode = 1;
+    return;
+  }
+
   switch (command) {
     case "help":
       console.log("\nUsage: the-seed dependencies <command>");

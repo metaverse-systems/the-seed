@@ -77,6 +77,16 @@ describe("test Build", () => {
     });
   });
 
+  describe("getSteps inherited environment", () => {
+    it("extends the PKG_CONFIG_PATH of the environment it is given", () => {
+      const configure = build.getSteps("native", true, 2, { PKG_CONFIG_PATH: "/given/path" }).find((s) => s.label === "configure")!;
+
+      expect(configure.env!.PKG_CONFIG_PATH).toBe(
+        path.join(config.config.prefix, "x86_64-linux-gnu", "lib", "pkgconfig") + ":/given/path"
+      );
+    });
+  });
+
   describe("buildProject", () => {
     let projectDir: string;
     let events: string[];
@@ -166,6 +176,16 @@ describe("test Build", () => {
       expect(env.SEED_BASE_VALUE).toBe("kept");
       expect(env.PKG_CONFIG_PATH).toContain(path.join(build.getInstallPrefix("native"), "lib/pkgconfig"));
       expect(env.PKG_CONFIG_PATH).toBe(librarySearchEnv(config.config.prefix, "native", process.env).PKG_CONFIG_PATH);
+    });
+
+    it("extends the PKG_CONFIG_PATH of the base environment it was given, not the tool's own", async () => {
+      await build.buildProject(buildOptions({ env: { PKG_CONFIG_PATH: "/base/only/path" } }));
+
+      const configure = mockedRunCommand.mock.calls.find((call) => call[0] === "./configure")!;
+      const env = (configure[2] as { env: NodeJS.ProcessEnv }).env;
+      expect(env.PKG_CONFIG_PATH).toBe(
+        path.join(config.config.prefix, "x86_64-linux-gnu", "lib", "pkgconfig") + ":/base/only/path"
+      );
     });
 
     it("precedes each step with '==> <label>: <stepText>' through log", async () => {

@@ -392,7 +392,7 @@ Check and install C++ library dependencies (libecs-cpp and libthe-seed).
 | `check` | `[target]` | Check if ecs-cpp and the-seed libraries are installed |
 | `install` | `[target]` | Clone and build missing libraries from GitHub |
 
-The `target` argument defaults to `native`. For each missing library, the `install` command clones the repository from GitHub and builds it with autotools into the target prefix. Each step is printed as `==> <label>: <command>` with the program's output as it happens. The compile step uses the processor count as its job limit (it used a plain `make` before); `dependencies install` has no `--jobs` option. A step that fails stops that library's install and the failure is reported:
+The `target` argument is `native` or `windows` (anything else is rejected with exit status 1) and defaults to `native`. For each missing library, the `install` command clones the repository from GitHub and builds it with autotools into the target prefix. Each step is printed as `==> <label>: <command>` with the program's output as it happens. The compile step uses the processor count as its job limit (it used a plain `make` before); `dependencies install` has no `--jobs` option. A step that fails stops that library's install and the failure is reported:
 
 - `ecs-cpp`: Cloned from `https://github.com/metaverse-systems/libecs-cpp.git`
 - `the-seed`: Cloned from `https://github.com/metaverse-systems/libthe-seed.git`

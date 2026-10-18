@@ -50,7 +50,7 @@ class Build {
     const fullReconfigure = options.target !== undefined;
     const target = options.target ?? "native";
 
-    for (const step of this.getSteps(target, fullReconfigure, options.jobs)) {
+    for (const step of this.getSteps(target, fullReconfigure, options.jobs, options.env)) {
       const isInstall = step.label === "install";
       if (isInstall && (options.signal?.aborted || options.forceSignal?.aborted)) {
         return { status: "cancelled" };
@@ -108,8 +108,14 @@ class Build {
    * @param target - 'native' or 'windows'
    * @param fullReconfigure - if true, includes autogen/distclean/configure steps; if false, only compile+install
    * @param jobs - compile job limit; defaults to the processor count, so the compile step is always "make -j<jobs>"
+   * @param inherited - the environment whose PKG_CONFIG_PATH the library search extends; defaults to process.env
    */
-  getSteps = (target: string, fullReconfigure: boolean, jobs: number = processorCount()): BuildStep[] => {
+  getSteps = (
+    target: string,
+    fullReconfigure: boolean,
+    jobs: number = processorCount(),
+    inherited: NodeJS.ProcessEnv = process.env
+  ): BuildStep[] => {
     const newTarget = targets[target];
     const prefix = this.config.config.prefix + "/" + newTarget;
 
@@ -127,7 +133,7 @@ class Build {
           "--prefix=" + prefix,
           ...(target === "windows" ? ["--host=" + targets["windows"]] : []),
         ],
-        env: librarySearchEnv(this.config.config.prefix, target, process.env),
+        env: librarySearchEnv(this.config.config.prefix, target, inherited),
       });
     }
 

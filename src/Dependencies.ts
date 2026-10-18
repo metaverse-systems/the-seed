@@ -1,6 +1,5 @@
 import fs from "fs";
 import Config from "./Config";
-import path from "path";
 import { spawnSync } from "child_process";
 import { targets } from "./Build";
 import { BuildStep } from "./types";

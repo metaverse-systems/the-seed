@@ -74,6 +74,13 @@ describe("runCli on first use", () => {
     });
   }
 
+  it("dependencies check with an unknown target says so and exits 1 without a stack trace", async () => {
+    await expect(runCli(argv("dependencies", "check", "macos"), configDir, binName)).resolves.toBeUndefined();
+
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledWith("Unrecognized target \"macos\"; expected native or windows.");
+  });
+
   it("signing help on an empty home works", async () => {
     await runCli(argv("signing", "help"), configDir, binName);
     expect(process.exitCode).toBeUndefined();
