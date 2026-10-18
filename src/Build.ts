@@ -4,6 +4,7 @@ import Config from "./Config";
 import { BuildStep, ProjectBuildOptions, ProjectBuildResult, StripResult } from "./types";
 import Signing from "./Signing";
 import { processorCount } from "./BuildScheduler";
+import { librarySearchEnv } from "./LibrarySearch";
 import { runStep, stepText } from "./StepRunner";
 import { runCommand, commandFailedMessage, findOnPath, formatCommand } from "./ProcessRunner";
 
@@ -126,7 +127,7 @@ class Build {
           "--prefix=" + prefix,
           ...(target === "windows" ? ["--host=" + targets["windows"]] : []),
         ],
-        env: { PKG_CONFIG_PATH: path.join(prefix, "lib/pkgconfig") },
+        env: librarySearchEnv(this.config.config.prefix, target, process.env),
       });
     }
 

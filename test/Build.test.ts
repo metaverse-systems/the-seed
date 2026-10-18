@@ -4,6 +4,7 @@ import os from "os";
 import Config from "../src/Config";
 import Build, { targets, extractScope, getStripTool, isBinaryByMagic, stripBinaries, findBuiltOutputs } from "../src/Build";
 import { BuildStep } from "../src/types";
+import { librarySearchEnv } from "../src/LibrarySearch";
 
 // Signing is replaced so a build's final signing step can be observed; the hooks
 // below decide what it reports.
@@ -164,6 +165,7 @@ describe("test Build", () => {
       const env = (configure[2] as { env: NodeJS.ProcessEnv }).env;
       expect(env.SEED_BASE_VALUE).toBe("kept");
       expect(env.PKG_CONFIG_PATH).toContain(path.join(build.getInstallPrefix("native"), "lib/pkgconfig"));
+      expect(env.PKG_CONFIG_PATH).toBe(librarySearchEnv(config.config.prefix, "native", process.env).PKG_CONFIG_PATH);
     });
 
     it("precedes each step with '==> <label>: <stepText>' through log", async () => {
@@ -571,20 +573,20 @@ describe("test Build", () => {
       }
     });
 
-    it("native configure step has the prefix argument, no --host and the prefix's pkgconfig path", () => {
+    it("native configure step has the prefix argument, no --host and the native library search environment", () => {
       const step = stepOf(build.getSteps("native", true), "configure");
       const target = prefix() + "/x86_64-linux-gnu";
       expect(step.program).toBe("./configure");
       expect(step.args).toEqual(["--prefix=" + target]);
-      expect(step.env).toEqual({ PKG_CONFIG_PATH: path.join(target, "lib/pkgconfig") });
+      expect(step.env).toEqual(librarySearchEnv(prefix(), "native", process.env));
     });
 
-    it("windows configure step adds --host=x86_64-w64-mingw32", () => {
+    it("windows configure step adds --host=x86_64-w64-mingw32 and the windows library search environment", () => {
       const step = stepOf(build.getSteps("windows", true), "configure");
       const target = prefix() + "/x86_64-w64-mingw32";
       expect(step.program).toBe("./configure");
       expect(step.args).toEqual(["--prefix=" + target, "--host=x86_64-w64-mingw32"]);
-      expect(step.env).toEqual({ PKG_CONFIG_PATH: path.join(target, "lib/pkgconfig") });
+      expect(step.env).toEqual(librarySearchEnv(prefix(), "windows", process.env));
     });
 
     it("keeps a prefix with a space, quote, double quote and dollar as one unmodified argument", () => {

@@ -6,6 +6,7 @@ import { targets } from "./Build";
 import { BuildStep } from "./types";
 import { runStep, stepText } from "./StepRunner";
 import { processorCount } from "./BuildScheduler";
+import { librarySearchEnv } from "./LibrarySearch";
 
 const libEcsRepo = "https://github.com/metaverse-systems/libecs-cpp.git";
 const libTheSeedRepo = "https://github.com/metaverse-systems/libthe-seed.git";
@@ -14,10 +15,8 @@ export const requiredLibEcsVersion = "2.1.0";
 export const requiredLibTheSeedVersion = "0.8.0";
 
 export const checkLib = (config: Config, library: string, target: string, minVersion?: string) => {
-  const targetPrefix = targets[target];
-  const prefix = path.join(config.config.prefix, targetPrefix);
   const options = {
-    env: { ...process.env, PKG_CONFIG_PATH: path.join(prefix, "lib", "pkgconfig") },
+    env: { ...process.env, ...librarySearchEnv(config.config.prefix, target) },
     encoding: "utf8" as const,
   };
   const pkgConfig = (args: string[]) => spawnSync("pkg-config", args, options);
@@ -73,14 +72,14 @@ export const installLibTheSeed = async (config: Config, target: string) => {
  * The steps that fetch and install one library: clone it, or update the
  * existing clone, then autogen, configure, compile and install inside it.
  */
-const getLibrarySteps = (name: string, repo: string, installDir: string, prefix: string, target: string, jobs: number): BuildStep[] => {
+const getLibrarySteps = (name: string, repo: string, installDir: string, prefix: string, target: string, jobs: number, search: Record<string, string>): BuildStep[] => {
   const hostArgs = target !== "native" ? ["--host=" + targets[target]] : [];
   return [
     fs.existsSync(installDir)
       ? { label: `update ${name}`, program: "git", args: ["-C", installDir, "pull", "--ff-only"] }
       : { label: `clone ${name}`, program: "git", args: ["clone", repo, installDir] },
     { label: `${name} autogen`, program: "./autogen.sh", args: [], cwd: installDir },
-    { label: `${name} configure`, program: "./configure", args: [`--prefix=${prefix}`, ...hostArgs], cwd: installDir },
+    { label: `${name} configure`, program: "./configure", args: [`--prefix=${prefix}`, ...hostArgs], cwd: installDir, env: search },
     { label: `${name} compile`, program: "make", args: [`-j${jobs}`], cwd: installDir },
     { label: `${name} install`, program: "make", args: ["install"], cwd: installDir },
   ];
@@ -108,7 +107,7 @@ export const installLib = async (
     },
   };
 
-  for (const step of getLibrarySteps(installDir, repo, installDir, prefix, target, options.jobs ?? processorCount())) {
+  for (const step of getLibrarySteps(installDir, repo, installDir, prefix, target, options.jobs ?? processorCount(), librarySearchEnv(config.config.prefix, target, process.env))) {
     const text = stepText(step);
     console.log(`==> ${step.label}: ${text}`);
 
@@ -142,7 +141,7 @@ export const installLib = async (
  * Checks which libraries are missing and generates clone + build steps for each.
  * Order: libecs-cpp first, then libthe-seed (compile-time dependency).
  */
-export const getInstallSteps = (config: Config, target: string, jobs: number = processorCount()): BuildStep[] => {
+export const getInstallSteps = (config: Config, target: string, jobs: number = processorCount(), inherited: NodeJS.ProcessEnv = process.env): BuildStep[] => {
   const targetDir = targets[target];
   const prefix = config.config.prefix + "/" + targetDir;
   const steps: BuildStep[] = [];
@@ -158,7 +157,7 @@ export const getInstallSteps = (config: Config, target: string, jobs: number = p
       continue;
     }
 
-    steps.push(...getLibrarySteps(lib.name, lib.repo, lib.installDir, prefix, target, jobs));
+    steps.push(...getLibrarySteps(lib.name, lib.repo, lib.installDir, prefix, target, jobs, librarySearchEnv(config.config.prefix, target, inherited)));
   }
 
   return steps;

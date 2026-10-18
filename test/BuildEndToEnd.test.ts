@@ -7,7 +7,9 @@ import Build from "../src/Build";
 import { buildRecursive } from "../src/RecursiveBuild";
 import { findOnPath } from "../src/ProcessRunner";
 import { installLib } from "../src/Dependencies";
+import { WINDOWS_TOOLCHAIN_PKGCONFIG_DIRS } from "../src/LibrarySearch";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { findSystemOnlyPackage, writePackageDescription } from "./helpers/SystemPackage";
 
 // Real autotools, make and a C compiler build the fixture in test/fixtures/autotools-tiny with 50 MB of
 // compile output. Every case has its own copy of the fixture, its own install prefix and a scratch home
@@ -20,7 +22,7 @@ const TAIL_BYTES = 65536;
 const JOBS = 4;
 const CASE_TIMEOUT = 120000;
 
-const ENV_KEYS = ["HOME", "SEED_TEST_NOISE", "SEED_TEST_FAIL", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS"];
+const ENV_KEYS = ["HOME", "PKG_CONFIG", "SEED_TEST_REQUIRES", "SEED_TEST_NOISE", "SEED_TEST_FAIL", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS"];
 
 const toolsAvailable = ["autoreconf", "make", "cc"].every((tool) => findOnPath(tool) !== null);
 
@@ -507,4 +509,67 @@ describe("BuildEndToEnd", () => {
       restoreTmp();
     }
   }, CASE_TIMEOUT);
+
+  describe("library search", () => {
+    const pkgConfigAvailable = findOnPath("pkg-config") !== null;
+    const mingwAvailable = findOnPath("x86_64-w64-mingw32-gcc") !== null;
+    const toolsReason = "autoreconf, make, cc or pkg-config not found";
+
+    function build(target: "native" | "windows", userPath: string, requires: string, sink: TailSink) {
+      // The user's search path is given both in the process environment and in the environment passed to the
+      // build, so it reaches the configure step whichever of the two the implementation reads.
+      // PKG_CONFIG names the plain pkg-config for configure: a distribution's host-prefixed wrapper
+      // (x86_64-w64-mingw32-pkg-config) would otherwise narrow the search by itself and hide the defect.
+      useProcessEnv({ PKG_CONFIG_PATH: userPath, PKG_CONFIG: "pkg-config", HOME: home });
+      return new Build(new Config(configDir)).buildProject({
+        projectDir,
+        target,
+        release: false,
+        jobs: JOBS,
+        configDir,
+        env: { ...caseEnv({ SEED_TEST_REQUIRES: requires, PKG_CONFIG: "pkg-config" }), PKG_CONFIG_PATH: userPath },
+        output: sink,
+        log: () => undefined,
+      });
+    }
+
+    it("native configure finds a library from the prefix and one from the user's path", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && pkgConfigAvailable, toolsReason)) return;
+      const userDir = path.join(root, "user pkgconfig");
+      writePackageDescription(path.join(nativePrefix, "lib", "pkgconfig"), "seedtest-prefix");
+      writePackageDescription(userDir, "seedtest-user");
+      const sink = new TailSink();
+
+      const result = await build("native", userDir, "seedtest-prefix seedtest-user", sink);
+
+      expect(result).toEqual({ status: "completed" });
+      expect(runInstalledTiny()).toContain("tiny ok");
+    }, CASE_TIMEOUT);
+
+    it("windows configure reports a native-only package missing and finds one in the Windows prefix", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && pkgConfigAvailable && mingwAvailable,
+        "autoreconf, make, cc, pkg-config or x86_64-w64-mingw32-gcc not found")) return;
+      const windowsPrefix = path.join(prefix, "x86_64-w64-mingw32");
+      const windowsDir = path.join(windowsPrefix, "lib", "pkgconfig");
+      // A package described only in a system directory, chosen from what this machine has.
+      const system = findSystemOnlyPackage([windowsDir, ...WINDOWS_TOOLCHAIN_PKGCONFIG_DIRS]);
+      if (!optionalExternalCheck("system-only-package", system !== null, "no package described only in a system directory")) return;
+      const userDir = path.join(root, "user pkgconfig");
+      writePackageDescription(windowsDir, "seedtest-windows");
+      writePackageDescription(userDir, "seedtest-user");
+
+      const missing = new TailSink();
+      const failed = await build("windows", userDir, "seedtest-windows " + system, missing);
+
+      expect(failed.status).toBe("failed");
+      expect((failed as { step: string }).step).toBe("configure");
+      expect(missing.tailText()).toContain(system as string);
+
+      const found = new TailSink();
+      const completed = await build("windows", userDir, "seedtest-windows", found);
+
+      expect(completed).toEqual({ status: "completed" });
+      expect(fs.existsSync(path.join(windowsPrefix, "bin", "tiny.exe"))).toBe(true);
+    }, CASE_TIMEOUT * 2);
+  });
 });

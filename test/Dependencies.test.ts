@@ -3,7 +3,10 @@ import path from "path";
 import os from "os";
 import Config from "../src/Config";
 import { BuildStep } from "../src/types";
-import { formatCommand } from "../src/ProcessRunner";
+import { formatCommand, findOnPath } from "../src/ProcessRunner";
+import { librarySearchEnv, WINDOWS_TOOLCHAIN_PKGCONFIG_DIRS } from "../src/LibrarySearch";
+import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { findSystemOnlyPackage, writePackageDescription } from "./helpers/SystemPackage";
 import {
   checkLib,
   checkLibEcs,
@@ -175,6 +178,114 @@ describe("test Dependencies", () => {
     });
   });
 
+  describe("checkLib library search settings", () => {
+    const realSpawnSync = jest.requireActual<typeof import("child_process")>("child_process").spawnSync;
+    let savedPath: string | undefined;
+    let savedLibdir: string | undefined;
+    let scratch: string;
+    let searchConfig: Config;
+    let searchConfigDir: string;
+
+    beforeEach(() => {
+      savedPath = process.env.PKG_CONFIG_PATH;
+      savedLibdir = process.env.PKG_CONFIG_LIBDIR;
+      delete process.env.PKG_CONFIG_LIBDIR;
+      scratch = createTempDir();
+      searchConfigDir = createTempDir();
+      searchConfig = new Config(searchConfigDir);
+      searchConfig.config.prefix = path.join(scratch, "prefix");
+    });
+
+    afterEach(() => {
+      if (savedPath === undefined) delete process.env.PKG_CONFIG_PATH;
+      else process.env.PKG_CONFIG_PATH = savedPath;
+      if (savedLibdir === undefined) delete process.env.PKG_CONFIG_LIBDIR;
+      else process.env.PKG_CONFIG_LIBDIR = savedLibdir;
+      fs.rmSync(scratch, { recursive: true, force: true });
+      fs.rmSync(searchConfigDir, { recursive: true, force: true });
+    });
+
+    /** Sends checkLib's pkg-config calls to the real program. */
+    function useRealPkgConfig(): void {
+      mockedSpawnSync.mockImplementation((program: string, args: string[], options: object) =>
+        realSpawnSync(program, args, options));
+    }
+
+    const pkgConfigAvailable = findOnPath("pkg-config") !== null;
+
+    it("native lookups get the prefix first and the user's path after", () => {
+      process.env.PKG_CONFIG_PATH = "/opt/user/pkgconfig";
+      mockedSpawnSync.mockReturnValue(ran(0, "-l ecs-cpp"));
+      checkLib(searchConfig, "ecs-cpp", "native", "1.0.0");
+      const expected = librarySearchEnv(searchConfig.config.prefix, "native", process.env);
+      expect(expected.PKG_CONFIG_PATH).toBe(
+        path.join(searchConfig.config.prefix, "x86_64-linux-gnu", "lib", "pkgconfig") + ":/opt/user/pkgconfig");
+      const calls = pkgConfigCalls();
+      expect(calls).toHaveLength(2);
+      for (const [, , options] of calls) {
+        expect(options.env?.PKG_CONFIG_PATH).toBe(expected.PKG_CONFIG_PATH);
+        expect(options.env?.PKG_CONFIG_LIBDIR).toBeUndefined();
+      }
+    });
+
+    it("windows lookups use only the Windows prefix and toolchain directories", () => {
+      process.env.PKG_CONFIG_PATH = "/opt/user/pkgconfig";
+      mockedSpawnSync.mockReturnValue(ran(0, "-l ecs-cpp"));
+      checkLib(searchConfig, "ecs-cpp", "windows", "1.0.0");
+      const expected = librarySearchEnv(searchConfig.config.prefix, "windows", process.env);
+      expect(expected.PKG_CONFIG_PATH).toBe("");
+      expect(expected.PKG_CONFIG_LIBDIR).toBe([
+        path.join(searchConfig.config.prefix, "x86_64-w64-mingw32", "lib", "pkgconfig"),
+        ...WINDOWS_TOOLCHAIN_PKGCONFIG_DIRS,
+      ].join(":"));
+      const calls = pkgConfigCalls();
+      expect(calls).toHaveLength(2);
+      for (const [, , options] of calls) {
+        expect(options.env?.PKG_CONFIG_PATH).toBe("");
+        expect(options.env?.PKG_CONFIG_LIBDIR).toBe(expected.PKG_CONFIG_LIBDIR);
+      }
+    });
+
+    it("checkLib for native finds a library in the user's PKG_CONFIG_PATH", () => {
+      if (!optionalExternalCheck("pkg-config", pkgConfigAvailable, "pkg-config not found")) return;
+      const userDir = path.join(scratch, "user pkgconfig");
+      writePackageDescription(userDir, "seedtest-native");
+      process.env.PKG_CONFIG_PATH = userDir;
+      useRealPkgConfig();
+      expect(checkLib(searchConfig, "seedtest-native", "native")).toBe(true);
+    });
+
+    it("checkLib for windows finds a library in the Windows prefix", () => {
+      if (!optionalExternalCheck("pkg-config", pkgConfigAvailable, "pkg-config not found")) return;
+      writePackageDescription(
+        path.join(searchConfig.config.prefix, "x86_64-w64-mingw32", "lib", "pkgconfig"), "seedtest-windows");
+      useRealPkgConfig();
+      expect(checkLib(searchConfig, "seedtest-windows", "windows")).toBe(true);
+    });
+
+    it("checkLib for windows does not find a library described only in a system directory", () => {
+      if (!optionalExternalCheck("pkg-config", pkgConfigAvailable, "pkg-config not found")) return;
+      const windowsDir = path.join(searchConfig.config.prefix, "x86_64-w64-mingw32", "lib", "pkgconfig");
+      // The package is chosen at run time from pkg-config's own directories, leaving out any name the
+      // Windows prefix or the toolchain directories also describe.
+      const system = findSystemOnlyPackage([windowsDir, ...WINDOWS_TOOLCHAIN_PKGCONFIG_DIRS]);
+      if (!optionalExternalCheck("system-only-package", system !== null, "no package described only in a system directory")) return;
+      delete process.env.PKG_CONFIG_PATH;
+      useRealPkgConfig();
+      expect(checkLib(searchConfig, system as string, "native")).toBe(true);
+      expect(checkLib(searchConfig, system as string, "windows")).toBe(false);
+    });
+
+    it("checkLib for windows ignores the user's PKG_CONFIG_PATH", () => {
+      if (!optionalExternalCheck("pkg-config", pkgConfigAvailable, "pkg-config not found")) return;
+      const userDir = path.join(scratch, "user pkgconfig");
+      writePackageDescription(userDir, "seedtest-native");
+      process.env.PKG_CONFIG_PATH = userDir;
+      useRealPkgConfig();
+      expect(checkLib(searchConfig, "seedtest-native", "windows")).toBe(false);
+    });
+  });
+
   describe("checkLibEcs", () => {
     it("delegates to checkLib with ecs-cpp", () => {
       mockedSpawnSync.mockReturnValue(ran(0, "-l ecs-cpp"));
@@ -238,6 +349,22 @@ describe("test Dependencies", () => {
 
       const compile = stepsRun().find((step) => step.label === "test-dir compile")!;
       expect(compile).toMatchObject({ program: "make", args: ["-j3"], cwd: "test-dir" });
+    });
+
+    it("gives the configure step the library search environment for each target", async () => {
+      const saved = process.env.PKG_CONFIG_PATH;
+      process.env.PKG_CONFIG_PATH = "/opt/user/pkgconfig";
+      try {
+        for (const target of ["native", "windows"]) {
+          mockedRunStep.mockClear();
+          await installLib(config, repo, "test-dir", target);
+          const configure = stepsRun().find((step) => step.label === "test-dir configure")!;
+          expect(configure.env).toEqual(librarySearchEnv(config.config.prefix, target, process.env));
+        }
+      } finally {
+        if (saved === undefined) delete process.env.PKG_CONFIG_PATH;
+        else process.env.PKG_CONFIG_PATH = saved;
+      }
     });
 
     it("runs the five steps in order from the current directory", async () => {
@@ -576,6 +703,26 @@ describe("test Dependencies", () => {
           expect(bounded[i].args).toEqual(["-j2"]);
         } else {
           expect(bounded[i]).toEqual(byDefault[i]);
+        }
+      }
+    });
+
+    it("gives every library's configure step the library search environment for the target", () => {
+      const inherited = { PKG_CONFIG_PATH: "/opt/user/pkgconfig" };
+      for (const target of ["native", "windows"]) {
+        const steps = getInstallSteps(config, target, undefined, inherited);
+        const configures = steps.filter((step) => step.label.endsWith(" configure"));
+        expect(configures).toHaveLength(2);
+        for (const step of configures) {
+          expect(step.env).toEqual(librarySearchEnv(config.config.prefix, target, inherited));
+        }
+      }
+    });
+
+    it("leaves the other install steps without a search environment", () => {
+      for (const step of getInstallSteps(config, "native", undefined, { PKG_CONFIG_PATH: "/opt/user" })) {
+        if (!step.label.endsWith(" configure")) {
+          expect(step.env).toBeUndefined();
         }
       }
     });
