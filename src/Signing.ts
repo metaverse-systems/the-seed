@@ -42,6 +42,7 @@ interface NativeAddon {
   peEmbedSignature(filePath: string, pkcs7Der: Buffer): void;
   peExtractSignature(filePath: string): Buffer | null;
   peHasEmbeddedSignature(filePath: string): boolean;
+  peStripSignature(filePath: string): void;
   machoPrepareSignature(filePath: string, identity: string, cmsCapacity: number): MachOPreparedSignature;
   machoCompleteSignature(filePath: string, prepared: MachOPreparedSignature, cmsSignatures: Buffer[]): void;
   machoStripSignature(filePath: string): void;
@@ -175,6 +176,23 @@ class Signing {
       // If native addon fails, fall back to "other"
       return { format: "other", subFormat: null };
     }
+  }
+
+  /**
+   * Remove the embedded signature of a PE file.
+   * Returns true when a signature was removed, false when the file is not a PE
+   * file or carries no embedded signature. Errors from the native call propagate.
+   */
+  removeEmbeddedSignature(filePath: string): boolean {
+    if (this.detectBinaryFormat(filePath).format !== "pe") {
+      return false;
+    }
+    const addon = loadNativeAddon();
+    if (!addon.peHasEmbeddedSignature(filePath)) {
+      return false;
+    }
+    addon.peStripSignature(filePath);
+    return true;
   }
 
   /**

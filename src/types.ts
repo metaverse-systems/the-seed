@@ -1,3 +1,5 @@
+import type { StepOutputMode } from "./StepRunner";
+
 export interface AuthorType {
   name: string;
   email: string;
@@ -364,3 +366,94 @@ export type ProjectBuildResult =
   | { status: "completed" }
   | { status: "failed"; step: string; message: string }
   | { status: "cancelled" };
+
+/** What a file is for a build target. */
+export type OutputKind = "elfExecutable" | "elfShared" | "peProgram" | "peLibrary";
+
+/** One entry under the staged prefix root. `relPath` is relative to the root and uses "/". */
+export interface StagedEntry {
+  relPath: string;
+  type: "dir" | "file" | "symlink";
+  mode: number;
+  linkTarget?: string;
+  dev: number;
+  ino: number;
+}
+
+/** The result of reading the stage after the install step. */
+export interface StagedTree {
+  /** The DESTDIR given to the install step */
+  stageDir: string;
+  target: "native" | "windows";
+  /** <config prefix>/<triplet> */
+  prefix: string;
+  /** stageDir + prefix */
+  root: string;
+  /** Every entry under root, depth first, directories before their contents */
+  entries: StagedEntry[];
+}
+
+/** One program or library output and every name it has. */
+export interface OutputGroup {
+  /** Absolute path of the real file */
+  file: string;
+  kind: OutputKind;
+  /** Absolute path of every name: the file, each symlink in a chain that ends at it, each hard link */
+  names: string[];
+  /** The symlink names with their readlink text */
+  links: { path: string; target: string }[];
+  /** The hard-link names other than file */
+  hardLinks: string[];
+  /** The path printed in progress lines */
+  display: string;
+}
+
+/** Whether a project is signed, and if not, why. */
+export type SigningOutcome =
+  | { kind: "signed"; scope: string }
+  | {
+      kind: "unsigned";
+      reason: "noPackageJson" | "unreadablePackageJson" | "noScope" | "noCertificate" | "expired";
+      scope?: string;
+      name?: string;
+      expiredOn?: Date;
+      detail?: string;
+    };
+
+/** What a successful install phase did. */
+export interface InstallReport {
+  prefix: string;
+  installed: number;
+  stripped: string[];
+  signed: { display: string; form: "embedded" | "detached" }[];
+  outcome: SigningOutcome;
+}
+
+/** Options for the install phase of one project. */
+export interface InstallPhaseOptions {
+  projectDir: string;
+  /** config.config.prefix */
+  configPrefix: string;
+  /** Directory holding the signing certificates */
+  configDir: string;
+  /** Absent for an incremental build */
+  target?: "native" | "windows";
+  /** Strip only when true and a target is given */
+  release: boolean;
+  /** The install step; DESTDIR is appended */
+  installStep: BuildStep;
+  /** Base environment of the step */
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  output: StepOutputMode;
+  /** One whole line per call */
+  log: (line: string) => void;
+  /** Called once, right after the install step succeeds */
+  onInstalled?: () => void;
+}
+
+/** How the install phase ended. */
+export type InstallPhaseResult =
+  | { status: "completed"; report: InstallReport }
+  | { status: "failed"; step: "install" | "strip" | "sign" | "place"; message: string; output?: string }
+  | { status: "interrupted" };
