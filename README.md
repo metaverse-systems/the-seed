@@ -345,7 +345,7 @@ Then the install phase:
 
 **Changed:** earlier versions ran an unbounded `make -j`, which starts one compiler per source file and can exhaust memory. Every build now has a job limit.
 
-Running `the-seed build` without a subcommand performs only steps 4 and 5 and the install phase.
+Running `the-seed build` without a subcommand performs only step 4 and the install phase (step 5 and what follows it).
 
 **Changed:** earlier versions stripped and signed only the copies in the build tree; the files in the prefix were neither stripped nor signed, static archives and the Windows libtool wrapper were signed, and signing errors were ignored.
 
@@ -357,7 +357,7 @@ Running `the-seed build` without a subcommand performs only steps 4 and 5 and th
 - All or nothing: the prefix is changed only after every file has been stripped and signed. A failure at `install`, `strip`, `sign` or `place` leaves the prefix as it was.
 - Cancelling: the first Ctrl+C lets the install phase finish and place its files (`Build cancelled after installing.`); a second Ctrl+C, `SIGTERM` or `SIGHUP` discards an install phase that has not reached placement (`Build cancelled.`). Placement, once started, completes.
 - `<prefix>/.the-seed-staging` holds the staging directories while a build runs. It may be deleted when no build is running.
-- A build refuses to install (failing at `install`) when `make install` writes outside the prefix, writes nothing, or the project was configured for another prefix; run a full build (`the-seed build <target>`) in that case.
+- A build refuses to install (failing at `install`) when `make install` writes outside the prefix, writes nothing under `DESTDIR` (the message names the project), or the project was configured for another prefix; run a full build (`the-seed build <target>`) in that case. A project whose install rules ignore `DESTDIR` has already written into the prefix by then; the build reports the failure but cannot undo that.
 - Files that an install rule deletes (for example retired headers) are not removed from the prefix, because the install writes into a staging directory.
 - Outputs installed outside `src/` and `src/.libs/` are processed in the prefix, but their build-tree copies are not.
 

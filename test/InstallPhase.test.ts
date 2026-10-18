@@ -5,9 +5,9 @@ import { buildTreeCopies, groupOutputs, notice, outputKind, placeStaged, readSta
 import Signing from "../src/Signing";
 import { findOnPath } from "../src/ProcessRunner";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
-import { InstallPhaseOptions, InstallPhaseResult, OutputGroup, SigningOutcome } from "../src/types";
+import { InstallPhaseOptions, InstallPhaseResult, OutputGroup } from "../src/types";
 
-// Choices made where the contracts leave a detail open (the implementation matches these):
+// Choices made where the behaviour leaves a detail open (the implementation matches these):
 // - `readStage` and `placeStaged` are synchronous and throw; the two distinguishable errors have
 //   `name` "OutsidePrefix" and "NothingStaged".
 // - `StagedTree.entries` does not list `root` itself; `relPath` uses "/" separators and siblings
@@ -19,7 +19,7 @@ import { InstallPhaseOptions, InstallPhaseResult, OutputGroup, SigningOutcome } 
 //   `links` are compared as sets by these tests.
 
 // - `stripOutputs(groups, target, signal, log)` and `signOutputs(groups, scope, configDir, target, signal, log)`
-//   return promises that resolve to nothing the tests use; they reject with the messages of the contract.
+//   return promises that resolve to nothing the tests use; they reject with the messages the build reports.
 //   Both call `Signing` methods on an instance (`removeEmbeddedSignature`, `detectBinaryFormat`, `signFile`),
 //   which the tests replace on `Signing.prototype`, so the implementation must not call them as static
 //   functions or through a copy of the class.
@@ -230,9 +230,6 @@ function makeStage(target: "native" | "windows", prefixName = "prefix"): TestSta
   return { base, stageDir, configPrefix, prefix, root };
 }
 
-const unsigned: SigningOutcome = { kind: "unsigned", reason: "noScope" };
-const signed: SigningOutcome = { kind: "signed", scope: "@test" };
-
 // ── readStage ───────────────────────────────────────────────
 
 describe("readStage", () => {
@@ -309,8 +306,26 @@ describe("readStage", () => {
   it("fails with the other-prefix message when the given target's root does not exist", () => {
     const base = makeScratch();
     const stageDir = path.join(base, "stage");
-    fs.mkdirSync(stageDir);
+    writeFile(stageDir + "/somewhere/else/file", "x");
     expect(() => readStage(stageDir, path.join(base, "prefix"), "native")).toThrow(/configured for another prefix/);
+  });
+
+  it("an empty stage (an install that ignores DESTDIR) fails as NothingStaged naming the project, whatever the target", () => {
+    const base = makeScratch();
+    const stageDir = path.join(base, "stage");
+    fs.mkdirSync(stageDir);
+    const project = path.join(base, "my project");
+    for (const target of [undefined, "native", "windows"] as Array<"native" | "windows" | undefined>) {
+      let error: Error | undefined;
+      try {
+        readStage(stageDir, path.join(base, "prefix"), target, project);
+      } catch (err) {
+        error = err as Error;
+      }
+      expect([target, error?.name]).toEqual([target, "NothingStaged"]);
+      expect(error?.message).toContain("the install step of " + project + " wrote nothing under DESTDIR");
+      expect(error?.message).toContain("cannot be installed safely");
+    }
   });
 
   it("a file, a link and a non-empty directory outside the prefix fail as OutsidePrefix, naming the installed paths", () => {
@@ -672,7 +687,7 @@ describe.each([
     fs.chmodSync(path.join(s.root, "share", "doc"), 0o750);
     const tree = readStage(s.stageDir, s.configPrefix, "native");
 
-    placeStaged(tree, groupOutputs(tree), unsigned);
+    placeStaged(tree, groupOutputs(tree));
 
     expect(fs.readFileSync(path.join(s.prefix, "bin", "tiny")).equals(elfHeader(2, "program"))).toBe(true);
     expect(fs.statSync(path.join(s.prefix, "bin", "tiny")).mode & 0o7777).toBe(0o755);
@@ -691,7 +706,7 @@ describe.each([
     writeFile(path.join(s.prefix, "bin", "tiny"), "old contents", 0o644);
     const tree = readStage(s.stageDir, s.configPrefix, "native");
 
-    placeStaged(tree, groupOutputs(tree), unsigned);
+    placeStaged(tree, groupOutputs(tree));
 
     expect(fs.readFileSync(path.join(s.prefix, "bin", "tiny")).equals(elfHeader(2, "new"))).toBe(true);
     expect(fs.statSync(path.join(s.prefix, "bin", "tiny")).mode & 0o7777).toBe(0o755);
@@ -708,7 +723,7 @@ describe.each([
     fs.chmodSync(path.join(s.prefix, "bin"), 0o711);
     const tree = readStage(s.stageDir, s.configPrefix, "native");
 
-    placeStaged(tree, groupOutputs(tree), unsigned);
+    placeStaged(tree, groupOutputs(tree));
 
     expect(fs.statSync(path.join(s.prefix, "private")).mode & 0o7777).toBe(0o700);
     expect(fs.statSync(path.join(s.prefix, "bin")).mode & 0o7777).toBe(0o711);
@@ -721,7 +736,7 @@ describe.each([
     fs.linkSync(path.join(s.root, "bin", "tool"), path.join(s.root, "bin", "tool-alias"));
     const tree = readStage(s.stageDir, s.configPrefix, "native");
 
-    placeStaged(tree, groupOutputs(tree), unsigned);
+    placeStaged(tree, groupOutputs(tree));
 
     const a = fs.statSync(path.join(s.prefix, "bin", "tool"));
     const b = fs.statSync(path.join(s.prefix, "bin", "tool-alias"));
@@ -744,7 +759,7 @@ describe.each([
     writeFile(path.join(s.root, "bin", "tiny.sig"), "signature of the program");
     expect(tree.entries.some((e) => e.relPath.endsWith(".sig"))).toBe(false);
 
-    placeStaged(tree, groups, signed);
+    placeStaged(tree, groups);
 
     expect(fs.readFileSync(path.join(s.prefix, "lib", "libx.so.0.0.0.sig"), "utf8")).toBe("signature of the library");
     expect(fs.lstatSync(path.join(s.prefix, "lib", "libx.so.0.sig")).isSymbolicLink()).toBe(true);
@@ -760,7 +775,7 @@ describe.each([
     fs.symlinkSync("keep.txt", path.join(s.prefix, "share", "keep-link"));
     const tree = readStage(s.stageDir, s.configPrefix, "native");
 
-    placeStaged(tree, groupOutputs(tree), unsigned);
+    placeStaged(tree, groupOutputs(tree));
 
     expect(fs.readFileSync(path.join(s.prefix, "bin", "other"), "utf8")).toBe("other program");
     expect(fs.readFileSync(path.join(s.prefix, "share", "keep.txt"), "utf8")).toBe("keep");
@@ -773,7 +788,7 @@ describe.each([
     writeFile(path.join(s.root, "bin", "tiny"), elfHeader(2), 0o755);
     const tree = readStage(s.stageDir, s.configPrefix, "native");
 
-    placeStaged(tree, groupOutputs(tree), unsigned);
+    placeStaged(tree, groupOutputs(tree));
 
     expect(fs.existsSync(path.join(s.root, "bin", "tiny"))).toBe(false);
   });
@@ -789,7 +804,7 @@ describe("placeStaged errors", () => {
 
     let message = "";
     try {
-      placeStaged(tree, groupOutputs(tree), unsigned);
+      placeStaged(tree, groupOutputs(tree));
     } catch (err) {
       message = (err as Error).message;
     }
@@ -805,8 +820,6 @@ describe("placeStaged errors", () => {
 // Choices: the pre-check names either the offending directory or a path inside it in `cannot place <path>: <reason>`
 // (the tests only require the directory's path to appear in the message); a failed pre-check moves nothing.
 describe("placeStaged pre-check", () => {
-  const notRoot = process.getuid !== undefined && process.getuid() === 0 ? it.skip : it;
-
   function stageTree(s: TestStage): void {
     writeFile(path.join(s.root, "bin", "tiny"), elfHeader(2, "new"), 0o755);
     writeFile(path.join(s.root, "lib", "libx.so.0.0.0"), elfHeader(3, "new"), 0o755);
@@ -816,7 +829,7 @@ describe("placeStaged pre-check", () => {
   function attempt(s: TestStage): string {
     const tree = readStage(s.stageDir, s.configPrefix, "native");
     try {
-      placeStaged(tree, groupOutputs(tree), unsigned);
+      placeStaged(tree, groupOutputs(tree));
     } catch (err) {
       return (err as Error).message;
     }
@@ -829,7 +842,9 @@ describe("placeStaged pre-check", () => {
     expect(fs.existsSync(path.join(s.root, "lib", "libx.so.0.0.0"))).toBe(true);
   }
 
-  notRoot("refuses an unwritable existing destination directory before anything is moved", () => {
+  it("refuses an unwritable existing destination directory before anything is moved", () => {
+    // Root can write into any directory, so the refusal cannot be observed there
+    if (!optionalExternalCheck("install-phase-unwritable-directory", process.getuid?.() !== 0, "running as root, which can write into any directory")) return;
     const s = makeStage("native");
     stageTree(s);
     // bin sorts before lib, so a check done lazily would already have moved bin/tiny
@@ -891,7 +906,7 @@ describe("placeStaged across file systems", () => {
       return realRename(from, to);
     });
 
-    placeStaged(tree, groups, unsigned);
+    placeStaged(tree, groups);
 
     expect(failures).toBe(1);
     expect(fs.readFileSync(path.join(s.prefix, "bin", "tiny")).equals(elfHeader(2, "new"))).toBe(true);
@@ -914,7 +929,7 @@ describe("placeStaged across file systems", () => {
       return realRename(from, to);
     });
 
-    placeStaged(tree, groups, unsigned);
+    placeStaged(tree, groups);
 
     expect(fs.readlinkSync(path.join(s.prefix, "lib", "libx.so.0"))).toBe("libx.so.0.0.0");
     expect(fs.readdirSync(path.join(s.prefix, "lib")).filter((name) => name.includes(".the-seed-"))).toEqual([]);
@@ -2422,9 +2437,9 @@ describe("runInstallPhase", () => {
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
       expect(result.step).toBe("install");
-      // No staged root exists at all, so the message is the one for an install under another prefix
-      expect(result.message).toContain("the install step did not install under " + c.prefix);
-      expect(result.message).toContain("configured for another prefix");
+      // The stage is empty, so the install rules cannot be staged; the message names the project
+      expect(result.message).toContain("the install step of " + c.projectDir + " wrote nothing under DESTDIR");
+      expect(result.message).toContain("do not support a staged install (DESTDIR)");
     }
     expect(snapshot(c.configPrefix)).toEqual(before);
     stageNothingLeft(c);
@@ -2475,7 +2490,7 @@ function isLink(file: string): boolean {
 }
 
 describe("signingOutcome and notice", () => {
-  // Choices: `notice` returns the single line of the research table, with `<projectDir>/package.json`
+  // Choices: `notice` returns a single line, with `<projectDir>/package.json`
   // joined by "/" and the expired date as the UTC calendar date (`toISOString().slice(0, 10)`);
   // for an unreadable package.json `outcome.detail` is the reason that goes between the parentheses.
   const scope = "@t";

@@ -146,6 +146,18 @@ function findOutside(dir: string, root: string, stageDir: string, found: string[
   }
 }
 
+/** Whether a file or link exists anywhere under the directory. */
+function hasFileOrLink(dir: string): boolean {
+  for (const name of fs.readdirSync(dir)) {
+    const full = path.join(dir, name);
+    const st = fs.lstatSync(full);
+    if (!st.isDirectory() || hasFileOrLink(full)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function walkRoot(root: string, relDir: string, entries: StagedEntry[]): void {
   const dir = relDir === "" ? root : path.join(root, relDir);
   for (const name of sortedNames(dir)) {
@@ -172,10 +184,19 @@ function walkRoot(root: string, relDir: string, entries: StagedEntry[]): void {
 /**
  * Reads the stage left by the install step. With no target (an incremental
  * build) the target is the one whose staged root exists. Throws
- * OutsidePrefix for files outside the prefix and NothingStaged when no file
- * or link was staged under it.
+ * NothingStaged, naming the project, when the install step wrote no file or
+ * link anywhere in the stage (its install rules ignore DESTDIR), and
+ * OutsidePrefix for files outside the prefix.
  */
-export function readStage(stageDir: string, configPrefix: string, target?: TargetName): StagedTree {
+export function readStage(stageDir: string, configPrefix: string, target?: TargetName, projectDir?: string): StagedTree {
+  if (!hasFileOrLink(stageDir)) {
+    throw new NothingStagedError(
+      "the install step of " +
+        (projectDir ?? "the project") +
+        " wrote nothing under DESTDIR; its install rules do not support a staged install (DESTDIR), " +
+        "so it cannot be installed safely"
+    );
+  }
   const rootOf = (name: TargetName) => stageDir + path.join(configPrefix, targets[name]);
   let found: TargetName;
   if (target !== undefined) {
@@ -213,12 +234,6 @@ export function readStage(stageDir: string, configPrefix: string, target?: Targe
 
   const entries: StagedEntry[] = [];
   walkRoot(root, "", entries);
-  if (!entries.some((entry) => entry.type !== "dir")) {
-    throw new NothingStagedError(
-      "the install step wrote nothing under DESTDIR; its install rules do not support a staged install (DESTDIR), " +
-        "so it cannot be installed safely"
-    );
-  }
   return { stageDir, target: found, prefix, root, entries };
 }
 
@@ -466,8 +481,7 @@ function checkPlacement(tree: StagedTree, prefixPath: (relPath: string) => strin
  * Returns the number of files and links placed. Errors read
  * `cannot place <path>: <reason>`.
  */
-export function placeStaged(tree: StagedTree, groups: OutputGroup[], outcome: SigningOutcome): number {
-  void outcome;
+export function placeStaged(tree: StagedTree, groups: OutputGroup[]): number {
   const stagePath = (relPath: string) => path.join(tree.root, relPath);
   const prefixPath = (relPath: string) => path.join(tree.prefix, relPath);
 
@@ -876,7 +890,7 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
 
     let tree: StagedTree;
     try {
-      tree = readStage(stageDir, options.configPrefix, options.target);
+      tree = readStage(stageDir, options.configPrefix, options.target, options.projectDir);
     } catch (err) {
       return { status: "failed", step: "install", message: reasonOf(err) };
     }
@@ -948,7 +962,7 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
     }
     let installed: number;
     try {
-      installed = placeStaged(tree, groups, signingResult);
+      installed = placeStaged(tree, groups);
     } catch (err) {
       return { status: "failed", step: "place", message: reasonOf(err) };
     }

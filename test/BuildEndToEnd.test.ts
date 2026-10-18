@@ -716,9 +716,7 @@ describe("BuildEndToEnd", () => {
       expect(fs.existsSync(path.join(projectDir, "src", ".libs", "tiny.exe"))).toBe(true);
       expect(wrapperBefore).not.toBeNull();
       expect(fs.readFileSync(wrapper).equals(wrapperBefore as unknown as Buffer)).toBe(true);
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const addon = require("../native/build/Release/dependency_lister.node") as { peHasEmbeddedSignature(file: string): boolean };
-      expect(addon.peHasEmbeddedSignature(wrapper)).toBe(false);
+      expect((await signing.verifyFile(wrapper)).status).toBe("NOT_FOUND");
       for (const file of windowsFiles()) {
         const sections = spawnSync("x86_64-w64-mingw32-objdump", ["-h", file], { encoding: "utf-8" }).stdout;
         expect([file, sections.length > 0, /\.debug_/.test(sections)]).toEqual([file, true, false]);
