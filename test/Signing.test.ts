@@ -36,7 +36,7 @@ function writeConfig(configDir: string, data: { prefix?: string; scope?: string;
       },
     };
   }
-  const full = { prefix: data.prefix || "", scopes };
+  const full = { prefix: data.prefix || "/tmp/seed-test-prefix", scopes };
   fs.writeFileSync(configPath, JSON.stringify(full, null, 2));
 }
 
@@ -191,7 +191,7 @@ describe("Signing", () => {
 
     it("throws when author name is missing in scope", async () => {
       const configPath = path.join(configDir, "config.json");
-      const config = { prefix: "", scopes: { "@bad": { author: { name: "", email: "", url: "" } } } };
+      const config = { prefix: "/tmp/seed-test-prefix", scopes: { "@bad": { author: { name: "", email: "", url: "" } } } };
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
       const s = new Signing(configDir);
       await expect(s.createCert({ scope: "@bad" })).rejects.toThrow("author name");

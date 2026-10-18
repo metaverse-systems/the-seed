@@ -676,6 +676,16 @@ describe("optionalExternalCheck", () => {
   });
 });
 
+describe("isolated environment", () => {
+  it("points the home and temporary locations at the scratch area and disables the Node compile cache", () => {
+    const environment = runChecks.isolatedEnvironment({ HOME: "/real", KEEP: "yes" }, "/scratch/home", "/scratch/tmp");
+    expect(environment.NODE_DISABLE_COMPILE_CACHE).toBe("1");
+    expect(environment.HOME).toBe("/scratch/home");
+    expect(environment.TMPDIR).toBe("/scratch/tmp");
+    expect(environment.KEEP).toBe("yes");
+  });
+});
+
 describe("command line", () => {
   const script = rel("scripts", "run-checks.js");
   let directory: string;

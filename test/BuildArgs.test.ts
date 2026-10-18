@@ -213,3 +213,125 @@ describe("parseBuildArgs deprecated bare word", () => {
     expect({ ...bareRequest, deprecatedBareWord: false }).toEqual(dashedRequest);
   });
 });
+
+describe("parseBuildArgs --jobs", () => {
+  // Choice for the implementer: when a rejection names the offending word, `argument` is the
+  // invalid value for a bad value (like --parallel), the option name for a missing value, and the
+  // option as typed for the repeat.
+  it.each(["native", "windows"])("accepts --jobs 4 and --jobs=4 after %s", (target) => {
+    for (const words of [["--jobs", "4"], ["--jobs=4"]]) {
+      const request = expectRequest(parseBuildArgs([target, ...words]));
+      expect(request).toEqual({
+        mode: "full",
+        target,
+        recursive: false,
+        release: false,
+        parallel: 1,
+        jobs: 4,
+        deprecatedBareWord: false,
+      });
+    }
+  });
+
+  it("leaves jobs absent when not given", () => {
+    expect(expectRequest(parseBuildArgs(["native"]))).not.toHaveProperty("jobs");
+    expect(expectRequest(parseBuildArgs([]))).not.toHaveProperty("jobs");
+  });
+
+  it("accepts --jobs in every position among the other options", () => {
+    const words = ["--recursive", "--release", "--parallel 2", "--jobs 3"];
+    for (const order of permutations(words)) {
+      const args = ["native", ...order.flatMap((word) => word.split(" "))];
+      expect(expectRequest(parseBuildArgs(args))).toEqual({
+        mode: "full",
+        target: "native",
+        recursive: true,
+        release: true,
+        parallel: 2,
+        jobs: 3,
+        deprecatedBareWord: false,
+      });
+    }
+  });
+
+  it("accepts --jobs without --recursive", () => {
+    expect(expectRequest(parseBuildArgs(["native", "--jobs", "2", "--release"])).jobs).toBe(2);
+  });
+
+  it.each([
+    [["native", "--jobs"]],
+    [["native", "--jobs="]],
+    [["native", "--jobs", "--release"]],
+    [["native", "--recursive", "--jobs"]],
+  ])("rejects a missing --jobs value in %p", (args) => {
+    expect(expectRejection(args)).toEqual({
+      argument: "--jobs",
+      message: "--jobs requires a positive whole number.",
+    });
+  });
+
+  it.each(["0", "-1", "1.5", "abc", "01", String(Number.MAX_SAFE_INTEGER + 2), "99999999999999999999"])(
+    "rejects the --jobs value %p",
+    (value) => {
+      expect(expectRejection(["native", "--jobs", value])).toEqual({
+        argument: value,
+        message: `Invalid value "${value}" for --jobs; expected a positive whole number.`,
+      });
+      expect(expectRejection(["native", `--jobs=${value}`]).message).toBe(
+        `Invalid value "${value}" for --jobs; expected a positive whole number.`
+      );
+    }
+  );
+
+  it("rejects --jobs given more than once", () => {
+    for (const args of [
+      ["native", "--jobs", "2", "--jobs", "3"],
+      ["native", "--jobs", "2", "--jobs=3"],
+      ["native", "--jobs=2", "--jobs=2"],
+    ]) {
+      expect(expectRejection(args).message).toBe("--jobs was given more than once.");
+    }
+  });
+
+  it("accepts a value above the processor count", () => {
+    expect(expectRequest(parseBuildArgs(["native", "--jobs", "64"])).jobs).toBe(64);
+    expect(expectRequest(parseBuildArgs(["native", `--jobs=${Number.MAX_SAFE_INTEGER}`])).jobs).toBe(
+      Number.MAX_SAFE_INTEGER
+    );
+  });
+});
+
+describe("parseBuildArgs incremental form with --jobs", () => {
+  it("gives an incremental build with the job count", () => {
+    for (const args of [["--jobs", "4"], ["--jobs=4"]]) {
+      expect(expectRequest(parseBuildArgs(args))).toEqual({
+        mode: "incremental",
+        recursive: false,
+        release: false,
+        parallel: 1,
+        jobs: 4,
+        deprecatedBareWord: false,
+      });
+    }
+  });
+
+  it("rejects a bad or missing value before anything else", () => {
+    expect(expectRejection(["--jobs"]).message).toBe("--jobs requires a positive whole number.");
+    expect(expectRejection(["--jobs="]).message).toBe("--jobs requires a positive whole number.");
+    expect(expectRejection(["--jobs", "0"]).message).toBe(
+      "Invalid value \"0\" for --jobs; expected a positive whole number."
+    );
+    expect(expectRejection(["--jobs", "2", "--jobs", "3"]).message).toBe("--jobs was given more than once.");
+  });
+
+  it.each([
+    [["--release"]],
+    [["--recursive"]],
+    [["--parallel", "2"]],
+    [["--release", "--jobs", "4"]],
+    [["--jobs", "4", "--release"]],
+    [["--jobs", "4", "--recursive"]],
+  ])("keeps the target-required error for %p", (args) => {
+    expect(expectRejection(args).message).toBe("A build target is required: native or windows.");
+  });
+});

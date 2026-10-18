@@ -4,7 +4,7 @@ import Config from "../Config";
 import Scopes from "../Scopes";
 import { ScriptArgsType } from "../types";
 
-const ScopesCLI = (scriptConfig: ScriptArgsType) => {
+const ScopesCLI = (scriptConfig: ScriptArgsType): Promise<void> | void => {
   const config = new Config(scriptConfig.configDir);
   const scopes = new Scopes(config);
 
@@ -33,34 +33,31 @@ const ScopesCLI = (scriptConfig: ScriptArgsType) => {
         console.log("There are no scopes to edit.");
         break;
       }
-      inquirer.prompt(scopes.askWhichScope())
+      return inquirer.prompt(scopes.askWhichScope())
         .then((answers) => {
           const { scopeName } = answers;
-          inquirer.prompt(scopes.askEditScope(config.config.scopes[scopeName].author))
+          return inquirer.prompt(scopes.askEditScope(config.config.scopes[scopeName].author))
             .then((editAnswers) => {
               editAnswers.scopeName = scopeName;
               scopes.createOrEditScope(editAnswers);
             })
             .then(() => config.saveConfig());
         });
-      break;
     case "add":
-      inquirer.prompt(scopes.askNewScope())
+      return inquirer.prompt(scopes.askNewScope())
         .then((answers) => scopes.createOrEditScope(answers))
         .then(() => config.saveConfig());
-      break;
     case "delete":
       if(Object.keys(config.config.scopes).length === 0) {
         console.log("There are no scopes to edit.");
         break;
       }
-      inquirer.prompt(scopes.askWhichScope())
+      return inquirer.prompt(scopes.askWhichScope())
         .then((answers) => {
           const { scopeName } = answers;
           scopes.deleteScope(scopeName);
         })
         .then(() => config.saveConfig());
-      break;
   }
 };
 

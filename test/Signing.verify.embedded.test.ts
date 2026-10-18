@@ -22,7 +22,7 @@ function writeConfig(configDir: string, data: { scope?: string; name?: string; e
       },
     };
   }
-  fs.writeFileSync(configPath, JSON.stringify({ prefix: "", scopes }, null, 2));
+  fs.writeFileSync(configPath, JSON.stringify({ prefix: "/tmp/seed-test-prefix", scopes }, null, 2));
 }
 
 const configDirs: string[] = [];

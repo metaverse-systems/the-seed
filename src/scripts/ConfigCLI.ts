@@ -1,12 +1,11 @@
-import fs from "fs";
 import inquirer from "inquirer";
 import Config from "../Config";
 import { ScriptArgsType } from "../types";
 
-const ConfigCLI = (scriptConfig: ScriptArgsType) => {
+const ConfigCLI = (scriptConfig: ScriptArgsType): Promise<void> | void => {
   const config = new Config(scriptConfig.configDir);
   const updateConfig = () => {
-    inquirer.prompt(config.getQuestions())
+    return inquirer.prompt(config.getQuestions())
       .then((answers) => config.parseAnswers(answers))
       .then(() => config.saveConfig());
   };
@@ -17,16 +16,11 @@ const ConfigCLI = (scriptConfig: ScriptArgsType) => {
   switch(command)
   {
     case "list":
-      if(!fs.existsSync(scriptConfig.configDir + config.configFile)) {
-        console.log(scriptConfig.configDir + config.configFile + " not found. Run '" + scriptConfig.binName + " config edit' to create it.");
-        break;
-      }
-      console.log(scriptConfig.configDir + config.configFile);
+      console.log(config.configPath);
       console.log(config.config);
       break;
     case "edit":
-      updateConfig();
-      break;
+      return updateConfig();
     case "scopes":
       console.log(scriptConfig.binName + " " + command + " " + subcommand);
 

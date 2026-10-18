@@ -1,10 +1,12 @@
 import fs from "fs";
 import path from "path";
 import Config from "./Config";
-import { execSync } from "child_process";
-import { BuildStep, StripResult } from "./types";
+import { BuildStep, ProjectBuildOptions, ProjectBuildResult, StripResult } from "./types";
 import Signing from "./Signing";
-import { runCommand, commandFailedMessage } from "./ProcessRunner";
+import { processorCount } from "./BuildScheduler";
+import { librarySearchEnv } from "./LibrarySearch";
+import { runStep, stepText } from "./StepRunner";
+import { runCommand, commandFailedMessage, findOnPath, formatCommand } from "./ProcessRunner";
 
 export const targets: {
   [key: string]: string;
@@ -13,145 +15,140 @@ export const targets: {
   windows: "x86_64-w64-mingw32",
 };
 
-const execOptions = { stdio: "pipe" as const };
+/** The tool's own output streams, used when a build is given no sink. */
+const ownOutput = {
+  stdout: (chunk: Buffer) => {
+    process.stdout.write(chunk);
+  },
+  stderr: (chunk: Buffer) => {
+    process.stderr.write(chunk);
+  },
+};
 
 class Build {
   config: Config;
-  target = "linux";
 
   constructor(config: Config) {
     this.config = config;
   }
 
-  autogen = () => {
-    const autogen_command = "./autogen.sh";
-    try {
-      const result = execSync(autogen_command, execOptions).toString();
-    } catch (e) {
-      console.error(e);
-      throw e;
+  /**
+   * Builds the project in `options.projectDir`: a full build (autogen,
+   * distclean, configure, compile, install) when a target is given, otherwise
+   * an incremental one (compile and install). A release build then strips the
+   * installed binaries, and the built binaries are signed when a certificate
+   * exists.
+   *
+   * Each step's output is passed on as it arrives, never kept, so a build can
+   * write any amount. The first cancellation stops the running step and
+   * starts no other; install, strip and sign run under the force signal so a
+   * single Ctrl+C lets an install in progress finish.
+   */
+  buildProject = async (options: ProjectBuildOptions): Promise<ProjectBuildResult> => {
+    const log = options.log ?? ((line: string) => console.log(line));
+    const output = options.output ?? ownOutput;
+    const fullReconfigure = options.target !== undefined;
+    const target = options.target ?? "native";
+
+    for (const step of this.getSteps(target, fullReconfigure, options.jobs, options.env)) {
+      const isInstall = step.label === "install";
+      if (isInstall && (options.signal?.aborted || options.forceSignal?.aborted)) {
+        return { status: "cancelled" };
+      }
+
+      const text = stepText(step);
+      log(`==> ${step.label}: ${text}`);
+
+      const outcome = await runStep(step, {
+        baseDir: options.projectDir,
+        baseEnv: options.env,
+        signal: isInstall ? options.forceSignal : options.signal,
+        output: { mode: "stream", output },
+      });
+
+      switch (outcome.status) {
+        case "interrupted":
+          return { status: "cancelled" };
+        case "notFound":
+          return { status: "failed", step: step.label, message: outcome.message };
+        case "failed":
+          return {
+            status: "failed",
+            step: step.label,
+            message: outcome.exitCode === null ? `${text} was ended by ${outcome.signal}` : `${text} exited with status ${outcome.exitCode}`,
+          };
+        case "ignored":
+          log(`${step.label} exited with status ${outcome.exitCode}; ignored.`);
+          break;
+        case "completed":
+          break;
+      }
     }
 
-    console.log("Completed " + autogen_command);
-  };
-
-  configure = () => {
-    const newTarget = targets[this.target];
-    const distclean_command = "make distclean";
-    try {
-      const result = execSync(distclean_command, execOptions).toString();
-    } catch (e) {
-      // A failing "make distclean" on a tree that was never configured is expected and ignored.
+    if (options.release && options.target !== undefined) {
+      try {
+        await stripBinaries(options.projectDir, options.target, options.forceSignal, options.log);
+      } catch (e: unknown) {
+        if (options.forceSignal?.aborted) return { status: "cancelled" };
+        return { status: "failed", step: "strip", message: (e as Error).message ?? String(e) };
+      }
     }
 
-    const prefix = this.config.config.prefix + "/" + newTarget;
-
-    const configure_command =
-      "PKG_CONFIG_PATH=" +
-      prefix +
-      "/lib/pkgconfig/ " +
-      "./configure --prefix=" +
-      prefix +
-      (this.target === "windows" ? " --host=" + targets["windows"] : "");
-
     try {
-      const result = execSync(configure_command, execOptions).toString();
-    } catch (e) {
-      console.error(e);
-      throw e;
+      await autoSignIfCertExists(options.configDir, options.projectDir, options.log);
+    } catch (e: unknown) {
+      return { status: "failed", step: "sign", message: (e as Error).message ?? String(e) };
     }
 
-    console.log("Configure complete");
-  };
-
-  reconfigure = (target: string) => {
-    this.target = target;
-    this.autogen();
-    this.configure();
-  };
-
-  compile = () => {
-    const make_command = "make -j";
-
-    try {
-      const result = execSync(make_command).toString();
-      console.log(result);
-    } catch (e) {
-      console.error(e);
-      throw e;
-    }
-  };
-
-  install = () => {
-    const install_command = "make install";
-
-    try {
-      const result = execSync(install_command).toString();
-      console.log(result);
-    } catch (e) {
-      console.error(e);
-      throw e;
-    }
+    return { status: "completed" };
   };
 
   /**
    * Returns an ordered array of BuildStep objects for the given target and mode.
    * @param target - 'native' or 'windows'
    * @param fullReconfigure - if true, includes autogen/distclean/configure steps; if false, only compile+install
-   * @param jobs - compile job limit; when omitted the compile step is an unbounded "make -j"
+   * @param jobs - compile job limit; defaults to the processor count, so the compile step is always "make -j<jobs>"
+   * @param inherited - the environment whose PKG_CONFIG_PATH the library search extends; defaults to process.env
    */
-  getSteps = (target: string, fullReconfigure: boolean, jobs?: number): BuildStep[] => {
+  getSteps = (
+    target: string,
+    fullReconfigure: boolean,
+    jobs: number = processorCount(),
+    inherited: NodeJS.ProcessEnv = process.env
+  ): BuildStep[] => {
     const newTarget = targets[target];
     const prefix = this.config.config.prefix + "/" + newTarget;
 
     const steps: BuildStep[] = [];
 
     if (fullReconfigure) {
-      steps.push({
-        label: "autogen",
-        command: "./autogen.sh",
-      });
+      steps.push({ label: "autogen", program: "./autogen.sh", args: [] });
 
-      steps.push({
-        label: "distclean",
-        command: "make distclean",
-        ignoreExitCode: true,
-      });
-
-      const configureCommand =
-        "PKG_CONFIG_PATH=" +
-        prefix +
-        "/lib/pkgconfig/ " +
-        "./configure --prefix=" +
-        prefix +
-        (target === "windows" ? " --host=" + targets["windows"] : "");
+      steps.push({ label: "distclean", program: "make", args: ["distclean"], ignoreExitCode: true });
 
       steps.push({
         label: "configure",
-        command: configureCommand,
+        program: "./configure",
+        args: [
+          "--prefix=" + prefix,
+          ...(target === "windows" ? ["--host=" + targets["windows"]] : []),
+        ],
+        env: librarySearchEnv(this.config.config.prefix, target, inherited),
       });
     }
 
-    steps.push({
-      label: "compile",
-      command: jobs === undefined ? "make -j" : `make -j${jobs}`,
-    });
+    steps.push({ label: "compile", program: "make", args: [`-j${jobs}`] });
 
-    steps.push({
-      label: "install",
-      command: "make install",
-    });
+    steps.push({ label: "install", program: "make", args: ["install"] });
 
     return steps;
   };
 
   /**
-   * Get the install prefix directory for the current or specified target.
+   * Get the install prefix directory for the given target (native by default).
    */
-  getInstallPrefix = (target?: string): string => {
-    const t = target || this.target;
-    const newTarget = targets[t];
-    return this.config.config.prefix + "/" + newTarget;
+  getInstallPrefix = (target = "native"): string => {
+    return this.config.config.prefix + "/" + targets[target];
   };
 }
 
@@ -325,15 +322,11 @@ export async function stripBinaries(
 ): Promise<StripResult> {
   const stripTool = getStripTool(target);
 
-  // Verify strip tool exists
-  const probe = await runCommand(`command -v ${stripTool}`, { signal });
-  if (probe.killed) {
-    throw new Error("Strip cancelled");
-  }
-  if (probe.exitCode !== 0) {
+  const toolPath = findOnPath(stripTool);
+  if (toolPath === null) {
     const hint = target === "windows"
       ? "\nInstall the MinGW binutils package (e.g., binutils-mingw-w64-x86-64) and try again."
-      : "";
+      : "\nInstall binutils (for example the binutils package) and try again.";
     throw new Error(`Strip tool '${stripTool}' not found on this system.${hint}`);
   }
 
@@ -358,15 +351,15 @@ export async function stripBinaries(
     // Completes the line begun above, or reports it whole to the logger.
     const finishLine = (status: string) => (log ? log(`Stripping ${rel}... ${status}`) : console.log(status));
 
-    const command = `${stripTool} --strip-unneeded ${filePath}`;
-    const result = await runCommand(command, { signal });
+    const stripArgs = ["--strip-unneeded", filePath];
+    const result = await runCommand(toolPath, stripArgs, { signal });
     if (result.killed) {
       finishLine("cancelled");
       throw new Error("Strip cancelled");
     }
     if (result.exitCode !== 0) {
       finishLine("FAILED");
-      throw new Error(`strip failed on ${rel}: ${commandFailedMessage(command, result.stderr)}`);
+      throw new Error(`strip failed on ${rel}: ${commandFailedMessage(formatCommand(toolPath, stripArgs), result.stderr)}`);
     }
     finishLine("done");
     strippedFiles.push(filePath);

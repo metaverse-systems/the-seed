@@ -3,7 +3,6 @@ import os from "os";
 import path from "path";
 import ResourcePak from "../src/ResourcePak";
 import Config from "../src/Config";
-import { itKnownGap } from "./helpers/KnownGap";
 
 // Helper to create a temporary directory for testing
 function createTempDir(): string {
@@ -34,7 +33,7 @@ describe("ResourcePak", () => {
     fs.rmSync(tempDir, { recursive: true });
   });
 
-  itKnownGap("resource-pak-fresh-prefix", "should create a new package", () => {
+  it("should create a new package", () => {
     rp.createPackage("@test", "my-pak");
     expect(rp.package).toBeDefined();
     expect(rp.package?.name).toBe("@test/my-pak");
@@ -44,7 +43,7 @@ describe("ResourcePak", () => {
     expect(fs.existsSync(path.join(rp.packageDir, "package.json"))).toBe(true);
   });
 
-  itKnownGap("resource-pak-fresh-prefix", "should add a resource using process.cwd() by default", () => {
+  it("should add a resource using process.cwd() by default", () => {
     rp.createPackage("@test", "my-pak");
     const pakDir = rp.packageDir;
 
@@ -63,7 +62,7 @@ describe("ResourcePak", () => {
     expect(rp.package!.resources!.length).toBe(1);
   });
 
-  itKnownGap("resource-pak-fresh-prefix", "should add a resource with explicit packageDir parameter", () => {
+  it("should add a resource with explicit packageDir parameter", () => {
     rp.createPackage("@test", "my-pak");
     const pakDir = rp.packageDir;
 
@@ -80,7 +79,7 @@ describe("ResourcePak", () => {
     expect(savedPkg.resources[0].size).toBeGreaterThan(0);
   });
 
-  itKnownGap("resource-pak-fresh-prefix", "should not add a duplicate resource name", () => {
+  it("should not add a duplicate resource name", () => {
     rp.createPackage("@test", "my-pak");
     const pakDir = rp.packageDir;
 
@@ -97,7 +96,7 @@ describe("ResourcePak", () => {
     expect(savedPkg.resources[0].filename).toBe("file1.txt");
   });
 
-  itKnownGap("resource-pak-fresh-prefix", "should save package configuration", () => {
+  it("should save package configuration", () => {
     rp.createPackage("@test", "my-pak");
     rp.save();
     const packageJsonPath = path.join(rp.packageDir, "package.json");
@@ -106,7 +105,7 @@ describe("ResourcePak", () => {
     expect(saved.name).toBe("@test/my-pak");
   });
 
-  itKnownGap("resource-pak-fresh-prefix", "should build a .pak file with explicit packageDir", () => {
+  it("should build a .pak file with explicit packageDir", () => {
     rp.createPackage("@test", "my-pak");
     const pakDir = rp.packageDir;
 
@@ -125,13 +124,13 @@ describe("ResourcePak", () => {
     const pakFile = path.join(pakDir, "my-pak.pak");
     expect(fs.existsSync(pakFile)).toBe(true);
 
-    // Verify the .pak starts with a 10-digit header size
+    // Verify the .pak starts with a JSON header holding a 10-digit header size
     const content = fs.readFileSync(pakFile).toString();
-    const headerSizeStr = content.substring(0, 10);
-    expect(headerSizeStr).toMatch(/^\d{10}$/);
+    const header = JSON.parse(content.substring(0, content.indexOf("\n")));
+    expect(header.headerSize).toMatch(/^\d{10}$/);
   });
 
-  itKnownGap("resource-pak-fresh-prefix", "should build using packageDir parameter instead of cwd", () => {
+  it("should build using packageDir parameter instead of cwd", () => {
     rp.createPackage("@test", "build-test");
     const pakDir = rp.packageDir;
 
@@ -148,5 +147,25 @@ describe("ResourcePak", () => {
     // Read the pak and verify it contains header JSON + resource data
     const pakContent = fs.readFileSync(pakFile);
     expect(pakContent.length).toBeGreaterThan(11); // header size + newline + content
+  });
+
+  it("creates every missing directory up to the package", () => {
+    // The prefix holds a configuration file but no projects directory.
+    expect(fs.existsSync(path.join(tempDir, "projects"))).toBe(false);
+    rp.createPackage("@test", "deep-pak");
+    expect(fs.statSync(path.join(tempDir, "projects")).isDirectory()).toBe(true);
+    expect(fs.statSync(path.join(tempDir, "projects", "@test")).isDirectory()).toBe(true);
+    expect(fs.statSync(path.join(tempDir, "projects", "@test", "deep-pak")).isDirectory()).toBe(true);
+    expect(fs.existsSync(path.join(tempDir, "projects", "@test", "deep-pak", "package.json"))).toBe(true);
+  });
+
+  it("reuses an existing package directory", () => {
+    const existing = path.join(tempDir, "projects", "@test", "again-pak");
+    fs.mkdirSync(existing, { recursive: true });
+    fs.writeFileSync(path.join(existing, "keep.txt"), "kept");
+    rp.createPackage("@test", "again-pak");
+    expect(rp.packageDir).toBe(existing);
+    expect(fs.readFileSync(path.join(existing, "keep.txt")).toString()).toBe("kept");
+    expect(fs.existsSync(path.join(existing, "package.json"))).toBe(true);
   });
 });

@@ -59,3 +59,21 @@ describe("test Scopes", () => {
     fs.rmSync(configDir, { recursive: true });
   });
 });
+
+describe("Scopes on a file without scopes", () => {
+  let configDir: string;
+
+  beforeAll(() => {
+    configDir = createTempDir();
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(configDir, "p") }));
+  });
+
+  it("getScopes on a file without scopes returns []", () => {
+    const scopes = new Scopes(new Config(configDir));
+    expect(scopes.getScopes()).toEqual([]);
+  });
+
+  afterAll(() => {
+    fs.rmSync(configDir, { recursive: true });
+  });
+});

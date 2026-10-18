@@ -1,10 +1,12 @@
 import fs from "fs";
 import Config from "./Config";
-import { execSync } from "child_process";
+import { spawnSync } from "child_process";
 import { targets } from "./Build";
 import { BuildStep } from "./types";
+import { runStep, stepText } from "./StepRunner";
+import { processorCount } from "./BuildScheduler";
+import { librarySearchEnv } from "./LibrarySearch";
 
-const execOptions = { stdio: "pipe" as const, shell: "/bin/bash", env: { ...process.env } };
 const libEcsRepo = "https://github.com/metaverse-systems/libecs-cpp.git";
 const libTheSeedRepo = "https://github.com/metaverse-systems/libthe-seed.git";
 
@@ -12,33 +14,27 @@ export const requiredLibEcsVersion = "2.1.0";
 export const requiredLibTheSeedVersion = "0.8.0";
 
 export const checkLib = (config: Config, library: string, target: string, minVersion?: string) => {
-  const targetPrefix = targets[target];
-  const prefix = config.config.prefix + "/" + targetPrefix;
-  const pkgConfigCommand =
-    "PKG_CONFIG_PATH=" +
-    prefix +
-    "/lib/pkgconfig/ " +
-    "pkg-config --cflags --libs " +
-    library;
-  try {
-    const result = execSync(pkgConfigCommand, execOptions).toString();
-    if (!result.includes(library)) {
-      console.error("pkg-config did not find " + library);
-      return false;
-    }
-  } catch (e) {
+  const options = {
+    env: { ...process.env, ...librarySearchEnv(config.config.prefix, target) },
+    encoding: "utf8" as const,
+  };
+  const pkgConfig = (args: string[]) => spawnSync("pkg-config", args, options);
+
+  const lookup = pkgConfig(["--cflags", "--libs", library]);
+  if (lookup.error || lookup.status !== 0) {
+    return false;
+  }
+  if (!String(lookup.stdout ?? "").includes(library)) {
+    console.error("pkg-config did not find " + library);
     return false;
   }
   if (minVersion) {
-    const pkgConfigPath = "PKG_CONFIG_PATH=" + prefix + "/lib/pkgconfig/ ";
-    try {
-      execSync(pkgConfigPath + "pkg-config --atleast-version=" + minVersion + " " + library, execOptions);
-    } catch (e) {
+    const check = pkgConfig(["--atleast-version=" + minVersion, library]);
+    if (check.error || check.status !== 0) {
       let found = "unknown version";
-      try {
-        found = execSync(pkgConfigPath + "pkg-config --modversion " + library, execOptions).toString().trim();
-      } catch (versionError) {
-        // keep the placeholder
+      const version = pkgConfig(["--modversion", library]);
+      if (!version.error && version.status === 0) {
+        found = String(version.stdout ?? "").trim() || found;
       }
       console.error(library + " " + found + " is older than the required " + minVersion);
       return false;
@@ -55,47 +51,86 @@ export const checkLibTheSeed = (config: Config, target: string) => {
   return checkLib(config, "the-seed", target, requiredLibTheSeedVersion);
 };
 
-export const installLibEcs = (config: Config, target: string) => {
-  if(installLib(config, libEcsRepo, "libecs-cpp", target)) {
+export const installLibEcs = async (config: Config, target: string) => {
+  if (await installLib(config, libEcsRepo, "libecs-cpp", target)) {
     return true;
   }
   console.error("Failed to build libecs-cpp");
   return false;
 };
 
-export const installLibTheSeed = (config: Config, target: string) => {
-  if(installLib(config, libTheSeedRepo, "libthe-seed", target)) {
+export const installLibTheSeed = async (config: Config, target: string) => {
+  if (await installLib(config, libTheSeedRepo, "libthe-seed", target)) {
     return true;
   }
   console.error("Failed to build libthe-seed");
   return false;
 };
 
-export const installLib = (config: Config, repo: string, installDir: string, target: string) => {
-  const targetDir = targets[target];
-  const prefix = config.config.prefix + "/" + targetDir;
-  if (fs.existsSync(installDir)) {
-    try {
-      execSync("git -C " + installDir + " pull --ff-only", execOptions);
-    } catch (e) {
-      console.error("Failed to update " + installDir);
+/**
+ * The steps that fetch and install one library: clone it, or update the
+ * existing clone, then autogen, configure, compile and install inside it.
+ */
+const getLibrarySteps = (name: string, repo: string, installDir: string, prefix: string, target: string, jobs: number, search: Record<string, string>): BuildStep[] => {
+  const hostArgs = target !== "native" ? ["--host=" + targets[target]] : [];
+  return [
+    fs.existsSync(installDir)
+      ? { label: `update ${name}`, program: "git", args: ["-C", installDir, "pull", "--ff-only"] }
+      : { label: `clone ${name}`, program: "git", args: ["clone", repo, installDir] },
+    { label: `${name} autogen`, program: "./autogen.sh", args: [], cwd: installDir },
+    { label: `${name} configure`, program: "./configure", args: [`--prefix=${prefix}`, ...hostArgs], cwd: installDir, env: search },
+    { label: `${name} compile`, program: "make", args: [`-j${jobs}`], cwd: installDir },
+    { label: `${name} install`, program: "make", args: ["install"], cwd: installDir },
+  ];
+};
+
+/**
+ * Fetches, builds and installs one library into the target's prefix, showing
+ * its output as it arrives. Stops at the first step that does not complete and
+ * resolves false; resolves true when every step completed.
+ */
+export const installLib = async (
+  config: Config,
+  repo: string,
+  installDir: string,
+  target: string,
+  options: { jobs?: number } = {}
+) => {
+  const prefix = config.config.prefix + "/" + targets[target];
+  const output = {
+    stdout: (chunk: Buffer) => {
+      process.stdout.write(chunk);
+    },
+    stderr: (chunk: Buffer) => {
+      process.stderr.write(chunk);
+    },
+  };
+
+  for (const step of getLibrarySteps(installDir, repo, installDir, prefix, target, options.jobs ?? processorCount(), librarySearchEnv(config.config.prefix, target, process.env))) {
+    const text = stepText(step);
+    console.log(`==> ${step.label}: ${text}`);
+
+    const outcome = await runStep(step, {
+      baseDir: process.cwd(),
+      output: { mode: "stream", output },
+    });
+
+    let message: string | undefined;
+    switch (outcome.status) {
+      case "failed":
+        message = outcome.exitCode === null ? `${text} was ended by ${outcome.signal}` : `${text} exited with status ${outcome.exitCode}`;
+        break;
+      case "notFound":
+        message = outcome.message;
+        break;
+      case "interrupted":
+        message = `${text} was interrupted`;
+        break;
+    }
+    if (message !== undefined) {
+      console.error(`Failed at ${step.label}: ${message}`);
       return false;
     }
-  } else {
-    try {
-      execSync("git clone " + repo, execOptions);
-    } catch (e) {
-      console.error("Failed to clone " + repo);
-    }
-  }
-  const buildCommand =
-    "cd " + installDir + " && ./autogen.sh && ./configure --prefix=" +
-    prefix + (target != "native" ? " --host=" + targetDir : "") +
-    " && make && make install";
-  try {
-    const result = execSync(buildCommand, execOptions).toString();
-  } catch (e) {
-    return false;
   }
   return true;
 };
@@ -105,7 +140,7 @@ export const installLib = (config: Config, repo: string, installDir: string, tar
  * Checks which libraries are missing and generates clone + build steps for each.
  * Order: libecs-cpp first, then libthe-seed (compile-time dependency).
  */
-export const getInstallSteps = (config: Config, target: string): BuildStep[] => {
+export const getInstallSteps = (config: Config, target: string, jobs: number = processorCount(), inherited: NodeJS.ProcessEnv = process.env): BuildStep[] => {
   const targetDir = targets[target];
   const prefix = config.config.prefix + "/" + targetDir;
   const steps: BuildStep[] = [];
@@ -121,17 +156,7 @@ export const getInstallSteps = (config: Config, target: string): BuildStep[] => 
       continue;
     }
 
-    const hostFlag = target !== "native" ? " --host=" + targetDir : "";
-
-    if (fs.existsSync(lib.installDir)) {
-      steps.push({ label: `update ${lib.name}`, command: `git -C ${lib.installDir} pull --ff-only` });
-    } else {
-      steps.push({ label: `clone ${lib.name}`, command: `git clone ${lib.repo}` });
-    }
-    steps.push({ label: `${lib.name} autogen`, command: `cd ${lib.installDir} && ./autogen.sh` });
-    steps.push({ label: `${lib.name} configure`, command: `cd ${lib.installDir} && ./configure --prefix=${prefix}${hostFlag}` });
-    steps.push({ label: `${lib.name} compile`, command: `cd ${lib.installDir} && make` });
-    steps.push({ label: `${lib.name} install`, command: `cd ${lib.installDir} && make install` });
+    steps.push(...getLibrarySteps(lib.name, lib.repo, lib.installDir, prefix, target, jobs, librarySearchEnv(config.config.prefix, target, inherited)));
   }
 
   return steps;

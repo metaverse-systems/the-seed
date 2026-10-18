@@ -31,16 +31,17 @@ jest.mock("../src/Config", () => {
 const mockGetSteps = jest.fn((target: string, fullReconfigure: boolean, jobs?: number) => {
   const steps = [];
   if (fullReconfigure) {
-    steps.push({ label: "autogen", command: "./autogen.sh" });
+    steps.push({ label: "autogen", program: "./autogen.sh", args: [] as string[] });
     steps.push({
       label: "distclean",
-      command: "make distclean",
+      program: "make",
+      args: ["distclean"],
       ignoreExitCode: true,
     });
-    steps.push({ label: "configure", command: "./configure --prefix=/fake" });
+    steps.push({ label: "configure", program: "./configure", args: ["--prefix=/fake"] });
   }
-  steps.push({ label: "compile", command: jobs === undefined ? "make -j" : `make -j${jobs}` });
-  steps.push({ label: "install", command: "make install" });
+  steps.push({ label: "compile", program: "make", args: [`-j${jobs ?? mockProcessorCount()}`] });
+  steps.push({ label: "install", program: "make", args: ["install"] });
   return steps;
 });
 
@@ -75,7 +76,7 @@ import {
   resolveBuildOrder,
   CyclicDependencyError,
 } from "../src/DependencyWalker";
-import { runCommand, formatFailureOutput, CommandResult } from "../src/ProcessRunner";
+import { runCommand, formatCommand, formatFailureOutput, CommandResult } from "../src/ProcessRunner";
 import { buildRecursive, getRecursiveBuildSteps } from "../src/RecursiveBuild";
 import { stripBinaries, autoSignIfCertExists } from "../src/Build";
 
@@ -96,6 +97,17 @@ function makeProject(
   dependencies: string[] = []
 ): BuildableProject {
   return { name, path: projectPath, type, dependencies };
+}
+
+// A runCommand(program, args, options) call as text, and the step kinds by program and arguments.
+function callText(call: unknown[]): string {
+  return formatCommand(call[0] as string, call[1] as string[]);
+}
+function isCompile(program: string, args: string[]): boolean {
+  return program === "make" && args[0].startsWith("-j");
+}
+function isInstall(program: string, args: string[]): boolean {
+  return program === "make" && args[0] === "install";
 }
 
 function commandResult(overrides: Partial<CommandResult> = {}): CommandResult {
@@ -124,7 +136,7 @@ const FULL_STEPS = [
   "./autogen.sh",
   "make distclean",
   "./configure --prefix=/fake",
-  "make -j",
+  "make -j4",
   "make install",
 ];
 
@@ -139,6 +151,7 @@ describe("RecursiveBuild", () => {
     jest.clearAllMocks();
     mockedRunCommand.mockReset();
     mockedRunCommand.mockResolvedValue(commandResult());
+    mockProcessorCount.mockReturnValue(4);
     mockedStripBinaries.mockResolvedValue({ strippedFiles: [], stripTool: "strip" });
     mockedAutoSign.mockResolvedValue(undefined);
     logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
@@ -171,14 +184,14 @@ describe("RecursiveBuild", () => {
       expectRemainingInvariant(result, 3);
 
       // Same commands, cwd and order as the sequential build has always run
-      const calls = mockedRunCommand.mock.calls.map((call) => [call[0], call[1]?.cwd]);
+      const calls = mockedRunCommand.mock.calls.map((call) => [callText(call), call[2]?.cwd]);
       const expected = [comp, sys, prog].flatMap((p) => FULL_STEPS.map((cmd) => [cmd, p.path]));
       expect(calls).toEqual(expected);
 
-      // Every project asked for the unbounded compile step
+      // Every project asked for the processor count (the mocked 4) as its compile job limit
       expect(mockGetSteps).toHaveBeenCalledTimes(3);
       for (const call of mockGetSteps.mock.calls) {
-        expect(call[2]).toBeUndefined();
+        expect(call[2]).toBe(4);
       }
     });
 
@@ -190,7 +203,7 @@ describe("RecursiveBuild", () => {
       });
 
       for (const call of mockedRunCommand.mock.calls) {
-        expect(call[1]?.env).toBeUndefined();
+        expect(call[2]?.env).toEqual(process.env);
       }
     });
 
@@ -217,7 +230,7 @@ describe("RecursiveBuild", () => {
       expect(result.completed).toEqual([comp]);
       expect(result.failed).toEqual(sys);
       expect(result.failureOutput).toBe(
-        formatFailureOutput("make -j", "partial build\n", "error: compile failed\n")
+        formatFailureOutput(formatCommand("make", ["-j4"]), "partial build\n", "error: compile failed\n")
       );
       expect(result.failureOutput).toContain("error: compile failed");
       expect(result.remaining).toEqual([prog]);
@@ -428,6 +441,54 @@ describe("RecursiveBuild", () => {
       expect(mockedRunCommand).not.toHaveBeenCalled();
     });
 
+    it.each([0, -1, 1.5, NaN])("rejects jobs %p with a RangeError before discovery", async (jobs) => {
+      await expect(
+        buildRecursive({
+          target: "native",
+          fullReconfigure: true,
+          projectDir: prog.path,
+          jobs,
+        })
+      ).rejects.toThrow(RangeError);
+      expect(mockedWalkDependencies).not.toHaveBeenCalled();
+      expect(mockedRunCommand).not.toHaveBeenCalled();
+    });
+
+    it("parallel 1 gives each compile step the processor count", async () => {
+      mockProcessorCount.mockReturnValue(6);
+
+      await buildRecursive({ target: "native", fullReconfigure: true, projectDir: prog.path, parallel: 1 });
+
+      const compiles = mockedRunCommand.mock.calls
+        .filter((call) => isCompile(call[0], call[1]))
+        .map((call) => callText(call));
+      expect(compiles).toEqual(["make -j6", "make -j6", "make -j6"]);
+    });
+
+    it("with jobs N gives each compile step N, above the processor count too", async () => {
+      for (const jobs of [2, 9]) {
+        mockedRunCommand.mockClear();
+
+        await buildRecursive({ target: "native", fullReconfigure: true, projectDir: prog.path, jobs });
+
+        const compiles = mockedRunCommand.mock.calls
+          .filter((call) => isCompile(call[0], call[1]))
+          .map((call) => callText(call));
+        expect(compiles).toEqual([`make -j${jobs}`, `make -j${jobs}`, `make -j${jobs}`]);
+      }
+    });
+
+    it("with jobs N and parallel 1 prints no plan line", async () => {
+      const lines: string[] = [];
+      logSpy.mockImplementation((...args: unknown[]) => {
+        lines.push(args.map(String).join(" "));
+      });
+
+      await buildRecursive({ target: "native", fullReconfigure: true, projectDir: prog.path, jobs: 2 });
+
+      expect(lines.some((line) => line.startsWith("Building up to"))).toBe(false);
+    });
+
     it("rejects with a cyclic dependency error before any step runs", async () => {
       mockedResolveBuildOrder.mockImplementation(() => {
         throw new CyclicDependencyError(["/fake/a", "/fake/b"]);
@@ -457,8 +518,20 @@ describe("RecursiveBuild", () => {
       for (const entry of steps) {
         expect(entry.steps.length).toBe(5);
         expect(entry.steps[0].label).toBe("autogen");
-        expect(entry.steps[3].command).toBe("make -j");
+        expect(entry.steps[3].program).toBe("make");
+        expect(entry.steps[3].args).toEqual(["-j4"]); // the mocked processor count
         expect(entry.steps[4].label).toBe("install");
+      }
+    });
+
+    it("passes the jobs argument to every project's steps", async () => {
+      const steps = await getRecursiveBuildSteps(prog.path, "native", true, 3);
+
+      for (const entry of steps) {
+        expect(entry.steps[3].args).toEqual(["-j3"]);
+      }
+      for (const call of mockGetSteps.mock.calls) {
+        expect(call[2]).toBe(3);
       }
     });
 
@@ -515,8 +588,8 @@ describe("RecursiveBuild", () => {
 
     it("calls stripBinaries before autoSignIfCertExists in order", async () => {
       const callOrder: string[] = [];
-      mockedRunCommand.mockImplementation(async (cmd: string) => {
-        if (cmd === "make install") callOrder.push("install");
+      mockedRunCommand.mockImplementation(async (program: string, args: string[]) => {
+        if (isInstall(program, args)) callOrder.push("install");
         return commandResult();
       });
       mockedStripBinaries.mockImplementation(async () => {
@@ -590,10 +663,12 @@ describe("RecursiveBuild in parallel", () => {
     expect(logLines.some((line) => line.startsWith("Building up to"))).toBe(false);
     expect(logLines.some((line) => line.includes("compile jobs each"))).toBe(false);
     for (const call of mockedRunCommand.mock.calls) {
-      expect(call[1]?.env).toBeUndefined();
+      expect(call[2]?.env).toEqual(process.env);
     }
-    const compiles = mockedRunCommand.mock.calls.map((call) => call[0]).filter((cmd) => cmd.startsWith("make -j"));
-    expect(compiles).toEqual(["make -j", "make -j", "make -j", "make -j"]);
+    const compiles = mockedRunCommand.mock.calls
+      .filter((call) => isCompile(call[0], call[1]))
+      .map((call) => callText(call));
+    expect(compiles).toEqual(["make -j4", "make -j4", "make -j4", "make -j4"]);
   });
 
   it("shares compile jobs per tier and prints the concurrency and tier lines", async () => {
@@ -606,7 +681,7 @@ describe("RecursiveBuild in parallel", () => {
 
     expect(result.success).toBe(true);
     expect(logLines).toContain(
-      "Building up to 3 projects at once (4 processors; compile jobs are shared out per tier)"
+      "Building up to 3 projects at once (4 compile jobs shared out per tier)"
     );
     expect(logLines.filter((line) => line.includes("compile jobs each"))).toEqual([
       "Components: up to 3 at once, 1 compile jobs each",
@@ -618,8 +693,8 @@ describe("RecursiveBuild in parallel", () => {
     );
     expect(Object.values(jobsByProject).sort()).toEqual([1, 1, 1, 4]);
 
-    const compileCalls = mockedRunCommand.mock.calls.filter((call) => call[0].startsWith("make -j"));
-    expect(compileCalls.map((call) => [call[0], call[1]?.cwd]).sort()).toEqual([
+    const compileCalls = mockedRunCommand.mock.calls.filter((call) => isCompile(call[0], call[1]));
+    expect(compileCalls.map((call) => [callText(call), call[2]?.cwd]).sort()).toEqual([
       ["make -j1", "/fake/a"],
       ["make -j1", "/fake/b"],
       ["make -j1", "/fake/c"],
@@ -627,12 +702,72 @@ describe("RecursiveBuild in parallel", () => {
     ]);
   });
 
+  it("--jobs 2 --parallel 4 builds at most 2 at once and names the budget in the plan line", async () => {
+    let running = 0;
+    let maxRunning = 0;
+    const callbacks: RecursiveBuildCallbacks = {
+      onProjectStart: () => {
+        running++;
+        maxRunning = Math.max(maxRunning, running);
+      },
+      onProjectComplete: () => {
+        running--;
+      },
+    };
+
+    const result = await buildRecursive({
+      target: "native",
+      fullReconfigure: true,
+      projectDir: game.path,
+      parallel: 4,
+      jobs: 2,
+      callbacks,
+    });
+
+    expect(result.success).toBe(true);
+    expect(maxRunning).toBe(2);
+    expect(logLines).toContain("Building up to 2 projects at once (2 compile jobs shared out per tier)");
+    // Two components at once share the 2 jobs, one each; the program tier runs alone with both.
+    const compiles = mockedRunCommand.mock.calls
+      .filter((call) => isCompile(call[0], call[1]))
+      .map((call) => [callText(call), call[2]?.cwd]);
+    expect(compiles.filter(([, cwd]) => cwd !== "/fake/game").map(([text]) => text)).toEqual(["make -j1", "make -j1", "make -j1"]);
+    expect(compiles.filter(([, cwd]) => cwd === "/fake/game")).toEqual([["make -j2", "/fake/game"]]);
+  });
+
+  it("jobs larger than the processors still keeps projects at once within the processors", async () => {
+    mockProcessorCount.mockReturnValue(2);
+    let running = 0;
+    let maxRunning = 0;
+    const callbacks: RecursiveBuildCallbacks = {
+      onProjectStart: () => {
+        running++;
+        maxRunning = Math.max(maxRunning, running);
+      },
+      onProjectComplete: () => {
+        running--;
+      },
+    };
+
+    await buildRecursive({
+      target: "native",
+      fullReconfigure: true,
+      projectDir: game.path,
+      parallel: 4,
+      jobs: 8,
+      callbacks,
+    });
+
+    expect(maxRunning).toBe(2);
+    expect(logLines).toContain("Building up to 2 projects at once (8 compile jobs shared out per tier)");
+  });
+
   it("removes MAKEFLAGS and MFLAGS from every step's environment above the default limit", async () => {
     await buildRecursive({ target: "native", fullReconfigure: true, projectDir: game.path, parallel: 2 });
 
     expect(mockedRunCommand).toHaveBeenCalledTimes(20);
     for (const call of mockedRunCommand.mock.calls) {
-      const env = call[1]?.env;
+      const env = call[2]?.env;
       expect(env).toBeDefined();
       expect(env).not.toHaveProperty("MAKEFLAGS");
       expect(env).not.toHaveProperty("MFLAGS");
@@ -642,11 +777,11 @@ describe("RecursiveBuild in parallel", () => {
 
   it("keeps each project's install, strip and sign together and apart from every other project's", async () => {
     const events: string[] = [];
-    mockedRunCommand.mockImplementation(async (cmd: string, options) => {
+    mockedRunCommand.mockImplementation(async (program: string, args: string[], options) => {
       const name = String(options?.cwd).split("/").pop();
-      if (cmd === "make install") events.push(`install-begin:${name}`);
+      if (isInstall(program, args)) events.push(`install-begin:${name}`);
       await tick();
-      if (cmd === "make install") events.push(`install-end:${name}`);
+      if (isInstall(program, args)) events.push(`install-end:${name}`);
       return commandResult();
     });
     mockedStripBinaries.mockImplementation(async (projectDir: string) => {
@@ -716,7 +851,7 @@ describe("RecursiveBuild in parallel", () => {
     expect(result.success).toBe(true);
     expect(maxRunning).toBe(2);
     expect(logLines).toContain(
-      "Building up to 2 projects at once (2 processors; compile jobs are shared out per tier)"
+      "Building up to 2 projects at once (2 compile jobs shared out per tier)"
     );
   });
 
@@ -876,9 +1011,9 @@ describe("RecursiveBuild progress and report", () => {
   });
 
   it("reports a sequential failure with one block and the outcome lists", async () => {
-    mockedRunCommand.mockImplementation(async (cmd: string, options) => {
+    mockedRunCommand.mockImplementation(async (program: string, args: string[], options) => {
       await tick();
-      if (options?.cwd === b.path && cmd === "make -j") {
+      if (options?.cwd === b.path && (isCompile(program, args) && args[0] === "-j4")) {
         return commandResult({ exitCode: 2, stdout: "making b\n", stderr: "b.cpp:1: error: oops\n" });
       }
       return commandResult();
@@ -886,7 +1021,7 @@ describe("RecursiveBuild progress and report", () => {
 
     const result = await buildRecursive({ target: "native", fullReconfigure: true, projectDir: game.path });
 
-    const output = formatFailureOutput("make -j", "making b\n", "b.cpp:1: error: oops\n");
+    const output = formatFailureOutput(formatCommand("make", ["-j4"]), "making b\n", "b.cpp:1: error: oops\n");
     expect(result.failureOutput).toBe(output);
     const lines = runLines();
     const blockIndex = lines.indexOf(failureBlock("@org/b", "compile", output));
@@ -910,14 +1045,14 @@ describe("RecursiveBuild progress and report", () => {
       releaseB = resolve;
     });
     const started: string[] = [];
-    mockedRunCommand.mockImplementation(async (cmd: string, options) => {
+    mockedRunCommand.mockImplementation(async (program: string, args: string[], options) => {
       await tick();
-      if (cmd === "./autogen.sh") started.push(String(options?.cwd));
-      if (options?.cwd === a.path && cmd.startsWith("make -j")) {
+      if (program === "./autogen.sh") started.push(String(options?.cwd));
+      if (options?.cwd === a.path && isCompile(program, args)) {
         setImmediate(releaseB);
         return commandResult({ exitCode: 1, stderr: "a failed\n" });
       }
-      if (options?.cwd === b.path && cmd.startsWith("make -j")) {
+      if (options?.cwd === b.path && isCompile(program, args)) {
         await bMayFinish;
       }
       return commandResult();
@@ -953,12 +1088,12 @@ describe("RecursiveBuild progress and report", () => {
   });
 
   it("reports two in-flight failures in the order they happened", async () => {
-    mockedRunCommand.mockImplementation(async (cmd: string, options) => {
+    mockedRunCommand.mockImplementation(async (program: string, args: string[], options) => {
       await tick();
-      if (options?.cwd === b.path && cmd.startsWith("make -j")) {
+      if (options?.cwd === b.path && isCompile(program, args)) {
         return commandResult({ exitCode: 1, stderr: "b failed\n" });
       }
-      if (options?.cwd === a.path && cmd.startsWith("make -j")) {
+      if (options?.cwd === a.path && isCompile(program, args)) {
         for (let i = 0; i < 5; i++) await tick();
         return commandResult({ exitCode: 1, stderr: "a failed\n" });
       }
@@ -1015,9 +1150,9 @@ describe("RecursiveBuild cancellation", () => {
   it("stops running steps on a graceful cancel and reports the outcome", async () => {
     const controller = new AbortController();
     // a and b compile until they are stopped; c builds quickly.
-    mockedRunCommand.mockImplementation(async (cmd: string, options) => {
+    mockedRunCommand.mockImplementation(async (program: string, args: string[], options) => {
       await tick();
-      if (cmd.startsWith("make -j") && options?.cwd !== c.path) {
+      if (isCompile(program, args) && options?.cwd !== c.path) {
         const signal = options?.signal;
         if (!signal) throw new Error("compile step without a signal");
         if (!signal.aborted) {
@@ -1076,9 +1211,9 @@ describe("RecursiveBuild cancellation", () => {
       useGraph([a, soloGame]);
       const controller = new AbortController();
       const force = new AbortController();
-      mockedRunCommand.mockImplementation(async (cmd: string, options) => {
+      mockedRunCommand.mockImplementation(async (program: string, args: string[], options) => {
         await tick();
-        if (cmd === "make install" && options?.cwd === a.path) {
+        if (isInstall(program, args) && options?.cwd === a.path) {
           controller.abort();
           if (forced) force.abort();
           await tick();
@@ -1118,10 +1253,14 @@ describe("RecursiveBuild cancellation", () => {
       useGraph([a, b, pairGame]);
 
       // Compile steps really run (as long sleeps); the others succeed at once.
-      mockedRunCommand.mockImplementation(async (cmd: string, options) => {
-        if (cmd.startsWith("make -j")) {
+      mockedRunCommand.mockImplementation(async (program: string, args: string[], options) => {
+        if (isCompile(program, args)) {
           const name = String(options?.cwd).split("/").pop();
-          return actual.runCommand(`echo $$ > ${pidDir}/${name}.pid; sleep 30`, { signal: options?.signal });
+          return actual.runCommand(
+            "sh",
+            ["-c", "echo $$ > \"$1\"; sleep 30", "sh", `${pidDir}/${name}.pid`],
+            { signal: options?.signal }
+          );
         }
         return commandResult();
       });

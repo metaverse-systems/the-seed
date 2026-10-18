@@ -1,6 +1,6 @@
 import Config from "./Config";
 import Build, { autoSignIfCertExists, stripBinaries } from "./Build";
-import { runCommand, formatFailureOutput } from "./ProcessRunner";
+import { runStep } from "./StepRunner";
 import {
   runSchedule,
   processorCount,
@@ -30,6 +30,16 @@ function validateParallel(parallel: number | undefined): void {
   if (parallel === undefined) return;
   if (!Number.isSafeInteger(parallel) || parallel < 1) {
     throw new RangeError(`parallel must be a positive whole number, got ${parallel}`);
+  }
+}
+
+/**
+ * Throws a RangeError unless `jobs` is omitted or a positive safe integer.
+ */
+function validateJobs(jobs: number | undefined): void {
+  if (jobs === undefined) return;
+  if (!Number.isSafeInteger(jobs) || jobs < 1) {
+    throw new RangeError(`jobs must be a positive whole number, got ${jobs}`);
   }
 }
 
@@ -101,10 +111,11 @@ function printReport(result: RecursiveBuildResult, total: number): void {
  * 5. Return RecursiveBuildResult
  *
  * At the default limit the same commands run in the same order as a
- * sequential build always has, including an unbounded "make -j".
+ * sequential build always has, with the same compile job limit as a plain
+ * build (`jobs`, or the processor count).
  *
  * Build failures and cancellation are reported in the result; the promise
- * rejects only for discovery errors and an invalid `parallel`, both before
+ * rejects only for discovery errors and an invalid `parallel` or `jobs`, both before
  * any step runs.
  *
  * @param options - Build configuration including target, project, and callbacks
@@ -116,6 +127,7 @@ export async function buildRecursive(
   const { target, fullReconfigure, projectDir, signal, callbacks, release } = options;
 
   validateParallel(options.parallel);
+  validateJobs(options.jobs);
 
   // Discover dependency graph and resolve build order
   const graph = await walkDependencies(projectDir);
@@ -123,8 +135,9 @@ export async function buildRecursive(
   const total = buildOrder.length;
 
   const processors = processorCount();
-  const concurrency = Math.min(options.parallel ?? 1, processors);
-  const env = concurrency > 1 ? boundedEnv() : undefined;
+  const budget = options.jobs ?? processors;
+  const concurrency = Math.min(options.parallel ?? 1, processors, budget);
+  const env = concurrency > 1 ? boundedEnv() : process.env;
 
   // Log build plan
   console.log(`Scanning dependencies for ${buildOrder[buildOrder.length - 1]?.name ?? "project"}...`);
@@ -137,7 +150,7 @@ export async function buildRecursive(
   }
   if (concurrency > 1) {
     console.log(
-      `Building up to ${concurrency} projects at once (${processors} processors; compile jobs are shared out per tier)`
+      `Building up to ${concurrency} projects at once (${budget} compile jobs shared out per tier)`
     );
   }
   console.log("");
@@ -174,39 +187,39 @@ export async function buildRecursive(
     const installSteps = installIndex === -1 ? [] : steps.slice(installIndex);
 
     // Runs one step; returns null when it succeeded or its failure was ignorable.
-    const runStep = async (step: BuildStep, stepSignal: AbortSignal): Promise<ProjectOutcome<StepFailure> | null> => {
+    const runProjectStep = async (step: BuildStep, stepSignal: AbortSignal): Promise<ProjectOutcome<StepFailure> | null> => {
       if (stepSignal.aborted) {
         return { status: "interrupted" };
       }
 
       progress(project, `${step.label}...`);
 
-      const run = await runCommand(step.command, { cwd: project.path, signal: stepSignal, env });
+      const stepResult = await runStep(step, {
+        baseDir: project.path,
+        baseEnv: env,
+        signal: stepSignal,
+        output: { mode: "capture" },
+      });
 
-      // A step stopped by cancellation is never a failure and never ignorable.
-      if (run.killed) {
-        return { status: "interrupted" };
-      }
-
-      if (run.exitCode !== 0) {
-        if (step.ignoreExitCode) {
-          // Step like 'make distclean' — ignore failures
+      switch (stepResult.status) {
+        case "interrupted":
+          // A step stopped by cancellation is never a failure and never ignorable.
+          return { status: "interrupted" };
+        case "failed":
+          return { status: "failed", failure: { step: step.label, output: stepResult.output } };
+        case "notFound":
+          return { status: "failed", failure: { step: step.label, output: stepResult.message } };
+        case "completed":
+        case "ignored":
           progress(project, `${step.label}... done`);
           callbacks?.onStepComplete?.(project, step);
           return null;
-        }
-        const output = formatFailureOutput(step.command, run.stdout, run.stderr);
-        return { status: "failed", failure: { step: step.label, output } };
       }
-
-      progress(project, `${step.label}... done`);
-      callbacks?.onStepComplete?.(project, step);
-      return null;
     };
 
-    const buildProject = async (): Promise<ProjectOutcome<StepFailure>> => {
+    const buildOneProject = async (): Promise<ProjectOutcome<StepFailure>> => {
       for (const step of buildSteps) {
-        const outcome = await runStep(step, context.signal);
+        const outcome = await runProjectStep(step, context.signal);
         if (outcome) return outcome;
       }
 
@@ -219,7 +232,7 @@ export async function buildRecursive(
       }
       return context.withInstallLock(async (installSignal): Promise<ProjectOutcome<StepFailure>> => {
         for (const step of installSteps) {
-          const stepOutcome = await runStep(step, installSignal);
+          const stepOutcome = await runProjectStep(step, installSignal);
           if (stepOutcome) return stepOutcome;
         }
 
@@ -235,9 +248,7 @@ export async function buildRecursive(
         }
 
         try {
-          const signConfig = new Config();
-          signConfig.loadConfig();
-          await autoSignIfCertExists(signConfig.configDir, project.path, log);
+          await autoSignIfCertExists(config.configDir, project.path, log);
         } catch (e: unknown) {
           return { status: "failed", failure: { step: "sign", output: (e as Error).message ?? String(e) } };
         }
@@ -248,7 +259,7 @@ export async function buildRecursive(
 
     let outcome: ProjectOutcome<StepFailure>;
     try {
-      outcome = await buildProject();
+      outcome = await buildOneProject();
     } catch (e: unknown) {
       // A cancellation withdrew this project's request for the install lock.
       if (!(e instanceof InstallCancelled)) throw e;
@@ -271,6 +282,7 @@ export async function buildRecursive(
     edges: graph.edges,
     concurrency,
     processorCount: processors,
+    jobBudget: budget,
     signal,
     forceSignal: options.forceSignal,
     runProject,
@@ -316,7 +328,8 @@ export async function buildRecursive(
 export async function getRecursiveBuildSteps(
   projectDir: string,
   target: string,
-  fullReconfigure: boolean
+  fullReconfigure: boolean,
+  jobs?: number
 ): Promise<Array<{ project: BuildableProject; steps: BuildStep[] }>> {
   const graph = await walkDependencies(projectDir);
   const buildOrder = resolveBuildOrder(graph, projectDir);
@@ -327,6 +340,6 @@ export async function getRecursiveBuildSteps(
 
   return buildOrder.map((project) => ({
     project,
-    steps: build.getSteps(target, fullReconfigure),
+    steps: build.getSteps(target, fullReconfigure, jobs),
   }));
 }

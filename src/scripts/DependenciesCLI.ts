@@ -2,11 +2,17 @@ import { checkLibEcs, checkLibTheSeed, installLibEcs, installLibTheSeed } from "
 import Config from "../Config";
 import { ScriptArgsType } from "../types";
 
-const DependenciesCLI = (scriptConfig: ScriptArgsType) => {
+const DependenciesCLI = async (scriptConfig: ScriptArgsType) => {
   const config = new Config(scriptConfig.configDir);
 
   const command = scriptConfig.args[3];
   const target = scriptConfig.args[4] ? scriptConfig.args[4] : "native";
+
+  if ((command === "check" || command === "install") && target !== "native" && target !== "windows") {
+    console.error(`Unrecognized target "${target}"; expected native or windows.`);
+    process.exitCode = 1;
+    return;
+  }
 
   switch (command) {
     case "help":
@@ -30,7 +36,7 @@ const DependenciesCLI = (scriptConfig: ScriptArgsType) => {
     case "install":
       if (!checkLibEcs(config, target)) {
         console.log("Installing libecs-cpp...");
-        if (installLibEcs(config, target)) {
+        if (await installLibEcs(config, target)) {
           console.log("libecs-cpp installed successfully.");
         } else {
           console.error("Failed to install libecs-cpp.");
@@ -38,7 +44,7 @@ const DependenciesCLI = (scriptConfig: ScriptArgsType) => {
       }
       if (!checkLibTheSeed(config, target)) {
         console.log("Installing libthe-seed...");
-        if (installLibTheSeed(config, target)) {
+        if (await installLibTheSeed(config, target)) {
           console.log("libthe-seed installed successfully.");
         } else {
           console.error("Failed to install libthe-seed.");

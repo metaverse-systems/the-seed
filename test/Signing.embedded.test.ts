@@ -43,7 +43,7 @@ function writeConfig(configDir: string, data: { scope?: string; name?: string; e
       },
     };
   }
-  const full = { prefix: "", scopes };
+  const full = { prefix: "/tmp/seed-test-prefix", scopes };
   fs.writeFileSync(configPath, JSON.stringify(full, null, 2));
 }
 
