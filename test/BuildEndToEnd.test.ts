@@ -1,7 +1,9 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import crypto from "crypto";
 import { spawnSync } from "child_process";
+import * as x509 from "@peculiar/x509";
 import Config from "../src/Config";
 import Build from "../src/Build";
 import Package from "../src/Package";
@@ -739,6 +741,136 @@ describe("BuildEndToEnd", () => {
         expect([file, fs.existsSync(file + ".sig")]).toEqual([file, false]);
       }
     }, GROUP_TIMEOUT * 2);
+
+    /** Same as fullBuild, but the lines the build logs are kept. */
+    function loggedBuild(lines: string[]) {
+      useProcessEnv({ HOME: home });
+      return new Build(new Config(configDir)).buildProject({
+        projectDir,
+        target: "native",
+        release: false,
+        jobs: JOBS,
+        configDir,
+        env: caseEnv({}),
+        output: new TailSink(),
+        log: (line) => lines.push(line),
+      });
+    }
+
+    /** Every path under `dir` with its type, size, mode and link text. */
+    function prefixSnapshot(dir: string): string[] {
+      const out: string[] = [];
+      const walk = (current: string): void => {
+        const st = fs.lstatSync(current);
+        const rel = path.relative(dir, current);
+        if (st.isSymbolicLink()) {
+          out.push(`${rel} link ${fs.readlinkSync(current)}`);
+        } else if (st.isDirectory()) {
+          out.push(`${rel} dir ${(st.mode & 0o7777).toString(8)}`);
+          for (const name of fs.readdirSync(current).sort()) {
+            walk(path.join(current, name));
+          }
+        } else {
+          out.push(`${rel} file ${st.size} ${(st.mode & 0o7777).toString(8)}`);
+        }
+      };
+      if (fs.existsSync(dir)) {
+        walk(dir);
+      }
+      return out;
+    }
+
+    it("an unreadable key fails the build at sign and leaves the prefix unchanged", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable, "autoreconf, make or cc not found")) return;
+      if (!optionalExternalCheck("build-end-to-end-unreadable-key", process.getuid?.() !== 0, "running as root, which can read any file")) return;
+
+      // An earlier build installs signed files; the next one cannot read the key
+      expect(await fullBuild("native", false)).toEqual({ status: "completed" });
+      const before = prefixSnapshot(prefix);
+      expect(before.length).toBeGreaterThan(0);
+      const keyPath = signing.scopeKeyPath(SCOPE);
+      fs.chmodSync(keyPath, 0o000);
+      let result;
+      try {
+        result = await fullBuild("native", false);
+      } finally {
+        fs.chmodSync(keyPath, 0o600);
+      }
+
+      expect(result.status).toBe("failed");
+      const failed = result as { status: "failed"; step: string; message: string };
+      expect(failed.step).toBe("sign");
+      expect(failed.message).toContain("signing failed on ");
+      expect(failed.message).toContain(nativePrefix);
+      expect(prefixSnapshot(prefix)).toEqual(before);
+      expect(fs.existsSync(path.join(prefix, ".the-seed-staging"))).toBe(false);
+    }, GROUP_TIMEOUT * 2);
+
+    it("a project with no scope, no certificate or an expired certificate builds with exactly one notice line", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable, "autoreconf, make or cc not found")) return;
+
+      // The first build is signed, so every later build has a stale .sig to remove
+      expect(await fullBuild("native", false)).toEqual({ status: "completed" });
+      const staleSignatures = [installedTiny() + ".sig", ...nativeLibraries().map((file) => file + ".sig")];
+      for (const sig of staleSignatures) {
+        expect([sig, fs.existsSync(sig)]).toEqual([sig, true]);
+      }
+
+      const noticeLines = (lines: string[]) => lines.filter((line) => /^(Not signed:|Warning: not signed:)/.test(line));
+      const expectUnsigned = async (label: string, prefixText: "Not signed:" | "Warning: not signed:") => {
+        const lines: string[] = [];
+        const result = await loggedBuild(lines);
+        expect([label, result]).toEqual([label, { status: "completed" }]);
+        const notices = noticeLines(lines);
+        expect([label, notices.length]).toEqual([label, 1]);
+        expect([label, notices[0].startsWith(prefixText)]).toEqual([label, true]);
+        for (const file of [installedTiny(), ...nativeLibraries()]) {
+          expect([label, file, fs.existsSync(file + ".sig")]).toEqual([label, file, false]);
+          expect([label, file, (await signing.verifyFile(file)).status === "VALID"]).toEqual([label, file, false]);
+        }
+      };
+
+      // No scope
+      setPackageName("tiny");
+      await expectUnsigned("no scope", "Not signed:");
+
+      // A scope without a certificate: the earlier signed files' signatures are restored by a signed build first
+      setPackageName("@t/tiny");
+      expect(await fullBuild("native", false)).toEqual({ status: "completed" });
+      setPackageName("@nocert/tiny");
+      await expectUnsigned("no certificate", "Not signed:");
+
+      // An expired certificate
+      setPackageName("@t/tiny");
+      expect(await fullBuild("native", false)).toEqual({ status: "completed" });
+      await writeExpiredCertificate();
+      await expectUnsigned("expired certificate", "Warning: not signed:");
+    }, GROUP_TIMEOUT * 4);
+
+    /** Renames the project in place, keeping its built tree. */
+    function setPackageName(name: string): void {
+      const manifest = path.join(projectDir, "package.json");
+      const parsed = JSON.parse(fs.readFileSync(manifest, "utf8")) as { name?: string };
+      parsed.name = name;
+      fs.writeFileSync(manifest, JSON.stringify(parsed));
+    }
+
+    /** Replaces the scope's certificate by one whose validity ended in the past, signed by its own key. */
+    async function writeExpiredCertificate(): Promise<void> {
+      const webcrypto = crypto.webcrypto as unknown as Crypto;
+      x509.cryptoProvider.set(webcrypto);
+      const keys = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+      const day = 24 * 60 * 60 * 1000;
+      const cert = await x509.X509CertificateGenerator.createSelfSigned({
+        serialNumber: "01",
+        name: "CN=Expired Test",
+        notBefore: new Date(Date.now() - 30 * day),
+        notAfter: new Date(Date.now() - 2 * day),
+        signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+        keys,
+      });
+      fs.writeFileSync(signing.scopeCertPath(SCOPE), cert.toString("pem"));
+    }
   });
 
   describe("library search", () => {

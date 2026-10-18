@@ -1,9 +1,10 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { buildTreeCopies, groupOutputs, outputKind, placeStaged, readStage, runInstallPhase, signOutputs, stripOutputs } from "../src/InstallPhase";
+import { buildTreeCopies, groupOutputs, notice, outputKind, placeStaged, readStage, runInstallPhase, signingOutcome, signOutputs, stripOutputs } from "../src/InstallPhase";
 import Signing from "../src/Signing";
 import { findOnPath } from "../src/ProcessRunner";
+import { optionalExternalCheck } from "./helpers/ExternalTools";
 import { InstallPhaseOptions, InstallPhaseResult, OutputGroup, SigningOutcome } from "../src/types";
 
 // Choices made where the contracts leave a detail open (the implementation matches these):
@@ -1768,5 +1769,456 @@ describe("runInstallPhase", () => {
     expect(result.report.signed).toEqual([]);
     expect(fs.readFileSync(built).equals(before)).toBe(true);
     expect(fs.existsSync(built + ".sig")).toBe(false);
+  });
+
+  // ── Failures, notices and stale signatures ────────────────
+
+  /** Every path under `dir` with its type, size, mode and link text, for before/after comparisons. */
+  function snapshot(dir: string): string[] {
+    const out: string[] = [];
+    const walk = (current: string): void => {
+      const st = fs.lstatSync(current);
+      const rel = path.relative(dir, current);
+      if (st.isSymbolicLink()) {
+        out.push(`${rel} link ${fs.readlinkSync(current)}`);
+      } else if (st.isDirectory()) {
+        out.push(`${rel} dir ${octal(st.mode)}`);
+        for (const name of fs.readdirSync(current).sort()) {
+          walk(path.join(current, name));
+        }
+      } else {
+        out.push(`${rel} file ${st.size} ${octal(st.mode)}`);
+      }
+    };
+    walk(dir);
+    return out;
+  }
+
+  /** A prefix that already holds an installed file, so "unchanged" has something to compare. */
+  function prefixWithOldFile(c: PhaseCase): void {
+    writeFile(path.join(c.prefix, "bin", "old"), elfHeader(2, "old"), 0o755);
+    writeFile(path.join(c.prefix, "bin", "tiny"), elfHeader(2, "old tiny"), 0o755);
+  }
+
+  function expectFailedAt(result: InstallPhaseResult, step: string): Extract<InstallPhaseResult, { status: "failed" }> {
+    if (result.status !== "failed") {
+      throw new Error("expected failed, got " + JSON.stringify(result));
+    }
+    expect(result.step).toBe(step);
+    return result;
+  }
+
+  it("fails at strip naming the installed file when the strip tool fails, with the prefix unchanged and no stage left", async () => {
+    const c = makeCase("native");
+    installFakeStrip(c.stripDir, { failWith: "strip: deliberate failure" });
+    prefixWithOldFile(c);
+    payload(c, "bin/tiny", elfHeader(2, "new tiny"));
+    fakeMake(c);
+    const before = snapshot(c.configPrefix);
+
+    const failed = expectFailedAt(await runInstallPhase(options(c, { release: true })), "strip");
+
+    expect(failed.message).toContain("strip failed on " + path.join(c.prefix, "bin", "tiny") + ": ");
+    expect(failed.message).toContain("strip: deliberate failure");
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    expect(fs.existsSync(path.join(c.configPrefix, ".the-seed-staging"))).toBe(false);
+  });
+
+  it("fails at sign naming the file when signing fails, with the prefix unchanged and no stage left", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    prefixWithOldFile(c);
+    payload(c, "bin/tiny", elfHeader(2, "new tiny"));
+    fakeMake(c);
+    const before = snapshot(c.configPrefix);
+    // The signer fails for the staged program, as it would for a key it cannot use
+    jest.spyOn(Signing.prototype, "signFile").mockRejectedValue(new Error("deliberate signer failure"));
+
+    const failed = expectFailedAt(await runInstallPhase(options(c, { configDir: certDir })), "sign");
+
+    expect(failed.message).toBe("signing failed on " + path.join(c.prefix, "bin", "tiny") + ": deliberate signer failure");
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    expect(fs.existsSync(path.join(c.configPrefix, ".the-seed-staging"))).toBe(false);
+  });
+
+  it("fails at sign with `<certificate path>: <reason>` for a certificate that cannot be parsed, with the prefix unchanged and no stage left", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    prefixWithOldFile(c);
+    payload(c, "bin/tiny", elfHeader(2, "new tiny"));
+    fakeMake(c);
+    const brokenConfig = path.join(c.base, "broken-config");
+    const certPath = new Signing(brokenConfig).scopeCertPath(scope);
+    writeFile(certPath, "this is not a certificate\n", 0o644);
+    const before = snapshot(c.configPrefix);
+
+    const failed = expectFailedAt(await runInstallPhase(options(c, { configDir: brokenConfig })), "sign");
+
+    expect(failed.message.startsWith(certPath + ": ")).toBe(true);
+    expect(failed.message.length).toBeGreaterThan(certPath.length + 2);
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    expect(fs.existsSync(path.join(c.configPrefix, ".the-seed-staging"))).toBe(false);
+  });
+
+  it("prints the notice of an unsigned project exactly once, however many outputs it has", async () => {
+    const c = makeCase("native");
+    payload(c, "bin/tiny", elfHeader(2, "installed"));
+    payload(c, "lib/libx.so.0.0.0", elfHeader(3, "installed library"));
+    fs.symlinkSync("libx.so.0.0.0", path.join(c.payloadRoot + c.prefix, "lib", "libx.so.0"));
+    writeFile(path.join(c.projectDir, "src", ".libs", "tiny"), elfHeader(2, "built"), 0o755);
+    writeFile(path.join(c.projectDir, "src", ".libs", "libx.so.0.0.0"), elfHeader(3, "built library"), 0o755);
+    fakeMake(c);
+
+    const result = expectCompleted(await runInstallPhase(options(c, { release: true })));
+
+    const notices = c.lines.filter((line) => /^(Not signed|Warning: not signed):/.test(line));
+    expect(notices).toEqual([notice(result.report.outcome, c.projectDir)]);
+    expect(notices).toHaveLength(1);
+  });
+
+  it("prints no notice when an unsigned project installs only headers and data", async () => {
+    const c = makeCase("native");
+    payload(c, "include/x.h", "int x;\n", 0o644);
+    payload(c, "share/x/data.txt", "data\n", 0o644);
+    writeFile(path.join(c.projectDir, "src", ".libs", "stray"), elfHeader(2, "built"), 0o755);
+    fakeMake(c);
+
+    expectCompleted(await runInstallPhase(options(c)));
+
+    expect(c.lines.filter((line) => /not signed/i.test(line))).toEqual([]);
+  });
+
+  it("removes <name>.sig beside every build-tree name of an unsigned project and the prefix's <name>.sig for every installed name", async () => {
+    const c = makeCase("native");
+    // Signatures an earlier signed build left in the prefix, for a program, a library and a link name
+    writeFile(path.join(c.prefix, "bin", "tiny"), elfHeader(2, "old"), 0o755);
+    writeFile(path.join(c.prefix, "bin", "tiny.sig"), "stale", 0o644);
+    writeFile(path.join(c.prefix, "lib", "libx.so.0.0.0"), elfHeader(3, "old"), 0o755);
+    writeFile(path.join(c.prefix, "lib", "libx.so.0.0.0.sig"), "stale", 0o644);
+    fs.symlinkSync("libx.so.0.0.0.sig", path.join(c.prefix, "lib", "libx.so.0.sig"));
+    // ... and one beside a file that is not an output
+    writeFile(path.join(c.prefix, "lib", "liby.a.sig"), "kept", 0o644);
+    payload(c, "bin/tiny", elfHeader(2, "new"));
+    payload(c, "lib/libx.so.0.0.0", elfHeader(3, "new"));
+    fs.symlinkSync("libx.so.0.0.0", path.join(c.payloadRoot + c.prefix, "lib", "libx.so.0"));
+    payload(c, "lib/liby.a", arArchive, 0o644);
+    // Build-tree names with stale signatures: the real file, a link name and a copy without an installed counterpart
+    const libs = path.join(c.projectDir, "src", ".libs");
+    writeFile(path.join(libs, "tiny"), elfHeader(2, "built"), 0o755);
+    writeFile(path.join(libs, "tiny.sig"), "stale", 0o644);
+    writeFile(path.join(libs, "libx.so.0.0.0"), elfHeader(3, "built"), 0o755);
+    writeFile(path.join(libs, "libx.so.0.0.0.sig"), "stale", 0o644);
+    fs.symlinkSync("libx.so.0.0.0", path.join(libs, "libx.so.0"));
+    fs.symlinkSync("libx.so.0.0.0.sig", path.join(libs, "libx.so.0.sig"));
+    writeFile(path.join(libs, "libz.a"), arArchive, 0o644);
+    writeFile(path.join(libs, "libz.a.sig"), "kept", 0o644);
+    fakeMake(c);
+
+    expectCompleted(await runInstallPhase(options(c)));
+
+    for (const stale of [
+      path.join(libs, "tiny.sig"),
+      path.join(libs, "libx.so.0.0.0.sig"),
+      path.join(libs, "libx.so.0.sig"),
+      path.join(c.prefix, "bin", "tiny.sig"),
+      path.join(c.prefix, "lib", "libx.so.0.0.0.sig"),
+      path.join(c.prefix, "lib", "libx.so.0.sig"),
+    ]) {
+      expect([stale, fs.existsSync(stale) || isLink(stale)]).toEqual([stale, false]);
+    }
+    // Signature files beside anything that is not an identified output stay
+    expect(fs.readFileSync(path.join(c.prefix, "lib", "liby.a.sig"), "utf8")).toBe("kept");
+    expect(fs.readFileSync(path.join(libs, "libz.a.sig"), "utf8")).toBe("kept");
+  });
+
+  it("replaces the prefix's <name>.sig by the staged signature (or signature link) of a signed project", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    writeFile(path.join(c.prefix, "bin", "tiny.sig"), "stale", 0o644);
+    writeFile(path.join(c.prefix, "lib", "libx.so.0.sig"), "stale file where a link now goes", 0o644);
+    payload(c, "bin/tiny", elfHeader(2, "new"));
+    payload(c, "lib/libx.so.0.0.0", elfHeader(3, "new"));
+    fs.symlinkSync("libx.so.0.0.0", path.join(c.payloadRoot + c.prefix, "lib", "libx.so.0"));
+    fakeMake(c);
+
+    expectCompleted(await runInstallPhase(options(c, { configDir: certDir })));
+
+    expect(fs.readFileSync(path.join(c.prefix, "bin", "tiny.sig"), "utf8")).not.toBe("stale");
+    expect(fs.lstatSync(path.join(c.prefix, "lib", "libx.so.0.sig")).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(path.join(c.prefix, "lib", "libx.so.0.sig"))).toBe("libx.so.0.0.0.sig");
+    const signing = new Signing(certDir);
+    for (const rel of ["bin/tiny", "lib/libx.so.0.0.0", "lib/libx.so.0"]) {
+      expect([rel, (await signing.verifyFile(path.join(c.prefix, rel))).status]).toEqual([rel, "VALID"]);
+    }
+  });
+
+  it("removes the prefix's <name>.sig for an output that is signed with an embedded signature", async () => {
+    recognisePeByMagic();
+    const c = makeCase("windows");
+    markSigned(c);
+    writeFile(path.join(c.prefix, "bin", "tiny.exe"), peHeader(0x22, "old"), 0o755);
+    writeFile(path.join(c.prefix, "bin", "tiny.exe.sig"), "stale detached signature", 0o644);
+    payload(c, "bin/tiny.exe", peHeader(0x22, "new"));
+    fakeMake(c);
+    // The signer embeds the signature by replacing the file
+    jest.spyOn(Signing.prototype, "signFile").mockImplementation(async (file: string) => {
+      const replacement = file + ".new";
+      fs.writeFileSync(replacement, peHeader(0x22, "signed"));
+      fs.renameSync(replacement, file);
+      return { filePath: file, signaturePath: null, fingerprint: "SHA256:x", signatureType: "embedded", warnings: [] };
+    });
+
+    const result = expectCompleted(await runInstallPhase(options(c, { target: "windows", configDir: certDir })));
+
+    expect(result.report.signed.map((entry) => entry.form)).toEqual(["embedded"]);
+    expect(fs.readFileSync(path.join(c.prefix, "bin", "tiny.exe")).equals(peHeader(0x22, "signed"))).toBe(true);
+    expect(fs.existsSync(path.join(c.prefix, "bin", "tiny.exe.sig"))).toBe(false);
+  });
+});
+
+// ── signingOutcome and notice ───────────────────────────────
+
+function isLink(file: string): boolean {
+  try {
+    return fs.lstatSync(file).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+describe("signingOutcome and notice", () => {
+  // Choices: `notice` returns the single line of the research table, with `<projectDir>/package.json`
+  // joined by "/" and the expired date as the UTC calendar date (`toISOString().slice(0, 10)`);
+  // for an unreadable package.json `outcome.detail` is the reason that goes between the parentheses.
+  const scope = "@t";
+  let certDir: string;
+  let projectDir: string;
+
+  beforeAll(async () => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), "install-phase-outcome-cert-"));
+    fs.writeFileSync(
+      path.join(certDir, "config.json"),
+      JSON.stringify({ prefix: "/unused", scopes: { [scope]: { author: { name: "Test User", email: "t@example.invalid", url: "" } } } })
+    );
+    await new Signing(certDir).createCert({ validityDays: 365, scope });
+  });
+
+  afterAll(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    projectDir = makeScratch();
+  });
+
+  function writePackage(name?: unknown): void {
+    fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify(name === undefined ? {} : { name }));
+  }
+
+  it("says the project has no scope when there is no package.json", () => {
+    const outcome = signingOutcome(projectDir, certDir);
+
+    expect(outcome).toEqual(expect.objectContaining({ kind: "unsigned", reason: "noPackageJson" }));
+    expect(notice(outcome, projectDir)).toBe(`Not signed: ${projectDir} has no package.json, so the project has no scope.`);
+  });
+
+  it("gives the reason when package.json is not JSON", () => {
+    fs.writeFileSync(path.join(projectDir, "package.json"), "{ not json");
+
+    const outcome = signingOutcome(projectDir, certDir);
+
+    expect(outcome).toEqual(expect.objectContaining({ kind: "unsigned", reason: "unreadablePackageJson" }));
+    const detail = (outcome as { detail?: string }).detail;
+    expect(typeof detail).toBe("string");
+    expect(detail).not.toBe("");
+    expect(notice(outcome, projectDir)).toBe(`Not signed: ${projectDir}/package.json could not be read (${detail}), so the project has no scope.`);
+  });
+
+  it("gives the reason when package.json cannot be read", () => {
+    fs.mkdirSync(path.join(projectDir, "package.json"));
+
+    const outcome = signingOutcome(projectDir, certDir);
+
+    expect(outcome).toEqual(expect.objectContaining({ kind: "unsigned", reason: "unreadablePackageJson" }));
+    const detail = (outcome as { detail?: string }).detail;
+    expect(notice(outcome, projectDir)).toBe(`Not signed: ${projectDir}/package.json could not be read (${detail}), so the project has no scope.`);
+    expect(detail).toContain("EISDIR");
+  });
+
+  it("says the package name has no scope", () => {
+    writePackage("plain-name");
+
+    const outcome = signingOutcome(projectDir, certDir);
+
+    expect(outcome).toEqual(expect.objectContaining({ kind: "unsigned", reason: "noScope" }));
+    expect(notice(outcome, projectDir)).toBe("Not signed: the package name \"plain-name\" has no scope (expected @scope/name).");
+  });
+
+  it("says there is no scope when package.json has no name", () => {
+    writePackage();
+
+    const outcome = signingOutcome(projectDir, certDir);
+
+    expect(outcome).toEqual(expect.objectContaining({ kind: "unsigned", reason: "noScope" }));
+    expect(notice(outcome, projectDir)).toMatch(/^Not signed: .* has no scope \(expected @scope\/name\)\.$/);
+  });
+
+  it("says there is no certificate for the scope", () => {
+    writePackage("@other/proj");
+
+    const outcome = signingOutcome(projectDir, certDir);
+
+    expect(outcome).toEqual(expect.objectContaining({ kind: "unsigned", reason: "noCertificate", scope: "@other" }));
+    expect(notice(outcome, projectDir)).toBe(
+      "Not signed: no signing certificate for scope '@other'. Create one with \"the-seed signing create-cert\"."
+    );
+  });
+
+  it("names the date an expired certificate expired", () => {
+    writePackage("@t/proj");
+    jest.spyOn(Signing.prototype, "getCertInfo").mockReturnValue({
+      isExpired: true,
+      notAfter: new Date("2024-03-05T12:00:00Z"),
+    } as unknown as ReturnType<Signing["getCertInfo"]>);
+
+    const outcome = signingOutcome(projectDir, certDir);
+
+    expect(outcome).toEqual(expect.objectContaining({ kind: "unsigned", reason: "expired", scope: "@t" }));
+    expect(notice(outcome, projectDir)).toBe(
+      "Warning: not signed: the signing certificate for scope '@t' expired on 2024-03-05. Create a new one with \"the-seed signing create-cert --force\"."
+    );
+  });
+
+  it("is signed, with no notice, for a scope with a valid certificate", () => {
+    writePackage("@t/proj");
+
+    const outcome = signingOutcome(projectDir, certDir);
+
+    expect(outcome).toEqual({ kind: "signed", scope });
+    expect(notice(outcome, projectDir)).toBeNull();
+  });
+
+  it("throws naming the certificate path when the certificate file cannot be parsed", () => {
+    writePackage("@t/proj");
+    const brokenConfig = makeScratch();
+    const certPath = new Signing(brokenConfig).scopeCertPath(scope);
+    writeFile(certPath, "this is not a certificate\n", 0o644);
+
+    expect(() => signingOutcome(projectDir, brokenConfig)).toThrow(certPath);
+  });
+
+  it("throws naming the certificate path when the certificate file is empty", () => {
+    writePackage("@t/proj");
+    const brokenConfig = makeScratch();
+    const certPath = new Signing(brokenConfig).scopeCertPath(scope);
+    writeFile(certPath, "", 0o644);
+
+    expect(() => signingOutcome(projectDir, brokenConfig)).toThrow(certPath);
+  });
+
+  it("throws naming the certificate path when the certificate file cannot be read", () => {
+    if (!optionalExternalCheck("install-phase-unreadable-certificate", process.getuid?.() !== 0, "running as root, which can read any file")) return;
+    writePackage("@t/proj");
+    const brokenConfig = makeScratch();
+    const certPath = new Signing(brokenConfig).scopeCertPath(scope);
+    writeFile(certPath, fs.readFileSync(new Signing(certDir).scopeCertPath(scope)), 0o000);
+
+    expect(() => signingOutcome(projectDir, brokenConfig)).toThrow(certPath);
+  });
+});
+
+// ── signOutputs failures ────────────────────────────────────
+
+describe("signOutputs failures", () => {
+  const scope = "@t";
+  let certDir: string;
+  let lines: string[];
+  const log = (line: string) => lines.push(line);
+
+  beforeAll(async () => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), "install-phase-failure-cert-"));
+    fs.writeFileSync(
+      path.join(certDir, "config.json"),
+      JSON.stringify({ prefix: "/unused", scopes: { [scope]: { author: { name: "Test User", email: "t@example.invalid", url: "" } } } })
+    );
+    await new Signing(certDir).createCert({ validityDays: 365, scope });
+  });
+
+  afterAll(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    lines = [];
+  });
+
+  it("a signing error fails at sign naming the file", async () => {
+    if (!optionalExternalCheck("install-phase-unreadable-key", process.getuid?.() !== 0, "running as root, which can read any file")) return;
+    // A copy of the certificate whose key file nobody can read
+    const config = makeScratch();
+    fs.cpSync(certDir, config, { recursive: true });
+    const keyPath = new Signing(config).scopeKeyPath(scope);
+    fs.chmodSync(keyPath, 0o000);
+    const s = makeStage("native");
+    const file = path.join(s.root, "bin", "tiny");
+    writeFile(file, elfHeader(2, "tool"), 0o755);
+
+    let error: Error | undefined;
+    try {
+      await signOutputs(groupsOf(s, "native"), scope, config, "native", undefined, log);
+    } catch (err) {
+      error = err as Error;
+    }
+
+    expect(error).toBeDefined();
+    expect(error!.message.startsWith("signing failed on " + path.join(s.prefix, "bin", "tiny") + ": ")).toBe(true);
+    expect(error!.message.length).toBeGreaterThan(("signing failed on " + path.join(s.prefix, "bin", "tiny") + ": ").length);
+    expect(fs.existsSync(file + ".sig")).toBe(false);
+  });
+
+  it("a windows output that comes back with a detached signature throws naming the file", async () => {
+    recognisePeByMagic();
+    const s = makeStage("windows");
+    const file = path.join(s.root, "bin", "tiny.exe");
+    writeFile(file, peHeader(0x22), 0o755);
+    jest.spyOn(Signing.prototype, "signFile").mockResolvedValue({
+      filePath: file,
+      signaturePath: file + ".sig",
+      fingerprint: "SHA256:x",
+      signatureType: "detached",
+      warnings: [],
+    });
+
+    await expect(signOutputs(groupsOf(s, "windows"), scope, certDir, "windows", undefined, log)).rejects.toThrow(
+      new Error("signing failed on " + path.join(s.prefix, "bin", "tiny.exe") + ": expected an embedded signature, got detached")
+    );
+  });
+
+  it("adds that the file is not a valid PE file, and that a full build rebuilds it, when the addon does not recognise it", async () => {
+    const s = makeStage("windows");
+    const file = path.join(s.root, "bin", "tiny.exe");
+    writeFile(file, peHeader(0x22), 0o755);
+    jest.spyOn(Signing.prototype, "removeEmbeddedSignature").mockReturnValue(false);
+    jest.spyOn(Signing.prototype, "detectBinaryFormat").mockReturnValue({ format: "other", subFormat: null });
+    jest.spyOn(Signing.prototype, "signFile").mockResolvedValue({
+      filePath: file,
+      signaturePath: file + ".sig",
+      fingerprint: "SHA256:x",
+      signatureType: "detached",
+      warnings: [],
+    });
+
+    let error: Error | undefined;
+    try {
+      await signOutputs(groupsOf(s, "windows"), scope, certDir, "windows", undefined, log);
+    } catch (err) {
+      error = err as Error;
+    }
+
+    expect(error).toBeDefined();
+    const display = path.join(s.prefix, "bin", "tiny.exe");
+    expect(error!.message.startsWith("signing failed on " + display + ": expected an embedded signature, got detached")).toBe(true);
+    expect(error!.message).toContain("not recognised as a valid PE file");
+    expect(error!.message).toContain("a full build rebuilds it");
   });
 });

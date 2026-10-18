@@ -699,7 +699,12 @@ export function signingOutcome(projectDir: string, configDir: string): SigningOu
   if (!signing.hasCert(scope)) {
     return { kind: "unsigned", reason: "noCertificate", scope, name: name as string };
   }
-  const info = signing.getCertInfo(scope);
+  let info: ReturnType<Signing["getCertInfo"]>;
+  try {
+    info = signing.getCertInfo(scope);
+  } catch (err) {
+    throw new Error(signing.scopeCertPath(scope) + ": " + reasonOf(err));
+  }
   if (info === null) {
     return { kind: "unsigned", reason: "noCertificate", scope, name: name as string };
   }
@@ -707,6 +712,53 @@ export function signingOutcome(projectDir: string, configDir: string): SigningOu
     return { kind: "unsigned", reason: "expired", scope, name: name as string, expiredOn: info.notAfter };
   }
   return { kind: "signed", scope };
+}
+
+/**
+ * The one line that says why a project is not signed, or null for a signed
+ * project.
+ */
+export function notice(outcome: SigningOutcome, projectDir: string): string | null {
+  if (outcome.kind === "signed") {
+    return null;
+  }
+  switch (outcome.reason) {
+    case "noPackageJson":
+      return "Not signed: " + projectDir + " has no package.json, so the project has no scope.";
+    case "unreadablePackageJson":
+      return "Not signed: " + projectDir + "/package.json could not be read (" + (outcome.detail ?? "unknown error") + "), so the project has no scope.";
+    case "noScope":
+      return outcome.name === undefined
+        ? "Not signed: " + projectDir + "/package.json has no scope (expected @scope/name)."
+        : "Not signed: the package name \"" + outcome.name + "\" has no scope (expected @scope/name).";
+    case "noCertificate":
+      return "Not signed: no signing certificate for scope '" + outcome.scope + "'. Create one with \"the-seed signing create-cert\".";
+    case "expired":
+      return (
+        "Warning: not signed: the signing certificate for scope '" +
+        outcome.scope +
+        "' expired on " +
+        (outcome.expiredOn ?? new Date(0)).toISOString().slice(0, 10) +
+        ". Create a new one with \"the-seed signing create-cert --force\"."
+      );
+  }
+}
+
+/** Removes `<name>.sig` beside every name of the groups. */
+function removeStaleSignatures(groups: OutputGroup[]): void {
+  for (const group of groups) {
+    for (const name of group.names) {
+      const sig = name + ".sig";
+      try {
+        const st = lstatOrNull(sig);
+        if (st !== null && !st.isDirectory()) {
+          fs.unlinkSync(sig);
+        }
+      } catch (err) {
+        throw new Error("cannot remove the stale signature " + sig + ": " + reasonOf(err));
+      }
+    }
+  }
 }
 
 // ── The phase ───────────────────────────────────────────────
@@ -815,6 +867,13 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
       return { status: "failed", step: "sign", message: reasonOf(err) };
     }
 
+    if (processed.length > 0) {
+      const line = notice(signingResult, options.projectDir);
+      if (line !== null) {
+        options.log(line);
+      }
+    }
+
     const stripped: string[] = [];
     if (options.release && options.target !== undefined) {
       try {
@@ -836,6 +895,14 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
         if (options.signal?.aborted) {
           return { status: "interrupted" };
         }
+        return { status: "failed", step: "sign", message: reasonOf(err) };
+      }
+    }
+
+    if (signingResult.kind === "unsigned") {
+      try {
+        removeStaleSignatures(buildTree);
+      } catch (err) {
         return { status: "failed", step: "sign", message: reasonOf(err) };
       }
     }

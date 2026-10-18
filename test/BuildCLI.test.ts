@@ -209,6 +209,37 @@ describe("BuildCLI plain and incremental result handling", () => {
     expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([`Build failed at ${step}: ${message}.`]);
   });
 
+  it("prints a signing failure as `Build failed at sign: signing failed on <path>: <message>.` with exit status 1", async () => {
+    mockBuildProject.mockResolvedValue({
+      status: "failed",
+      step: "sign",
+      message: "signing failed on /p/x86_64-linux-gnu/bin/tiny: EACCES: permission denied, open '/c/signing/@t/key.pem'",
+    });
+    await BuildCLI(makeArgs(["native"]));
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
+      "Build failed at sign: signing failed on /p/x86_64-linux-gnu/bin/tiny: EACCES: permission denied, open '/c/signing/@t/key.pem'.",
+    ]);
+  });
+
+  it("prints an unreadable certificate as `Build failed at sign: <cert path>: <reason>.` with exit status 1", async () => {
+    mockBuildProject.mockResolvedValue({ status: "failed", step: "sign", message: "/c/signing/@t/cert.pem: error:0480006C:PEM routines::no start line" });
+    await BuildCLI(makeArgs(["native"]));
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
+      "Build failed at sign: /c/signing/@t/cert.pem: error:0480006C:PEM routines::no start line.",
+    ]);
+  });
+
+  it("prints a missing strip tool with its hint as `Build failed at strip: Strip tool '<tool>' not found on this system.` with exit status 1", async () => {
+    const message = "Strip tool 'strip' not found on this system.\nInstall binutils (for example the binutils package) and try again.";
+    mockBuildProject.mockResolvedValue({ status: "failed", step: "strip", message });
+    await BuildCLI(makeArgs(["native", "--release"]));
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([`Build failed at strip: ${message}.`]);
+    expect(String(errorSpy.mock.calls[0][0])).toContain("Build failed at strip: Strip tool 'strip' not found on this system.");
+  });
+
   it("sets exit status 130 and prints Build cancelled. on stderr when the first signal was SIGINT", async () => {
     mockBuildProject.mockImplementation(async () => {
       process.emit("SIGINT", "SIGINT");
