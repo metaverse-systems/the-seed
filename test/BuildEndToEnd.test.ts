@@ -551,7 +551,7 @@ describe("BuildEndToEnd", () => {
       copyFixture(projectDir, { withLibrary: true, packageName: "@t/tiny" });
     });
 
-    function fullBuild(target: "native" | "windows", release: boolean) {
+    function fullBuild(target: "native" | "windows", release: boolean, onStepStart?: (step: { label: string }) => void) {
       // buildProject gets its environment as an option; the process environment is cleared of the same names as well
       useProcessEnv({ HOME: home });
       return new Build(new Config(configDir)).buildProject({
@@ -563,7 +563,41 @@ describe("BuildEndToEnd", () => {
         env: caseEnv({}),
         output: new TailSink(),
         log: () => undefined,
+        onStepStart,
       });
+    }
+
+    /** Every file or link under a directory whose name matches, as sorted absolute paths */
+    function findNamed(dir: string, pattern: RegExp): string[] {
+      const found: string[] = [];
+      const walk = (current: string) => {
+        for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+          const child = path.join(current, entry.name);
+          if (entry.isDirectory()) {
+            walk(child);
+          } else if (pattern.test(entry.name)) {
+            found.push(child);
+          }
+        }
+      };
+      walk(dir);
+      return found.sort();
+    }
+
+    /** Static archives and import libraries in the project, with the hash of each, taken when the install step starts */
+    function archiveHashes(): Map<string, string> {
+      const hashes = new Map<string, string>();
+      for (const file of findNamed(projectDir, /\.(a|dll\.a)$/)) {
+        hashes.set(file, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
+      }
+      return hashes;
+    }
+
+    function expectNoArchiveSignatures(): void {
+      // Neither the prefix nor the build tree holds a signature beside an archive, import library or libtool file
+      for (const dir of [prefix, projectDir]) {
+        expect(findNamed(dir, /\.(a|dll\.a|la)\.sig$/)).toEqual([]);
+      }
     }
 
     function describeFile(file: string): string {
@@ -593,9 +627,25 @@ describe("BuildEndToEnd", () => {
     it("native release build strips and signs the installed program and library", async () => {
       if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
 
-      const result = await fullBuild("native", true);
+      let before = new Map<string, string>();
+      const result = await fullBuild("native", true, (step) => {
+        if (step.label === "install") {
+          before = archiveHashes();
+        }
+      });
 
       expect(result).toEqual({ status: "completed" });
+      // Archives and libtool files get no signature, and the archives in the build tree are untouched
+      expectNoArchiveSignatures();
+      expect(before.size).toBeGreaterThan(0);
+      for (const [file, hash] of before) {
+        expect([file, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")]).toEqual([file, hash]);
+      }
+      const installedArchives = findNamed(prefix, /\.a$/);
+      expect(installedArchives.length).toBeGreaterThan(0);
+      for (const file of installedArchives) {
+        expect([file, fs.readFileSync(file).subarray(0, 8).toString("latin1")]).toEqual([file, "!<arch>\n"]);
+      }
       const installed = [installedTiny(), ...nativeLibraries()];
       for (const file of installed) {
         expectStripped(file);
@@ -612,9 +662,30 @@ describe("BuildEndToEnd", () => {
     it("windows release build strips and signs the installed program and DLL", async () => {
       if (!optionalExternalCheck("build-end-to-end", toolsAvailable && mingwAvailable, mingwReason)) return;
 
-      const result = await fullBuild("windows", true);
+      // The libtool wrapper src/tiny.exe is copied when the install step starts, right after compile
+      const wrapper = path.join(projectDir, "src", "tiny.exe");
+      let wrapperBefore: Buffer | null = null;
+      let before = new Map<string, string>();
+      const result = await fullBuild("windows", true, (step) => {
+        if (step.label === "install") {
+          wrapperBefore = fs.readFileSync(wrapper);
+          before = archiveHashes();
+        }
+      });
 
       expect(result).toEqual({ status: "completed" });
+      expectNoArchiveSignatures();
+      expect(before.size).toBeGreaterThan(0);
+      for (const [file, hash] of before) {
+        expect([file, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")]).toEqual([file, hash]);
+      }
+      // The wrapper (the real program is in src/.libs) is not a program output: unchanged and not signed
+      expect(fs.existsSync(path.join(projectDir, "src", ".libs", "tiny.exe"))).toBe(true);
+      expect(wrapperBefore).not.toBeNull();
+      expect(fs.readFileSync(wrapper).equals(wrapperBefore as unknown as Buffer)).toBe(true);
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const addon = require("../native/build/Release/dependency_lister.node") as { peHasEmbeddedSignature(file: string): boolean };
+      expect(addon.peHasEmbeddedSignature(wrapper)).toBe(false);
       for (const file of windowsFiles()) {
         const sections = spawnSync("x86_64-w64-mingw32-objdump", ["-h", file], { encoding: "utf-8" }).stdout;
         expect([file, sections.length > 0, /\.debug_/.test(sections)]).toEqual([file, true, false]);

@@ -1974,6 +1974,113 @@ describe("runInstallPhase", () => {
     expect(fs.readFileSync(path.join(c.prefix, "bin", "tiny.exe")).equals(peHeader(0x22, "signed"))).toBe(true);
     expect(fs.existsSync(path.join(c.prefix, "bin", "tiny.exe.sig"))).toBe(false);
   });
+
+  /** The `.sig` files under a directory (files and links), as sorted paths relative to it */
+  function sigFilesUnder(dir: string): string[] {
+    const found: string[] = [];
+    const walk = (rel: string) => {
+      for (const entry of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+        const child = path.join(rel, entry.name);
+        if (entry.isDirectory()) {
+          walk(child);
+        } else if (entry.name.endsWith(".sig")) {
+          found.push(child);
+        }
+      }
+    };
+    walk("");
+    return found.sort();
+  }
+
+  // Choice: the prefix's other-project library is a plain ELF shared object at lib/libother.so.0.0.0 with its own
+  // .sig; the old-version leftover is lib/libtinygreet.a.sig in both the prefix and the build tree.
+  it("processes only the real output of a native stage, and leaves other projects' files and old .a.sig files alone", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    payload(c, "bin/tiny", elfHeader(2, "program"));
+    payload(c, "lib/libtinygreet.a", arArchive, 0o644);
+    payload(c, "lib/libtinygreet.dll.a", arArchive, 0o644);
+    payload(c, "lib/libtinygreet.la", "# libtool archive\n", 0o644);
+    payload(c, "include/tinygreet.h", "int greet(void);\n", 0o644);
+    payload(c, "lib/pkgconfig/tinygreet.pc", "Name: tinygreet\n", 0o644);
+    payload(c, "bin/tiny-config", shellScript);
+    payload(c, "share/tiny/data.bin", plainText, 0o644);
+    // A PE file in a native stage is not an output
+    payload(c, "share/tiny/stray.exe", peHeader(0x0022), 0o644);
+    // Another project's library and signature are already in the prefix
+    const otherLib = path.join(c.prefix, "lib", "libother.so.0.0.0");
+    const otherSig = otherLib + ".sig";
+    writeFile(otherLib, elfHeader(3, "other project's library"), 0o755);
+    writeFile(otherSig, "other project's signature", 0o644);
+    // Signatures an earlier version left beside archives
+    const oldPrefixSig = path.join(c.prefix, "lib", "libtinygreet.a.sig");
+    const oldTreeSig = path.join(c.projectDir, "src", ".libs", "libtinygreet.a.sig");
+    writeFile(oldPrefixSig, "old signature", 0o644);
+    writeFile(oldTreeSig, "old signature", 0o644);
+    buildTreeFile(c, "src/.libs/libtinygreet.a", arArchive, 0o644);
+    fakeMake(c);
+
+    const result = expectCompleted(await runInstallPhase(options(c, { release: true, configDir: certDir })));
+
+    const stage = recorded(c).stage;
+    expect(strippedFiles(c.stripLog)).toEqual([path.join(stage + c.prefix, "bin", "tiny")]);
+    expect(result.report.signed.map((entry) => entry.display)).toEqual([path.join(c.prefix, "bin", "tiny")]);
+    expect((await new Signing(certDir).verifyFile(path.join(c.prefix, "bin", "tiny"))).status).toBe("VALID");
+    const sigs = sigFilesUnder(c.prefix);
+    expect(sigs).toEqual(["bin/tiny.sig", "lib/libother.so.0.0.0.sig", "lib/libtinygreet.a.sig"]);
+    expect(sigFilesUnder(c.projectDir)).toEqual([
+      path.join("src", ".libs", "libtinygreet.a.sig"),
+    ]);
+    // Everything else arrived unchanged
+    expect(fs.readFileSync(path.join(c.prefix, "lib", "libtinygreet.a")).equals(arArchive)).toBe(true);
+    expect(fs.readFileSync(path.join(c.prefix, "lib", "libtinygreet.dll.a")).equals(arArchive)).toBe(true);
+    expect(fs.readFileSync(path.join(c.prefix, "bin", "tiny-config"), "utf8")).toBe(shellScript.toString());
+    expect(fs.readFileSync(path.join(c.prefix, "share", "tiny", "stray.exe")).equals(peHeader(0x0022))).toBe(true);
+    expect(fs.readFileSync(otherLib).equals(elfHeader(3, "other project's library"))).toBe(true);
+    expect(fs.readFileSync(otherSig, "utf8")).toBe("other project's signature");
+    expect(fs.readFileSync(oldPrefixSig, "utf8")).toBe("old signature");
+    expect(fs.readFileSync(oldTreeSig, "utf8")).toBe("old signature");
+  });
+
+  it("processes only the real output of a windows stage", async () => {
+    recognisePeByMagic();
+    const c = makeCase("windows");
+    markSigned(c);
+    payload(c, "bin/tiny.exe", peHeader(0x0022, "program"));
+    payload(c, "bin/libtinygreet-0.dll", peHeader(0x2022, "library"));
+    payload(c, "lib/libtinygreet.dll.a", arArchive, 0o644);
+    payload(c, "lib/libtinygreet.a", arArchive, 0o644);
+    payload(c, "lib/libtinygreet.la", "# libtool archive\n", 0o644);
+    payload(c, "include/tinygreet.h", "int greet(void);\n", 0o644);
+    payload(c, "lib/pkgconfig/tinygreet.pc", "Name: tinygreet\n", 0o644);
+    payload(c, "bin/tiny-config", shellScript);
+    payload(c, "share/tiny/data.bin", plainText, 0o644);
+    // An ELF file in a windows stage is not an output
+    payload(c, "share/tiny/stray", elfHeader(2), 0o755);
+    // A PE object file is not an output either
+    payload(c, "share/tiny/obj.obj", peHeader(0x0000), 0o644);
+    fakeMake(c);
+    const signedFiles: string[] = [];
+    jest.spyOn(Signing.prototype, "signFile").mockImplementation(async (file: string) => {
+      signedFiles.push(file);
+      return { filePath: file, signaturePath: null, fingerprint: "SHA256:x", signatureType: "embedded", warnings: [] };
+    });
+
+    const result = expectCompleted(await runInstallPhase(options(c, { target: "windows", release: true, configDir: certDir })));
+
+    const stage = recorded(c).stage;
+    expect(strippedFiles(c.stripLog).sort()).toEqual(
+      [path.join(stage + c.prefix, "bin", "tiny.exe"), path.join(stage + c.prefix, "bin", "libtinygreet-0.dll")].sort()
+    );
+    expect(result.report.signed.map((entry) => entry.display).sort()).toEqual(
+      [path.join(c.prefix, "bin", "tiny.exe"), path.join(c.prefix, "bin", "libtinygreet-0.dll")].sort()
+    );
+    expect(signedFiles.every((file) => /tiny\.exe$|libtinygreet-0\.dll$/.test(file))).toBe(true);
+    expect(signedFiles).toHaveLength(2);
+    expect(fs.readFileSync(path.join(c.prefix, "lib", "libtinygreet.dll.a")).equals(arArchive)).toBe(true);
+    expect(fs.readFileSync(path.join(c.prefix, "share", "tiny", "stray")).equals(elfHeader(2))).toBe(true);
+    expect(sigFilesUnder(c.prefix)).toEqual([]);
+  });
 });
 
 // ── signingOutcome and notice ───────────────────────────────
