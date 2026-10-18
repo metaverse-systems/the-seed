@@ -28,9 +28,15 @@ const printHelp = () => {
   console.log("                                                         - Same, up to 4 projects at once (stripped)");
   console.log("  the-seed build windows                                 - Build for Windows (MinGW)");
   console.log("  the-seed build windows --recursive --release           - Build all deps + project for Windows (stripped)");
-  console.log("\nWith --recursive, dependencies always finish installing before anything that needs them");
-  console.log("starts, and all components finish before systems, and systems before programs. Installs");
-  console.log("(with strip and sign) never overlap.");
+  console.log("\nInstalling: \"make install\" runs into a staging directory; the programs and shared libraries it");
+  console.log("installed, and their copies in src/ and src/.libs/ that \"the-seed package\" reads, are stripped");
+  console.log("(with --release) and signed with the project's scope certificate, and only then is everything");
+  console.log("moved into the prefix. Archives, import libraries, wrappers and other files are not stripped");
+  console.log("or signed. A failure leaves the prefix as it was. Without a certificate the build says so in");
+  console.log("one line and installs unsigned files.");
+  console.log("With --recursive, dependencies always finish installing before anything that needs them");
+  console.log("starts, and all components finish before systems, and systems before programs. Install");
+  console.log("phases never overlap.");
   console.log("With --recursive and --parallel above 1, the compile jobs of the projects building at once");
   console.log("never add up to more than --jobs, or the processor count when --jobs is not given.");
   console.log("\nPress Ctrl+C once to stop the running builds; an install in progress finishes first.");

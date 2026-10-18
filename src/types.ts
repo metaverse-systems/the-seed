@@ -261,9 +261,9 @@ export interface RecursiveBuildResult {
 export interface ProjectFailure {
   /** The project that failed */
   project: BuildableProject;
-  /** Label of the step that failed (autogen, configure, compile, install, strip or sign) */
+  /** Label of the step that failed (autogen, configure, compile, install, strip, sign or place) */
   step: string;
-  /** Full captured output of the failed command, or the error message for strip and sign */
+  /** Full captured output of the failed command, or the error message for strip, sign and place */
   output: string;
 }
 
@@ -289,7 +289,7 @@ export interface RecursiveBuildOptions {
   signal?: AbortSignal;
   /** Optional progress/status callbacks */
   callbacks?: RecursiveBuildCallbacks;
-  /** When true, strip binaries after compile and before sign. Defaults to false. */
+  /** When true, the install phase strips the installed programs and libraries (and their build-tree copies) before signing them. Defaults to false. */
   release?: boolean;
   /**
    * Maximum number of projects to build at once (a positive integer, capped
@@ -303,8 +303,9 @@ export interface RecursiveBuildOptions {
   jobs?: number;
   /**
    * Optional second, forced cancellation. Aborting `signal` stops running
-   * steps but lets an install in progress finish; aborting this also stops
-   * the install.
+   * steps but lets an install phase in progress finish and place its files;
+   * aborting this also discards an install phase that has not reached
+   * placement.
    */
   forceSignal?: AbortSignal;
 }
@@ -317,7 +318,7 @@ export interface BuildRequest {
   target?: "native" | "windows";
   /** Build every buildable dependency first */
   recursive: boolean;
-  /** Strip binaries after install, before signing */
+  /** Strip the installed programs and libraries (and the build-tree copies "package" reads) before they are signed */
   release: boolean;
   /** Maximum number of projects to build at once; 1 unless --parallel was given */
   parallel: number;
@@ -333,7 +334,7 @@ export interface ProjectBuildOptions {
   projectDir: string;
   /** Absent for an incremental build (compile and install only) */
   target?: "native" | "windows";
-  /** Strip the installed binaries (full builds only) */
+  /** Strip the programs and libraries in the install phase, before they are signed (needs a target) */
   release: boolean;
   /** Compile job limit */
   jobs?: number;
@@ -341,9 +342,9 @@ export interface ProjectBuildOptions {
   configDir: string;
   /** Base environment for every step; process.env when omitted */
   env?: NodeJS.ProcessEnv;
-  /** First cancellation: stops every step except install, strip and sign */
+  /** First cancellation: stops every step except the install phase (staged install, strip, sign, placement) */
   signal?: AbortSignal;
-  /** Second cancellation: also stops install, strip and sign */
+  /** Second cancellation: also discards an install phase that has not reached placement */
   forceSignal?: AbortSignal;
   /** Receives each step's output as it arrives; the tool's own streams when omitted */
   output?: { stdout(chunk: Buffer): void; stderr(chunk: Buffer): void };
@@ -356,7 +357,7 @@ export interface ProjectBuildOptions {
 /** How Build.buildProject() ended. */
 export type ProjectBuildResult =
   | { status: "completed" }
-  /** `step` is a build step label, or strip, sign or place from the install phase */
+  /** `step` is a build step label (install included), or strip, sign or place from the install phase */
   | { status: "failed"; step: string; message: string }
   /** `installed` is set when the install phase finished and placed its files before the build stopped */
   | { status: "cancelled"; installed?: true };

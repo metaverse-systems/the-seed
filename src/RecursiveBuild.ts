@@ -105,8 +105,9 @@ function printReport(result: RecursiveBuildResult, total: number): void {
  * 2. Call resolveBuildOrder(graph, options.projectDir) to get ordered list
  * 3. Build the projects with runSchedule: up to `parallel` at once (default
  *    1, never more than the processors), each only after its dependencies
- *    and every lower tier have finished, with install, strip and sign of one
- *    project never overlapping another's
+ *    and every lower tier have finished, with the install phase of one
+ *    project (staged install, strip, sign, placement) never overlapping
+ *    another's
  * 4. After the first failure or a cancellation nothing new starts; projects
  *    already building run to the end (or are stopped, when cancelled)
  * 5. Return RecursiveBuildResult

@@ -17,7 +17,7 @@ jest.mock("../src/InstallPhase", () => ({
 jest.mock("../src/ProcessRunner", () => ({
   ...jest.requireActual("../src/ProcessRunner"),
   runCommand: jest.fn(),
-  // The resolved tool path is "/mock/bin/<name>"; stripBinaries is expected to run that path.
+  // The resolved tool path is "/mock/bin/<name>"; the strip step is expected to run that path.
   findOnPath: jest.fn((name: string) => "/mock/bin/" + name),
 }));
 

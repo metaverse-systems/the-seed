@@ -789,6 +789,20 @@ describe("BuildCLI help › lists --jobs with its default", () => {
     );
   });
 
+  it("describes the install phase", async () => {
+    // Whitespace is collapsed so the sentences may be wrapped over several lines.
+    const text = (await helpText()).replace(/\s+/g, " ");
+    expect(text).toContain(
+      "Strip the installed programs and libraries (and the build-tree copies \"package\" reads) before they are signed"
+    );
+    expect(text).toContain("staging directory");
+    expect(text).toContain("Archives, import libraries, wrappers and other files are not stripped or signed.");
+    expect(text).toContain("A failure leaves the prefix as it was.");
+    expect(text).toContain("Install phases never overlap.");
+    expect(text).not.toContain("Installs (with strip and sign) never overlap.");
+    expect(text).toContain("the-seed build [--jobs N] Rebuild the current project (make, install, sign)");
+  });
+
   it("gives an example with --jobs", async () => {
     const text = await helpText();
     expect(text).toContain("the-seed build native --jobs 4");

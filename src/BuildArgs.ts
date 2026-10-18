@@ -85,7 +85,7 @@ const OPTIONS: OptionSpec[] = [
       return null;
     },
     requiresRecursive: false,
-    help: "Strip debug symbols after install, before signing",
+    help: "Strip the installed programs and libraries (and the build-tree copies \"package\" reads) before they are signed",
   },
 ];
 
