@@ -8,7 +8,7 @@ LT_INIT
 AC_CONFIG_MACRO_DIR([m4])
 
 PKG_CHECK_MODULES([LIBECS], [ecs-cpp >= 2.0.0])
-PKG_CHECK_MODULES([LIBTHE_SEED], the-seed)
+PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed >= 0.8.0])
 
 AC_CHECK_HEADER([windows.h],
     [LIBS="$LIBS"],
