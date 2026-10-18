@@ -161,6 +161,8 @@ describe("test Dependencies", () => {
       const configDir = createTempDir();
       const oddConfig = new Config(configDir);
       oddConfig.config.prefix = odd;
+      const savedPath = process.env.PKG_CONFIG_PATH;
+      delete process.env.PKG_CONFIG_PATH;
       try {
         mockedSpawnSync.mockReturnValue(ran(0, "-l ecs-cpp"));
         expect(checkLib(oddConfig, "ecs-cpp", "native", "1.0.0")).toBe(true);
@@ -172,6 +174,8 @@ describe("test Dependencies", () => {
           expect(String(options.env?.PKG_CONFIG_PATH).replace(/[\\/]+$/, "")).toBe(expected);
         }
       } finally {
+        if (savedPath === undefined) delete process.env.PKG_CONFIG_PATH;
+        else process.env.PKG_CONFIG_PATH = savedPath;
         fs.rmSync(path.dirname(odd), { recursive: true, force: true });
         fs.rmSync(configDir, { recursive: true, force: true });
       }

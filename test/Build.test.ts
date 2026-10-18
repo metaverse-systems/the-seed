@@ -175,7 +175,10 @@ describe("test Build", () => {
       const env = (configure[2] as { env: NodeJS.ProcessEnv }).env;
       expect(env.SEED_BASE_VALUE).toBe("kept");
       expect(env.PKG_CONFIG_PATH).toContain(path.join(build.getInstallPrefix("native"), "lib/pkgconfig"));
-      expect(env.PKG_CONFIG_PATH).toBe(librarySearchEnv(config.config.prefix, "native", process.env).PKG_CONFIG_PATH);
+      expect(env.PKG_CONFIG_PATH).toBe(
+        librarySearchEnv(config.config.prefix, "native", { SEED_BASE_VALUE: "kept" }).PKG_CONFIG_PATH
+      );
+      expect(env.PKG_CONFIG_PATH).toBe(path.join(config.config.prefix, "x86_64-linux-gnu", "lib", "pkgconfig"));
     });
 
     it("extends the PKG_CONFIG_PATH of the base environment it was given, not the tool's own", async () => {
