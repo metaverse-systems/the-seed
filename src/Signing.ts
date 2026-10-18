@@ -249,7 +249,7 @@ class Signing {
    */
   getScopes(): string[] {
     const config = new Config(this.configDir);
-    return Object.keys(config.config.scopes || {});
+    return Object.keys(config.config.scopes);
   }
 
   /**
@@ -258,7 +258,7 @@ class Signing {
   _getSubjectFromConfig(scope: string): CertSubject {
     const config = new Config(this.configDir);
     const configData = config.config;
-    const scopeData = configData.scopes?.[scope];
+    const scopeData = configData.scopes[scope];
 
     if (!scopeData) {
       throw new Error(`Scope '${scope}' not found in config. Run 'the-seed config edit' to set it up.`);

@@ -62,7 +62,47 @@ class Config {
     } catch (error) {
       throw new ConfigError("Cannot read " + this.configPath + ": " + describeError(error), this.configPath);
     }
-    this.config = JSON.parse(text);
+    this.config = this.parseConfig(text);
+  };
+
+  private typeName = (value: unknown): string => {
+    if (value === null) {
+      return "null";
+    }
+    return Array.isArray(value) ? "array" : typeof value;
+  };
+
+  private parseConfig = (text: string): ConfigType => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (error) {
+      throw new ConfigError(this.configPath + " is not valid JSON: " + String((error as Error)?.message ?? error).split("\n")[0], this.configPath);
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new ConfigError(this.configPath + " must hold a JSON object, got " + this.typeName(parsed), this.configPath);
+    }
+    const loaded = parsed as { [key: string]: unknown };
+    if ("prefix" in loaded && (typeof loaded.prefix !== "string" || loaded.prefix === "")) {
+      const got = loaded.prefix === "" ? "empty text" : this.typeName(loaded.prefix);
+      throw new ConfigError(`${this.configPath}: "prefix" must be a non-empty text value, got ${got}`, this.configPath);
+    }
+    if ("scopes" in loaded) {
+      const scopes = loaded.scopes;
+      if (typeof scopes !== "object" || scopes === null || Array.isArray(scopes)) {
+        throw new ConfigError(`${this.configPath}: "scopes" must be an object of named scopes, got ${this.typeName(scopes)}`, this.configPath);
+      }
+      for (const [name, scope] of Object.entries(scopes)) {
+        if (typeof scope !== "object" || scope === null || Array.isArray(scope)) {
+          throw new ConfigError(`${this.configPath}: "scopes" must be an object of named scopes, got ${this.typeName(scope)} for "${name}"`, this.configPath);
+        }
+      }
+    }
+    return {
+      ...loaded,
+      prefix: (loaded.prefix as string | undefined) ?? path.join(os.homedir(), "the-seed"),
+      scopes: (loaded.scopes as ConfigType["scopes"] | undefined) ?? {}
+    };
   };
 
   saveConfig = () => {

@@ -142,3 +142,147 @@ describe("Config on first use", () => {
     expect(config.config.prefix).toBe(path.join(root, "prefix"));
   });
 });
+
+describe("Config with a damaged file", () => {
+  let root: string;
+  let file: string;
+
+  beforeEach(() => {
+    root = createTempDir();
+    file = path.join(root, "config.json");
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  function write(text: string): void {
+    fs.writeFileSync(file, text);
+  }
+
+  function load(): ConfigError {
+    let caught: unknown;
+    try {
+      new Config(root);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(ConfigError);
+    const error = caught as ConfigError;
+    expect(error.message).not.toContain("\n");
+    expect(error.message).toContain(file);
+    expect(error.path).toBe(file);
+    return error;
+  }
+
+  it("fills a missing scopes list with an empty one", () => {
+    const text = JSON.stringify({ prefix: path.join(root, "p") });
+    write(text);
+    const config = new Config(root);
+    expect(config.config.scopes).toEqual({});
+    expect(config.config.prefix).toBe(path.join(root, "p"));
+    expect(fs.readFileSync(file).toString()).toBe(text);
+  });
+
+  it("fills a missing prefix with the default", () => {
+    const text = JSON.stringify({ scopes: { "@a": { authorName: "A" } } });
+    write(text);
+    const config = new Config(root);
+    expect(config.config.prefix).toBe(path.join(os.homedir(), "the-seed"));
+    expect(config.config.scopes).toEqual({ "@a": { authorName: "A" } });
+    expect(fs.readFileSync(file).toString()).toBe(text);
+  });
+
+  // Message format: '<path>: "prefix" must be a non-empty text value, got <type>'
+  // with <type> one of number, boolean, array, null, object, string, or "empty text".
+  const badPrefixes: Array<[string, unknown, string]> = [
+    ["number", 3, "got number"],
+    ["empty text", "", "got empty text"],
+    ["null", null, "got null"],
+    ["array", ["x"], "got array"],
+  ];
+  for (const [title, value, got] of badPrefixes) {
+    it(`rejects a prefix that is not a non-empty text value (${title})`, () => {
+      const text = JSON.stringify({ prefix: value, scopes: {} });
+      write(text);
+      const error = load();
+      expect(error.message).toContain("\"prefix\" must be a non-empty text value");
+      expect(error.message).toContain(got);
+      expect(fs.readFileSync(file).toString()).toBe(text);
+    });
+  }
+
+  // Message format: '<path>: "scopes" must be an object of named scopes, got <type>',
+  // or 'got <type> for "<name>"' for a bad member.
+  const badScopes: Array<[string, unknown, string]> = [
+    ["array", [], "got array"],
+    ["string", "x", "got string"],
+    ["null", null, "got null"],
+    ["member", { "@a": 3 }, "got number for \"@a\""],
+  ];
+  for (const [title, value, got] of badScopes) {
+    it(`rejects scopes that are not an object of named scopes (${title})`, () => {
+      const text = JSON.stringify({ prefix: path.join(root, "p"), scopes: value });
+      write(text);
+      const error = load();
+      expect(error.message).toContain("\"scopes\" must be an object of named scopes");
+      expect(error.message).toContain(got);
+      expect(fs.readFileSync(file).toString()).toBe(text);
+    });
+  }
+
+  // Message format: "<path> is not valid JSON: <parser message>".
+  for (const [title, text] of [["garbage", "{ not json"], ["an empty file", ""]]) {
+    it(`rejects a file that is not valid JSON (${title})`, () => {
+      write(text);
+      const error = load();
+      expect(error.message).toContain("is not valid JSON");
+      expect(fs.readFileSync(file).toString()).toBe(text);
+    });
+  }
+
+  // Message format: "<path> must hold a JSON object, got <type>".
+  for (const [text, got] of [["[]", "array"], ["null", "null"], ["\"x\"", "string"], ["3", "number"]]) {
+    it(`rejects valid JSON that is not an object (${text})`, () => {
+      write(text);
+      const error = load();
+      expect(error.message).toContain("must hold a JSON object");
+      expect(error.message).toContain("got " + got);
+      expect(fs.readFileSync(file).toString()).toBe(text);
+    });
+  }
+
+  it("does not rewrite the file when filling defaults", () => {
+    const text = "{\"other\":1}";
+    write(text);
+    const past = new Date(Date.now() - 3600 * 1000);
+    fs.utimesSync(file, past, past);
+    const before = fs.statSync(file).mtimeMs;
+    const writeSpy = jest.spyOn(fs, "writeFileSync");
+    const renameSpy = jest.spyOn(fs, "renameSync");
+    try {
+      new Config(root);
+      expect(writeSpy).not.toHaveBeenCalled();
+      expect(renameSpy).not.toHaveBeenCalled();
+    } finally {
+      writeSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+    expect(fs.statSync(file).mtimeMs).toBe(before);
+    expect(fs.readFileSync(file).toString()).toBe(text);
+  });
+
+  it("keeps unknown entries when saving", () => {
+    write(JSON.stringify({ prefix: path.join(root, "p"), scopes: {}, extra: { a: [1, 2] }, note: "kept" }));
+    const config = new Config(root);
+    expect((config.config as unknown as Record<string, unknown>).extra).toEqual({ a: [1, 2] });
+    config.config.prefix = path.join(root, "q");
+    config.saveConfig();
+    expect(JSON.parse(fs.readFileSync(file).toString())).toEqual({
+      prefix: path.join(root, "q"),
+      scopes: {},
+      extra: { a: [1, 2] },
+      note: "kept",
+    });
+  });
+});

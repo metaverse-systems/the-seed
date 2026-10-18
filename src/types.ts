@@ -15,6 +15,7 @@ export interface ScopesType {
 export interface ConfigType {
   prefix: string;
   scopes: ScopesType;
+  [key: string]: unknown;
 }
 
 export interface ScriptArgsType {

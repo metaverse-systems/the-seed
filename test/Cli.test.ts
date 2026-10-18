@@ -107,4 +107,20 @@ describe("runCli on first use", () => {
     expect(logged()).toContain("build");
     expect(fs.readdirSync(home)).toEqual([]);
   });
+
+  it("a malformed prefix exits 1 with the one-line message and no stack trace", async () => {
+    fs.mkdirSync(configDir, { recursive: true });
+    const file = path.join(configDir, "config.json");
+    const text = JSON.stringify({ prefix: 3, scopes: {} });
+    fs.writeFileSync(file, text);
+    await runCli(argv("config", "list"), configDir, binName);
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const message = String(errorSpy.mock.calls[0][0]);
+    expect(message).toContain(file);
+    expect(message).toContain("\"prefix\"");
+    expect(message).not.toContain("\n");
+    expect(message).not.toMatch(/\bat .*\(.*:\d+:\d+\)/);
+    expect(fs.readFileSync(file).toString()).toBe(text);
+  });
 });
