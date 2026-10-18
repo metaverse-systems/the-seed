@@ -768,6 +768,57 @@ const verify = await signing.verifyFile("./dist/myapp.exe");
 console.log(verify.valid, verify.signatureType); // true "embedded"
 ```
 
+## Running the checks
+
+### Prerequisites
+
+- libthe-seed (0.8.0 or later) and libecs-cpp (2.1.0 or later) installed and reachable by `pkg-config`. If they are in a non-system prefix, such as the one `the-seed dependencies install` makes, point `PKG_CONFIG_PATH` at its `lib/pkgconfig` directory:
+
+  ```bash
+  export PKG_CONFIG_PATH="$HOME/the-seed/x86_64-linux-gnu/lib/pkgconfig:$PKG_CONFIG_PATH"
+  pkg-config --modversion the-seed ecs-cpp
+  ```
+
+- `openssl` (one signing test generates a certificate with it).
+- Optional: `python3`. The independent Mach-O cross-check in `test/Signing.embedded.test.ts` runs `../libthe-seed/tests/fixtures/check_pages.py` when the parent repository is present. Without them it prints a `SKIPPED CHECK:` line and carries on, unless `THE_SEED_REQUIRE_TOOLS=1` is set, in which case a missing tool fails the case.
+
+### Build and run
+
+```bash
+npm ci
+npm run build-addon     # the tests load the native addon
+npm test                # typecheck, then lint, then unit
+```
+
+`npm test` runs three stages in order and ends with a line such as `Summary: typecheck PASS, lint PASS, unit PASS`. It exits non-zero if any stage fails, and a failing stage does not stop the later ones from running. Run one stage, or a subset of the tests:
+
+```bash
+npm run typecheck                       # tsc over src/ and test/
+npm run lint                            # ESLint over src/ and test/
+npm test -- unit                        # Jest only (at most 4 workers)
+npm test -- unit -t "verifyFileAuthenticode"
+npm test -- unit test/Signing.test.ts
+```
+
+Failures are named as `FAILED: <file> › <case>` or `FAILED GROUP: <file>` (a test file that could not run), and the run ends with a `Totals:` line. Skipped cases are reported and counted.
+
+### Known gaps
+
+A case that fails today because of a problem recorded in `docs/reviews/the-seed-1.md` is listed in `test/known-gaps.json` and marked in its test file with `itKnownGap`. It is reported as `KNOWN GAP:` and does not fail the run. The task that fixes the problem must remove both the marker and the entry: a marked case that now passes is reported as `STALE KNOWN GAP:` and fails the run, and an entry that is malformed or does not match the review and the roadmap in the parent repository is reported as `MALFORMED KNOWN GAP:` and fails the run.
+
+### Isolation
+
+`npm test` runs Jest with `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `TMPDIR`, `TMP` and `TEMP` pointing into a fresh scratch directory, so the tests never read or write your real `~/the-seed`. The runner prints `LEFTOVER:` for any file a test leaves in the scratch area, removes the area afterwards, and prints `REAL HOME CHANGED:` if your real `~/the-seed` differs after the run. Both fail the run. Run the tests through `npm test`, not by calling `jest` directly, so that this protection applies.
+
+### Hosted check
+
+Every proposal to `main` and every push to `main` runs the `check` job in `.github/workflows/ci.yaml` with read-only repository permissions. It builds the tool and the addon against libecs-cpp and libthe-seed at fixed commits (libecs-cpp `16a272ce17bf03369febf0796444a8df8cd1ffec`, libthe-seed `839bc62d3233e88347059942ce25e84da23b48ee`), then runs the type check, the style check and the tests with `THE_SEED_REQUIRE_TOOLS=1`. The commits are set in the `env` block at the top of the workflow; change them there when the tool needs newer libraries. A manual run (Actions, CI, Run workflow) accepts `repeat` to run the tests several times in a row.
+
+### Notes
+
+- The style check disables `@typescript-eslint/no-var-requires` on three lines (`src/Signing.ts`, `test/Package.test.ts`, `test/Signing.embedded.test.ts`), each with a reason: the native addon has no type declarations and a lazy or post-mock `require` is needed. No rule is disabled in the ESLint configuration.
+- The build tests (`Build`, `BuildCLI`, `RecursiveBuild`) are mock-based. They check which commands would run, not what an installation really produces, so a passing run does not show that a built project installs correctly.
+
 ## License
 
 MIT -- See [LICENSE](LICENSE) for details.
