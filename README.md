@@ -127,15 +127,25 @@ the-seed dependencies install
 ```
 
 ```text
-Checking ecs-cpp... not installed
-Cloning libecs-cpp...
-Building libecs-cpp...
-Checking the-seed... not installed
-Cloning libthe-seed...
-Building libthe-seed...
+Installing libecs-cpp...
+==> clone libecs-cpp: git clone https://github.com/metaverse-systems/libecs-cpp.git libecs-cpp
+Cloning into 'libecs-cpp'...
+==> libecs-cpp autogen: ./autogen.sh
+...
+==> libecs-cpp configure: ./configure --prefix=/home/you/the-seed/x86_64-linux-gnu
+...
+==> libecs-cpp compile: make -j8
+...
+==> libecs-cpp install: make install
+...
+libecs-cpp installed successfully.
+Installing libthe-seed...
+==> clone libthe-seed: git clone https://github.com/metaverse-systems/libthe-seed.git libthe-seed
+...
+libthe-seed installed successfully.
 ```
 
-This clones and builds the required C++ libraries into your prefix.
+This clones and builds the required C++ libraries into your prefix. Each step is printed as `==> <label>: <command>`, followed by the program's own output as it happens. The compile step uses the processor count as its job limit (`8` above).
 
 ### Step 5: Build the project
 
@@ -144,11 +154,19 @@ the-seed build native
 ```
 
 ```text
-Completed ./autogen.sh
-Completed configure
-Completed make
-Completed make install
+==> autogen: ./autogen.sh
+...
+==> distclean: make distclean
+...
+==> configure: ./configure --prefix=/home/you/the-seed/x86_64-linux-gnu
+...
+==> compile: make -j8
+...
+==> install: make install
+...
 ```
+
+Each block is a step's label and command, followed by the program's output as it happens; `...` stands for that output.
 
 The compiled binary or library is installed to `~/the-seed/x86_64-linux-gnu/`.
 
@@ -192,7 +210,7 @@ Manage the-seed configuration.
 ? Installation prefix? ~/the-seed
 ```
 
-If no `config.json` exists, `config list` suggests running `config edit`.
+The first command that needs configuration creates `~/the-seed/config.json` with the defaults (the prefix `~/the-seed` and no scopes), so there is no setup step before `config list`, `scopes add` or `build`. Entries missing from the file are filled in with their defaults. An entry of the wrong kind (for example a `prefix` that is not text), a file that is not valid JSON, or a directory that cannot be written stops the command with one line naming the file and the entry; the file is never rewritten to repair it. `config edit` and the other commands that save the configuration write it atomically.
 
 ### scopes
 
@@ -264,7 +282,8 @@ The `component` and `system` templates include a `.pc.in` file for pkg-config. T
 Build and cross-compile projects using GNU Autotools.
 
 ```text
-the-seed build <target> [--recursive] [--parallel N] [--release]
+the-seed build <target> [--recursive] [--parallel N] [--jobs N] [--release]
+the-seed build [--jobs N]
 ```
 
 | Subcommand | Arguments | Description |
@@ -282,9 +301,12 @@ Options go after the target, in any order:
 |--------|-------------|
 | `--recursive` | Build every buildable dependency first, then the current project (see [Recursive Builds](#recursive-builds)) |
 | `--parallel N` | With `--recursive`, build up to `N` independent projects at once. Default 1. Also accepted as `--parallel=N`. `N` must be a positive whole number; values above the processor count are reduced to it |
+| `--jobs N` | Run at most `N` compile jobs at once (`make -j<N>`). Default: the processor count. Also accepted as `--jobs=N`. `N` must be a positive whole number; a value above the processor count is allowed. With `--parallel`, it is the budget the projects building at once share |
 | `--release` | Strip debug symbols from the built binaries after install, before signing |
 
-Any other argument is rejected with exit status 1 and a message naming it, before anything is built. That includes a misspelled option (`--recursve`), `--parallel` without `--recursive`, an invalid or repeated `--parallel` value, an option given without a target (`the-seed build --release`) and an unknown target.
+`--parallel=N` and `--jobs=N` are the same as `--parallel N` and `--jobs N`.
+
+Any other argument is rejected with exit status 1 and a message naming it, before anything is built. That includes a misspelled option (`--recursve`), `--parallel` without `--recursive`, an invalid or repeated `--parallel` or `--jobs` value, an option given without a target (`the-seed build --release`) and an unknown target. `the-seed build --jobs N` is the one option accepted without a target.
 
 Target directory mapping:
 
@@ -293,15 +315,26 @@ Target directory mapping:
 | `native` | (none) | `<prefix>/x86_64-linux-gnu` |
 | `windows` | `--host=x86_64-w64-mingw32` | `<prefix>/x86_64-w64-mingw32` |
 
-During `configure`, `PKG_CONFIG_PATH` is set to `<prefix>/<target>/lib/pkgconfig/` so that dependencies installed in the prefix are found.
+During `configure`, and when `dependencies check` and `dependencies install` look for a library, pkg-config searches these places:
+
+| Target | Searched |
+|--------|----------|
+| `native` | `<prefix>/x86_64-linux-gnu/lib/pkgconfig` first, then your own `PKG_CONFIG_PATH`, then pkg-config's default directories |
+| `windows` | Only `<prefix>/x86_64-w64-mingw32/lib/pkgconfig`, `/usr/local/x86_64-w64-mingw32/lib/pkgconfig` and `/usr/x86_64-w64-mingw32/lib/pkgconfig` (`PKG_CONFIG_LIBDIR`). Your `PKG_CONFIG_PATH` and the system directories are not used, so a library built only for Linux can never satisfy a Windows build |
+
+A library description that does not depend on the architecture, such as `nlohmann_json.pc`, is installed once in a system directory and so is not found for a Windows build; install it into the Windows prefix (`<prefix>/x86_64-w64-mingw32/lib/pkgconfig`) to make it visible.
+
+The output of a plain or incremental build is shown as it happens, one `==> <label>: <command>` line per step. Paths are passed to every program exactly as they are, so a prefix or project directory may contain spaces, quotes or `$`. When a step fails, the build stops with a message naming the step and how it ended, and exits with status 1.
 
 Build steps for `native` and `windows`:
 
 1. `./autogen.sh`
 2. `make distclean` (errors ignored)
 3. `./configure --prefix=<prefix>/<target> [--host=x86_64-w64-mingw32]`
-4. `make -j`
+4. `make -j<jobs>` (the processor count unless `--jobs` is given)
 5. `make install`
+
+**Changed:** earlier versions ran an unbounded `make -j`, which starts one compiler per source file and can exhaust memory. Every build now has a job limit.
 
 Running `the-seed build` without a subcommand performs only steps 4 and 5.
 
@@ -313,6 +346,7 @@ The `--recursive` option discovers all transitive `file:` and `node_modules` dep
 the-seed build native --recursive
 the-seed build windows --recursive --release
 the-seed build native --recursive --parallel 4 --release
+the-seed build native --recursive --jobs 4
 ```
 
 Projects are classified by inspecting `src/Makefile.am`:
@@ -325,13 +359,13 @@ Projects are classified by inspecting `src/Makefile.am`:
 
 Within each tier, projects are sorted alphabetically.
 
-By default (`--parallel 1`) projects build one at a time in that order, with the same commands as a plain build, including an unbounded `make -j`. With `--parallel N`, up to `N` projects build at once (never more than the processor count), and the ordering guarantees still hold:
+By default (`--parallel 1`) projects build one at a time in that order, with the same commands as a plain build, including its job limit. With `--parallel N`, up to `N` projects build at once (never more than the processor count), and the ordering guarantees still hold:
 
 - A project starts only after each of its dependencies has finished installing.
 - Every component finishes before any system starts, and every system before any program. A project that depends on a higher tier than its own waits with that tier.
 - Among projects that are ready, the one earliest in the build order starts first.
 - Installs never overlap. Each project's `make install`, strip (with `--release`) and signing run as one phase that no other project's install phase can interleave with.
-- When more than one project builds at once, each tier's projects share the processors as `make -j<jobs>`, so the compile jobs running at once never add up to more than the processor count. `MAKEFLAGS` and `MFLAGS` are removed from the build environment so an inherited `-j` cannot override the share.
+- When more than one project builds at once, each tier's projects share the processors as `make -j<jobs>`, so the compile jobs running at once never add up to more than `--jobs`, or the processor count when `--jobs` is not given. `MAKEFLAGS` and `MFLAGS` are removed from the build environment so an inherited `-j` cannot override the share.
 
 Every progress line names its project, for example `[@org/physics-system] compile... done`. Build output is captured, not streamed; when the build ends, a report lists the projects that completed, failed, were interrupted or never started, and each failure's full output appears as one block between `===== <project> failed at <step> =====` and `===== end of <project> output =====`.
 
@@ -358,7 +392,7 @@ Check and install C++ library dependencies (libecs-cpp and libthe-seed).
 | `check` | `[target]` | Check if ecs-cpp and the-seed libraries are installed |
 | `install` | `[target]` | Clone and build missing libraries from GitHub |
 
-The `target` argument defaults to `native`. For each missing library, the `install` command clones the repository from GitHub and builds it with autotools into the target prefix:
+The `target` argument defaults to `native`. For each missing library, the `install` command clones the repository from GitHub and builds it with autotools into the target prefix. Each step is printed as `==> <label>: <command>` with the program's output as it happens. The compile step uses the processor count as its job limit (it used a plain `make` before); `dependencies install` has no `--jobs` option. A step that fails stops that library's install and the failure is reported:
 
 - `ecs-cpp`: Cloned from `https://github.com/metaverse-systems/libecs-cpp.git`
 - `the-seed`: Cloned from `https://github.com/metaverse-systems/libthe-seed.git`
@@ -534,17 +568,27 @@ constructor(configDir?: string)
 | Property | Type | Description |
 |----------|------|-------------|
 | `configDir` | `string` | Path to the configuration directory (default: `~/the-seed`) |
-| `configFile` | `string` | Configuration filename (`/config.json`) |
+| `configFile` | `string` | Configuration filename (`config.json`) |
+| `configPath` | `string` | Full path of the configuration file (`configDir` joined with `configFile`) |
 | `config` | `ConfigType` | The loaded configuration object |
 
 **Methods**:
 
 | Method | Return Type | Description |
 |--------|-------------|-------------|
-| `loadConfig()` | `void` | Load configuration from disk; creates default if missing |
-| `saveConfig()` | `void` | Write current configuration to disk |
+| `loadConfig()` | `void` | Load configuration from disk. Creates the directory and a default file when missing, fills missing entries in memory, and throws `ConfigError` for a malformed file |
+| `saveConfig()` | `void` | Write current configuration to disk atomically (creating the directory if needed); throws `ConfigError` when it cannot |
 | `getQuestions()` | `object[]` | Return inquirer prompt questions for configuration |
 | `parseAnswers(answers: { prefix: string })` | `void` | Apply prompt answers to the configuration |
+
+#### ConfigError
+
+A named export of the `Config` module (`import Config, { ConfigError } from "@metaverse-systems/the-seed/dist/Config"`). Thrown by `loadConfig()` and `saveConfig()`; it extends `Error`.
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `path` | `string` | The configuration file the problem concerns |
+| `message` | `string` | One line naming the file and the entry or cause |
 
 #### Scopes
 
@@ -804,7 +848,7 @@ Failures are named as `FAILED: <file> › <case>` or `FAILED GROUP: <file>: <mes
 
 ### Known gaps
 
-A case that fails today because of a problem recorded in `docs/reviews/the-seed-1.md` is listed in `test/known-gaps.json` and marked in its test file with `itKnownGap`. It is reported as `KNOWN GAP:` and does not fail the run. The task that fixes the problem must remove both the marker and the entry: a marked case that now passes is reported as `STALE KNOWN GAP:` and fails the run, and an entry that is malformed or does not match the review and the roadmap in the parent repository is reported as `MALFORMED KNOWN GAP:` and fails the run.
+No entries remain; the list is `[]`. A case that fails today because of a problem recorded in `docs/reviews/the-seed-1.md` is listed in `test/known-gaps.json` and marked in its test file with `itKnownGap`. It is reported as `KNOWN GAP:` and does not fail the run. The task that fixes the problem must remove both the marker and the entry: a marked case that now passes is reported as `STALE KNOWN GAP:` and fails the run, and an entry that is malformed or does not match the review and the roadmap in the parent repository is reported as `MALFORMED KNOWN GAP:` and fails the run.
 
 ### Isolation
 
@@ -817,7 +861,7 @@ Every proposal to `main` and every push to `main` runs the `check` job in `.gith
 ### Notes
 
 - The style check disables `@typescript-eslint/no-var-requires` on five lines (`src/Package.ts`, `src/Signing.ts`, `test/Package.test.ts`, `test/Signing.embedded.test.ts`, `test/TestInfrastructure.test.ts`), each with a reason: the native addon has no type declarations, or a module must be loaded again after Jest resets its registry. No rule is disabled in the ESLint configuration.
-- The build tests (`Build`, `BuildCLI`, `RecursiveBuild`) are mock-based. They check which commands would run, not what an installation really produces, so a passing run does not show that a built project installs correctly.
+- The build tests (`Build`, `BuildCLI`, `RecursiveBuild`) are mock-based: they check which commands would run. `test/BuildEndToEnd.test.ts` goes further and builds and installs a real autotools project into a temporary prefix; without autotools, `git`, `file` or the mingw-w64 compiler its cases report `SKIPPED CHECK:` and carry on, unless `THE_SEED_REQUIRE_TOOLS=1` is set.
 
 ## License
 
