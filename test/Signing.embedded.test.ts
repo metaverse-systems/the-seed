@@ -6,13 +6,26 @@ import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
 import { checkMachO } from "./helpers/MachOChecker";
 import { CfbPackage, loadReference, parsePackage, storedDigest } from "./helpers/CfbChecker";
+import { optionalExternalCheck } from "./helpers/ExternalTools";
 
 /**
  * Create a temporary directory for test isolation.
  */
+const createdDirs: string[] = [];
+
 function createTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "signing-embedded-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "signing-embedded-test-"));
+  createdDirs.push(dir);
+  return dir;
 }
+
+// Removes every directory the file created, including the signing configuration directories
+// that the groups keep for their whole run.
+afterAll(() => {
+  for (const dir of createdDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 /**
  * Write a minimal config.json with a scope containing author info.
@@ -91,12 +104,14 @@ function sha256File(file: string): string {
 }
 
 /**
- * Run the independent Python checker of libthe-seed on a file when the
- * superproject checkout provides it. Returns null when it is not there.
+ * Run the independent Python checker of libthe-seed on a file. Returns null,
+ * after reporting the skipped check, when python3 or the checker is missing
+ * (an error when THE_SEED_REQUIRE_TOOLS=1).
  */
 function runPythonChecker(file: string): { status: number | null; output: string } | null {
   const checker = path.join(__dirname, "..", "..", "libthe-seed", "tests", "fixtures", "check_pages.py");
-  if (!fs.existsSync(checker)) {
+  const hasPython = spawnSync("python3", ["--version"]).status === 0;
+  if (!optionalExternalCheck("libthe-seed check_pages.py", hasPython && fs.existsSync(checker), hasPython ? "libthe-seed/tests/fixtures/check_pages.py not found" : "python3 not found")) {
     return null;
   }
   const run = spawnSync("python3", [checker, file], { encoding: "utf8" });
@@ -508,6 +523,7 @@ describe("signFileMachO on genuine samples", () => {
 
   describe("removed addon exports", () => {
     // The real addon is loaded directly; there is no mock.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
     const addon = require("../native/build/Release/dependency_lister.node") as Record<
       string,
       (...args: unknown[]) => unknown

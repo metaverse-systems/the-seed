@@ -40,7 +40,9 @@ class Build {
     const distclean_command = "make distclean";
     try {
       const result = execSync(distclean_command, execOptions).toString();
-    } catch (e) {}
+    } catch (e) {
+      // A failing "make distclean" on a tree that was never configured is expected and ignored.
+    }
 
     const prefix = this.config.config.prefix + "/" + newTarget;
 

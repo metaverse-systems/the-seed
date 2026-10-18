@@ -1,0 +1,189 @@
+name: CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: "Run the unit stage this many times in a row (reliability check)"
+        default: "1"
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+env:
+  # Commits the parent repository's submodules point at; fetched anonymously.
+  LIBECS_CPP_REF: 16a272ce17bf03369febf0796444a8df8cd1ffec # libecs-cpp 2.1.0
+  LIBTHE_SEED_REF: 839bc62d3233e88347059942ce25e84da23b48ee # libthe-seed 0.8.0
+  THE_SEED_REQUIRE_TOOLS: "1"
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool pkg-config python3 openssl osslsigncode g++-mingw-w64-x86-64
+          node --version
+          npm --version
+          python3 --version
+          openssl version
+          osslsigncode --version
+          x86_64-w64-mingw32-g++ --version
+
+      - name: Fetch libthe-seed
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/../libthe-seed"
+          cd "$GITHUB_WORKSPACE/../libthe-seed"
+          git init
+          git fetch --depth 1 https://github.com/metaverse-systems/libthe-seed.git "$LIBTHE_SEED_REF"
+          git checkout FETCH_HEAD
+
+      - name: Restore libraries
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: ~/deps
+          key: deps-${{ env.LIBECS_CPP_REF }}-${{ env.LIBTHE_SEED_REF }}-${{ runner.os }}-${{ env.ImageVersion }}
+
+      - name: Build libecs-cpp
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/libecs-cpp"
+          cd "$RUNNER_TEMP/libecs-cpp"
+          git init
+          git fetch --depth 1 https://github.com/metaverse-systems/libecs-cpp.git "$LIBECS_CPP_REF"
+          git checkout FETCH_HEAD
+          ./autogen.sh
+          ./configure --prefix="$HOME/deps" --enable-tests=no
+          make -j4
+          make install
+
+      - name: Build libthe-seed
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          export PKG_CONFIG_PATH="$HOME/deps/lib/pkgconfig"
+          cd "$GITHUB_WORKSPACE/../libthe-seed"
+          ./autogen.sh
+          ./configure --prefix="$HOME/deps" --enable-tests=no
+          make -j4
+          make install
+
+      - name: Use libraries
+        run: |
+          echo "PKG_CONFIG_PATH=$HOME/deps/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$HOME/deps/lib" >> "$GITHUB_ENV"
+          export PKG_CONFIG_PATH="$HOME/deps/lib/pkgconfig"
+          export LD_LIBRARY_PATH="$HOME/deps/lib"
+          ecs_min=$(sed -n 's/^m4_define(\[the_seed_libecs_min\], \[\([^]]*\)\]).*/\1/p' ../libthe-seed/configure.ac)
+          seed_min=$(sed -n "s/.*'the-seed >= \([0-9][0-9.]*\)'.*/\1/p" native/binding.gyp | head -n 1)
+          if [ -z "$ecs_min" ] || [ -z "$seed_min" ]; then
+            echo "::error::could not read the required library versions (ecs-cpp: '$ecs_min', the-seed: '$seed_min')"
+            exit 1
+          fi
+          if ! pkg-config --atleast-version="$ecs_min" ecs-cpp; then
+            echo "::error::ecs-cpp >= $ecs_min is required, found $(pkg-config --modversion ecs-cpp 2>/dev/null || echo none)"
+            exit 1
+          fi
+          if ! pkg-config --atleast-version="$seed_min" the-seed; then
+            echo "::error::the-seed >= $seed_min is required, found $(pkg-config --modversion the-seed 2>/dev/null || echo none)"
+            exit 1
+          fi
+
+      - name: Install packages
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Build native addon
+        run: npm run build-addon
+
+      - name: Check native addon loads
+        id: addon-load
+        run: node -e "require('./native/build/Release/dependency_lister.node')"
+
+      - name: Type check
+        if: ${{ !cancelled() && steps.addon-load.outcome == 'success' }}
+        id: typecheck
+        run: npm run typecheck
+
+      - name: Style check
+        if: ${{ !cancelled() && steps.addon-load.outcome == 'success' }}
+        id: lint
+        run: npm run lint
+
+      - name: Tests
+        if: ${{ !cancelled() && steps.addon-load.outcome == 'success' }}
+        id: tests
+        env:
+          REPEAT: ${{ inputs.repeat || 1 }}
+        run: |
+          case "$REPEAT" in
+            ''|*[!0-9]*|0|0[0-9]*)
+              echo "::error::repeat must be a positive integer, got '$REPEAT'"
+              exit 1
+              ;;
+          esac
+          for run in $(seq 1 "$REPEAT"); do
+            echo "Unit stage run $run of $REPEAT"
+            npm test -- unit || exit 1
+          done
+
+      - name: Summary
+        if: always()
+        env:
+          TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
+          LINT_OUTCOME: ${{ steps.lint.outcome }}
+          TESTS_OUTCOME: ${{ steps.tests.outcome }}
+        run: |
+          {
+            echo "## Check results"
+            echo
+            echo "| Stage | Outcome |"
+            echo "|---|---|"
+            echo "| Type check | ${TYPECHECK_OUTCOME:-skipped} |"
+            echo "| Style check | ${LINT_OUTCOME:-skipped} |"
+            echo "| Tests | ${TESTS_OUTCOME:-skipped} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f test-results/jest.json ]; then
+            node scripts/run-checks.js --summary test-results/jest.json > "$RUNNER_TEMP/summary.txt"
+            {
+              echo
+              echo '```text'
+              cat "$RUNNER_TEMP/summary.txt"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^(FAILED|FAILED GROUP):' "$RUNNER_TEMP/summary.txt" | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            grep -E '^KNOWN GAP:' "$RUNNER_TEMP/summary.txt" | while IFS= read -r line; do
+              echo "::notice::$line"
+            done
+          else
+            echo "No test results file; test summary skipped." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results
+          path: test-results/
+          if-no-files-found: ignore

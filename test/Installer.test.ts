@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { execFileSync } from "child_process";
 import Config from "../src/Config";
 import Installer, { sanitizeId, generateUpgradeCode, InstallerConfig } from "../src/Installer";
 import { ScriptArgsType } from "../src/types";
@@ -33,9 +34,7 @@ jest.mock("../native/build/Release/dependency_lister.node", () => ({
   listDependencies: jest.fn()
 }), { virtual: true });
 
-const { execFileSync: mockedExecFileSync } = require("child_process") as {
-  execFileSync: jest.MockedFunction<typeof import("child_process").execFileSync>;
-};
+const mockedExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>;
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "installer-test-"));
@@ -309,36 +308,36 @@ describe("Installer", () => {
       const content = fs.readFileSync(wxsPath, "utf-8");
 
       // Check XML declaration
-      expect(content).toContain('<?xml version="1.0" encoding="utf-8"?>');
+      expect(content).toContain("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
 
       // Check Product element attributes
-      expect(content).toContain('Name="test-app"');
-      expect(content).toContain('Version="1.0.0.0"');
-      expect(content).toContain('Manufacturer="Test Dev"');
-      expect(content).toContain('UpgradeCode="12345678-1234-5678-9ABC-DEF012345678"');
+      expect(content).toContain("Name=\"test-app\"");
+      expect(content).toContain("Version=\"1.0.0.0\"");
+      expect(content).toContain("Manufacturer=\"Test Dev\"");
+      expect(content).toContain("UpgradeCode=\"12345678-1234-5678-9ABC-DEF012345678\"");
 
       // Check Package element
-      expect(content).toContain('InstallScope="perMachine"');
-      expect(content).toContain('Platform="x64"');
+      expect(content).toContain("InstallScope=\"perMachine\"");
+      expect(content).toContain("Platform=\"x64\"");
 
       // Check directory structure
-      expect(content).toContain('ProgramFiles64Folder');
-      expect(content).toContain('Name="test-app"');
+      expect(content).toContain("ProgramFiles64Folder");
+      expect(content).toContain("Name=\"test-app\"");
 
       // Check components for each file
-      expect(content).toContain('Id="Cmp_app_exe"');
-      expect(content).toContain('Id="File_app_exe"');
-      expect(content).toContain('Source="dist/app.exe"');
-      expect(content).toContain('Id="Cmp_libfoo_dll"');
-      expect(content).toContain('Id="File_libfoo_dll"');
-      expect(content).toContain('Source="dist/libfoo.dll"');
+      expect(content).toContain("Id=\"Cmp_app_exe\"");
+      expect(content).toContain("Id=\"File_app_exe\"");
+      expect(content).toContain("Source=\"dist/app.exe\"");
+      expect(content).toContain("Id=\"Cmp_libfoo_dll\"");
+      expect(content).toContain("Id=\"File_libfoo_dll\"");
+      expect(content).toContain("Source=\"dist/libfoo.dll\"");
 
       // Check component refs in feature
-      expect(content).toContain('<ComponentRef Id="Cmp_app_exe"');
-      expect(content).toContain('<ComponentRef Id="Cmp_libfoo_dll"');
+      expect(content).toContain("<ComponentRef Id=\"Cmp_app_exe\"");
+      expect(content).toContain("<ComponentRef Id=\"Cmp_libfoo_dll\"");
 
       // Check Win64 attribute
-      expect(content).toContain('Win64="yes"');
+      expect(content).toContain("Win64=\"yes\"");
 
       // Check MajorUpgrade
       expect(content).toContain("MajorUpgrade");
@@ -359,10 +358,10 @@ describe("Installer", () => {
       const wxsPath = installer.generateWxs(projectDir, config, files);
       const content = fs.readFileSync(wxsPath, "utf-8");
 
-      expect(content).toContain('Id="Cmp_libstdc___6_dll"');
-      expect(content).toContain('Id="File_libstdc___6_dll"');
+      expect(content).toContain("Id=\"Cmp_libstdc___6_dll\"");
+      expect(content).toContain("Id=\"File_libstdc___6_dll\"");
       // Original filename preserved in Name attribute
-      expect(content).toContain('Name="libstdc++-6.dll"');
+      expect(content).toContain("Name=\"libstdc++-6.dll\"");
     });
   });
 

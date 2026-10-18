@@ -1,3 +1,4 @@
+import path from "path";
 import inquirer from "inquirer";
 import Signing from "../Signing";
 import Config from "../Config";
@@ -110,9 +111,8 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
       }
 
       try {
-        const pathMod = require("path");
-        const resolvedCert = pathMod.resolve(certPathArg);
-        const resolvedKey = pathMod.resolve(keyPathArg);
+        const resolvedCert = path.resolve(certPathArg);
+        const resolvedKey = path.resolve(keyPathArg);
 
         // Prompt for scope selection
         const scope = await promptForScope(signing);
@@ -178,7 +178,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
 
       try {
         const fs = await import("fs");
-        const resolvedPath = require("path").resolve(targetPath);
+        const resolvedPath = path.resolve(targetPath);
         const stat = fs.statSync(resolvedPath);
 
         // Prompt for scope selection
@@ -193,11 +193,11 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           const result = await signing.signDirectory(targetPath, { force, scope, detached });
           console.log(`Signing directory: ${targetPath}`);
           for (const signed of result.signed) {
-            const relFile = require("path").relative(resolvedPath, signed.filePath);
+            const relFile = path.relative(resolvedPath, signed.filePath);
             if (signed.signatureType === "embedded") {
               console.log(`  Signed (embedded): ${relFile}`);
             } else {
-              const relSig = require("path").relative(resolvedPath, signed.signaturePath!);
+              const relSig = path.relative(resolvedPath, signed.signaturePath!);
               console.log(`  Signed (detached): ${relFile} → ${relSig}`);
             }
             for (const warning of signed.warnings) {
@@ -208,16 +208,16 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
             console.log(`  Skipped (not binary): ${skipped}`);
           }
           console.log("");
-          console.log(`  Manifest: ${require("path").relative(process.cwd(), result.manifestPath)}`);
+          console.log(`  Manifest: ${path.relative(process.cwd(), result.manifestPath)}`);
           console.log(`  Files signed: ${result.signed.length} | Skipped: ${result.skipped.length}`);
         } else {
           const result = await signing.signFile(targetPath, { force, scope, detached });
           console.log(`Signed: ${result.filePath}`);
           if (result.signatureType === "embedded") {
-            console.log(`  Type:        embedded`);
+            console.log("  Type:        embedded");
           } else {
             console.log(`  Signature:   ${result.signaturePath}`);
-            console.log(`  Type:        detached`);
+            console.log("  Type:        detached");
           }
           console.log(`  Fingerprint: ${result.fingerprint}`);
           for (const warning of result.warnings) {
@@ -253,8 +253,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
 
       try {
         const fs = await import("fs");
-        const pathMod = require("path");
-        const resolvedPath = pathMod.resolve(targetPath);
+        const resolvedPath = path.resolve(targetPath);
 
         if (!fs.existsSync(resolvedPath)) {
           console.error(`Error: File not found: ${resolvedPath}`);
@@ -268,7 +267,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           const result = await signing.verifyDirectory(targetPath);
           console.log(`Verifying directory: ${targetPath}`);
           for (const r of result.results) {
-            const relPath = pathMod.relative(resolvedPath, r.filePath);
+            const relPath = path.relative(resolvedPath, r.filePath);
             if (r.status === "VALID") {
               console.log(`  VALID   ${relPath}`);
             } else if (r.status === "INVALID") {
@@ -381,8 +380,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           return;
         }
 
-        const pathMod = require("path");
-        const resolvedOutput = pathMod.resolve(outputPath);
+        const resolvedOutput = path.resolve(outputPath);
         await signing.exportCert(resolvedOutput, scope);
 
         console.log(`Certificate exported to: ${resolvedOutput}`);

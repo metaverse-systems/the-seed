@@ -3,19 +3,18 @@ import os from "os";
 import path from "path";
 import Config from "../src/Config";
 
-const home = os.homedir();
-const prefix = home + "/the-seed";
-
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "config-test-"));
 }
 
 describe("test Config", () => {
   let configDir: string;
+  let prefix: string;
   let config: Config;
 
   beforeAll(() => {
     configDir = createTempDir();
+    prefix = path.join(configDir, "prefix");
     config = new Config(configDir);
   });
 

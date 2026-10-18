@@ -25,6 +25,7 @@ jest.mock("child_process", () => ({
   })
 }));
 
+// eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
 const mockAddon = require("../native/build/Release/dependency_lister.node");
 const mockedListDependencies = mockAddon.listDependencies as jest.MockedFunction<
   (binaryPaths: string[], searchPaths: string[]) => DependencyResultType

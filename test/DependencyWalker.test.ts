@@ -146,7 +146,7 @@ describe("DependencyWalker", () => {
         name: "my-program",
         makefileAm: "bin_PROGRAMS = my_program\nmy_program_SOURCES = main.cpp",
         configureAc:
-          'PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT',
+          "PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT",
       });
       expect(await classifyProject(projDir)).toBe(ProjectType.Program);
     });
@@ -157,7 +157,7 @@ describe("DependencyWalker", () => {
         name: "physics-system",
         makefileAm: "lib_LTLIBRARIES = libphysics.la",
         configureAc:
-          'PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT',
+          "PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT",
       });
       expect(await classifyProject(projDir)).toBe(ProjectType.System);
     });
@@ -223,7 +223,7 @@ describe("DependencyWalker", () => {
         dependencies: { "test-component": "file:../component" },
         makefileAm: "lib_LTLIBRARIES = libsys.la",
         configureAc:
-          'PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT',
+          "PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT",
       });
 
       // program -> depends on system
@@ -233,7 +233,7 @@ describe("DependencyWalker", () => {
         dependencies: { "test-system": "file:../system" },
         makefileAm: "bin_PROGRAMS = test_prog",
         configureAc:
-          'PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT',
+          "PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT",
       });
 
       const graph = await walkDependencies(progDir);
@@ -282,7 +282,7 @@ describe("DependencyWalker", () => {
         dependencies: { "shared-component": "file:../shared" },
         makefileAm: "lib_LTLIBRARIES = libsysa.la",
         configureAc:
-          'PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT',
+          "PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT",
       });
 
       // system-b -> depends on shared
@@ -292,7 +292,7 @@ describe("DependencyWalker", () => {
         dependencies: { "shared-component": "file:../shared" },
         makefileAm: "lib_LTLIBRARIES = libsysb.la",
         configureAc:
-          'PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT',
+          "PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT",
       });
 
       // program -> depends on system-a and system-b
@@ -305,7 +305,7 @@ describe("DependencyWalker", () => {
         },
         makefileAm: "bin_PROGRAMS = test_prog",
         configureAc:
-          'PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT',
+          "PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT",
       });
 
       const graph = await walkDependencies(progDir);
@@ -618,7 +618,7 @@ describe("DependencyWalker", () => {
         dependencies: { "test-component": "file:../component" },
         makefileAm: "lib_LTLIBRARIES = libsys.la",
         configureAc:
-          'PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT',
+          "PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT",
       });
 
       const progDir = path.join(tempDir, "program");
@@ -627,7 +627,7 @@ describe("DependencyWalker", () => {
         dependencies: { "test-system": "file:../system" },
         makefileAm: "bin_PROGRAMS = test_prog",
         configureAc:
-          'PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT',
+          "PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed])\nAC_OUTPUT",
       });
 
       const graph = await walkDependencies(progDir);

@@ -1,0 +1,19 @@
+[
+  {
+    "id": "resource-pak-fresh-prefix",
+    "review": "the-seed-1",
+    "finding": 5,
+    "fixedBy": "First use and plain builds",
+    "signature": "no such file or directory, mkdir",
+    "reason": "createPackage creates <prefix>/projects/<scope> without creating <prefix>/projects first",
+    "cases": [
+      "ResourcePak should create a new package",
+      "ResourcePak should add a resource using process.cwd() by default",
+      "ResourcePak should add a resource with explicit packageDir parameter",
+      "ResourcePak should not add a duplicate resource name",
+      "ResourcePak should save package configuration",
+      "ResourcePak should build a .pak file with explicit packageDir",
+      "ResourcePak should build using packageDir parameter instead of cwd"
+    ]
+  }
+]

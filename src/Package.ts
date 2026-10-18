@@ -182,7 +182,7 @@ class Package {
    * Returns the result as a plain JS object.
    */
   resolveDependencies = (binaryPaths: string[], searchPaths: string[]): DependencyResultType => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations and is loaded on first use
     const addon = require("../native/build/Release/dependency_lister.node");
     return addon.listDependencies(binaryPaths, searchPaths);
   };

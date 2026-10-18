@@ -34,20 +34,20 @@ const ScopesCLI = (scriptConfig: ScriptArgsType) => {
         break;
       }
       inquirer.prompt(scopes.askWhichScope())
-      .then((answers) => {
-        const { scopeName } = answers;
-        inquirer.prompt(scopes.askEditScope(config.config.scopes[scopeName].author))
-        .then((editAnswers) => {
-          editAnswers.scopeName = scopeName;
-          scopes.createOrEditScope(editAnswers);
-        })
-        .then(() => config.saveConfig());
-      });
+        .then((answers) => {
+          const { scopeName } = answers;
+          inquirer.prompt(scopes.askEditScope(config.config.scopes[scopeName].author))
+            .then((editAnswers) => {
+              editAnswers.scopeName = scopeName;
+              scopes.createOrEditScope(editAnswers);
+            })
+            .then(() => config.saveConfig());
+        });
       break;
     case "add":
       inquirer.prompt(scopes.askNewScope())
-      .then((answers) => scopes.createOrEditScope(answers))
-      .then(() => config.saveConfig());
+        .then((answers) => scopes.createOrEditScope(answers))
+        .then(() => config.saveConfig());
       break;
     case "delete":
       if(Object.keys(config.config.scopes).length === 0) {
@@ -55,11 +55,11 @@ const ScopesCLI = (scriptConfig: ScriptArgsType) => {
         break;
       }
       inquirer.prompt(scopes.askWhichScope())
-      .then((answers) => {
-        const { scopeName } = answers;
-        scopes.deleteScope(scopeName);
-      })
-      .then(() => config.saveConfig());
+        .then((answers) => {
+          const { scopeName } = answers;
+          scopes.deleteScope(scopeName);
+        })
+        .then(() => config.saveConfig());
       break;
   }
 };
