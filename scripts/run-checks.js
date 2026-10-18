@@ -369,6 +369,19 @@ function lintStage() {
   return runNode([localBin("eslint", "bin", "eslint.js"), "--ext", ".ts", "src", "test"]);
 }
 
+function isolatedEnvironment(base, scratchHome, scratchTmp) {
+  return Object.assign({}, base, {
+    HOME: scratchHome,
+    USERPROFILE: scratchHome,
+    XDG_CONFIG_HOME: path.join(scratchHome, ".config"),
+    TMPDIR: scratchTmp,
+    TMP: scratchTmp,
+    TEMP: scratchTmp,
+    NODE_DISABLE_COMPILE_CACHE: "1",
+    THE_SEED_TEST_RUN: "1",
+  });
+}
+
 function unitStage(jestArgs) {
   if (!fs.existsSync(path.join(packageRoot, ADDON_PATH))) {
     console.error('Native addon not built: run "npm run build-addon" (libthe-seed must be reachable by pkg-config; see README)');
@@ -396,15 +409,7 @@ function unitStage(jestArgs) {
     fs.mkdirSync(scratchHome);
     fs.mkdirSync(scratchTmp);
 
-    const environment = Object.assign({}, process.env, {
-      HOME: scratchHome,
-      USERPROFILE: scratchHome,
-      XDG_CONFIG_HOME: path.join(scratchHome, ".config"),
-      TMPDIR: scratchTmp,
-      TMP: scratchTmp,
-      TEMP: scratchTmp,
-      THE_SEED_TEST_RUN: "1",
-    });
+    const environment = isolatedEnvironment(process.env, scratchHome, scratchTmp);
     const jestOk = runNode(
       [localBin("jest", "bin", "jest.js"), "--ci", "--json", "--outputFile=" + RESULTS_PATH].concat(jestArgs),
       { env: environment },
@@ -482,7 +487,7 @@ function main(argv) {
   return outcomes.every((o) => o.passed) ? 0 : 1;
 }
 
-module.exports = { parseArguments, STAGES, summariseResults, validateKnownGaps, validateKnownGapFiles, findLeftovers, snapshotRealHome, compareRealHome };
+module.exports = { parseArguments, STAGES, summariseResults, validateKnownGaps, validateKnownGapFiles, findLeftovers, snapshotRealHome, compareRealHome, isolatedEnvironment };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));

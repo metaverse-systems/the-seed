@@ -852,7 +852,7 @@ No entries remain; the list is `[]`. A case that fails today because of a proble
 
 ### Isolation
 
-`npm test` runs Jest with `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `TMPDIR`, `TMP` and `TEMP` pointing into a fresh scratch directory, so the tests never read or write your real `~/the-seed`. The runner prints `LEFTOVER:` for any file a test leaves in the scratch area, removes the area afterwards, and prints `REAL HOME CHANGED:` if your real `~/the-seed` differs after the run. Both fail the run. Run the tests through `npm test`, not by calling `jest` directly, so that this protection applies.
+`npm test` runs Jest with `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME`, `TMPDIR`, `TMP` and `TEMP` pointing into a fresh scratch directory, so the tests never read or write your real `~/the-seed`. It also sets `NODE_DISABLE_COMPILE_CACHE=1` so that Node processes started by tests do not write a module compile cache into the scratch area. The runner prints `LEFTOVER:` for any file a test leaves in the scratch area, removes the area afterwards, and prints `REAL HOME CHANGED:` if your real `~/the-seed` differs after the run. Both fail the run. Run the tests through `npm test`, not by calling `jest` directly, so that this protection applies.
 
 ### Hosted check
 
