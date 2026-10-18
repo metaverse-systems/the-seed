@@ -247,4 +247,60 @@ describe("BuildEndToEnd", () => {
     expect(output.slice(-4096)).toContain("tiny: deliberate failure");
     expect(fs.existsSync(installedTiny())).toBe(false);
   }, CASE_TIMEOUT);
+
+  // The fixture's make recipe prints a MAKEFLAGS: line, so the job limit make was started with is visible.
+  function makeflagsLine(sink: TailSink): string {
+    const line = sink.tailText().split("\n").find((text) => text.startsWith("MAKEFLAGS:"));
+    expect(line).toBeDefined();
+    return line as string;
+  }
+
+  it("the compile step runs with the default job limit", async () => {
+    if (!optionalExternalCheck("build-end-to-end", toolsAvailable, "autoreconf, make or cc not found")) return;
+    // The processor count is mocked to 4 so that the default is the real build's limit without a 16-job build.
+    const processorSpy = jest
+      .spyOn(os as unknown as { availableParallelism: () => number }, "availableParallelism")
+      .mockReturnValue(4);
+    const sink = new TailSink();
+    try {
+      const build = new Build(new Config(configDir));
+      const result = await build.buildProject({
+        projectDir,
+        target: "native",
+        release: false,
+        configDir,
+        env: caseEnv({}),
+        output: sink,
+        log: () => undefined,
+      });
+
+      expect(result).toEqual({ status: "completed" });
+    } finally {
+      processorSpy.mockRestore();
+    }
+    expect(makeflagsLine(sink)).toMatch(/^MAKEFLAGS:.* -j4( |$)/);
+    expect(runInstalledTiny()).toContain("tiny ok");
+  }, CASE_TIMEOUT);
+
+  it("with MAKEFLAGS=-j64 inherited the tool's limit wins", async () => {
+    if (!optionalExternalCheck("build-end-to-end", toolsAvailable, "autoreconf, make or cc not found")) return;
+    const sink = new TailSink();
+    const build = new Build(new Config(configDir));
+
+    const result = await build.buildProject({
+      projectDir,
+      target: "native",
+      release: false,
+      jobs: JOBS,
+      configDir,
+      env: { ...caseEnv({}), MAKEFLAGS: "-j64" },
+      output: sink,
+      log: () => undefined,
+    });
+
+    expect(result).toEqual({ status: "completed" });
+    const line = makeflagsLine(sink);
+    expect(line).toMatch(/^MAKEFLAGS:.* -j4( |$)/);
+    expect(line).not.toContain("-j64");
+  }, CASE_TIMEOUT);
 });

@@ -1,4 +1,5 @@
 import { BuildRequest } from "./types";
+import { processorCount } from "./BuildScheduler";
 
 /** The outcome of parsing the arguments of `the-seed build`. */
 export type BuildArgsResult =
@@ -55,6 +56,27 @@ const OPTIONS: OptionSpec[] = [
     help: "With --recursive, build up to N independent projects at once (default 1)",
   },
   {
+    name: "--jobs",
+    takesValue: true,
+    valueName: "N",
+    repeatable: false,
+    apply: (request, value) => {
+      if (value === undefined || value === "") {
+        return "--jobs requires a positive whole number.";
+      }
+      const jobs = Number(value);
+      if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(jobs)) {
+        return `Invalid value "${value}" for --jobs; expected a positive whole number.`;
+      }
+      request.jobs = jobs;
+      return null;
+    },
+    requiresRecursive: false,
+    get help() {
+      return `Run at most N compile jobs at once (default: the processor count, ${processorCount()} here); with --parallel, the projects building at once share N`;
+    },
+  },
+  {
     name: "--release",
     takesValue: false,
     repeatable: true,
@@ -109,22 +131,24 @@ export function parseBuildArgs(args: string[]): BuildArgsResult {
     request.mode = "help";
     return { ok: true, request };
   }
-  if (targetArg.startsWith("-")) {
-    return fail(targetArg, "A build target is required: native or windows.");
+  // A first word that starts with "-" is the incremental form, whose only option is --jobs.
+  const incremental = targetArg.startsWith("-");
+  if (!incremental) {
+    if (!TARGETS.includes(targetArg)) {
+      return fail(targetArg, `Unrecognized build target "${targetArg}"; expected native or windows.`);
+    }
+    request.mode = "full";
+    request.target = targetArg as "native" | "windows";
   }
-  if (!TARGETS.includes(targetArg)) {
-    return fail(targetArg, `Unrecognized build target "${targetArg}"; expected native or windows.`);
-  }
-  request.mode = "full";
-  request.target = targetArg as "native" | "windows";
 
   const seen = new Set<OptionSpec>();
-  const rest = args.slice(1);
+  const rest = incremental ? args : args.slice(1);
+  const targetRequired = "A build target is required: native or windows.";
 
   for (let i = 0; i < rest.length; i++) {
     const arg = rest[i];
 
-    if (arg === DEPRECATED_RECURSIVE_WORD) {
+    if (!incremental && arg === DEPRECATED_RECURSIVE_WORD) {
       request.recursive = true;
       request.deprecatedBareWord = true;
       continue;
@@ -132,6 +156,9 @@ export function parseBuildArgs(args: string[]): BuildArgsResult {
 
     if (!arg.startsWith("-")) {
       return fail(arg, `Unrecognized argument "${arg}".`);
+    }
+    if (incremental && !(arg === "--jobs" || arg.startsWith("--jobs="))) {
+      return fail(arg, targetRequired);
     }
 
     const equals = arg.indexOf("=");

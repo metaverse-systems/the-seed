@@ -202,12 +202,13 @@ async function drive<F>(fake: FakeBuilds, schedule: Promise<ScheduleResult<F>>):
   return result;
 }
 
-function start(g: Graph, fake: FakeBuilds, concurrency: number, processors = 4, signal?: AbortSignal, forceSignal?: AbortSignal) {
+function start(g: Graph, fake: FakeBuilds, concurrency: number, processors = 4, signal?: AbortSignal, forceSignal?: AbortSignal, jobBudget = processors) {
   return runSchedule({
     order: g.order,
     edges: g.edges,
     concurrency,
     processorCount: processors,
+    jobBudget,
     signal,
     forceSignal,
     runProject: fake.runProject,
@@ -303,9 +304,9 @@ describe("effectiveTiers", () => {
 });
 
 describe("tierJobs", () => {
-  it("is undefined at concurrency 1", () => {
-    expect(tierJobs(1, 4, 3)).toBeUndefined();
-    expect(tierJobs(1, 16, 1)).toBeUndefined();
+  it("returns the budget at concurrency 1", () => {
+    expect(tierJobs(1, 4, 3)).toBe(4);
+    expect(tierJobs(1, 16, 1)).toBe(16);
   });
 
   it("shares the processors among the projects of a tier that can run at once", () => {
@@ -608,14 +609,51 @@ describe("runSchedule capacity and compile jobs", () => {
     }
   );
 
-  it("leaves jobs undefined at limit 1", async () => {
+  it("gives the whole budget at limit 1", async () => {
     const g = wide();
     const fake = new FakeBuilds();
-    await drive(fake, start(g, fake, 1));
+    await drive(fake, start(g, fake, 1, 4, undefined, undefined, 3));
+    expect(fake.contexts.size).toBeGreaterThan(0);
     for (const context of fake.contexts.values()) {
-      expect(context.jobs).toBeUndefined();
+      expect(context.jobs).toBe(3);
     }
   });
+
+  it.each([[4, 8, 2], [3, 8, 3], [8, 16, 5], [2, 4, 1]])(
+    "with a budget below the processors, running jobs never exceed it (limit %p, %p processors, budget %p)",
+    async (limit, processors, budget) => {
+      const g = wide();
+      const fake = new FakeBuilds();
+      const schedule = start(g, fake, limit, processors, undefined, undefined, budget);
+
+      let done = false;
+      schedule.then(() => {
+        done = true;
+      });
+      await flush();
+      while (!done) {
+        const runningJobs = [...fake.running].map((name) => fake.contexts.get(name)!.jobs!);
+        for (const jobs of runningJobs) {
+          expect(jobs).toBeGreaterThanOrEqual(1);
+        }
+        expect(runningJobs.reduce((sum, jobs) => sum + jobs, 0)).toBeLessThanOrEqual(budget);
+        const next = fake.started().find((name) => fake.isRunning(name));
+        if (!next) break;
+        await fake.finish(next);
+      }
+      await schedule;
+    }
+  );
+
+  it.each([[4, 8, 2], [8, 16, 3], [3, 8, 1]])(
+    "projects at once never exceed the budget (limit %p, %p processors, budget %p)",
+    async (limit, processors, budget) => {
+      const g = wide();
+      const fake = new FakeBuilds();
+      await drive(fake, start(g, fake, limit, processors, undefined, undefined, budget));
+      expect(fake.maxRunning).toBe(Math.min(limit, processors, budget));
+    }
+  );
 
   it("passes 0-based start ordinals", async () => {
     const g = wide();
@@ -740,6 +778,7 @@ describe("runSchedule failures", () => {
       edges: g.edges,
       concurrency: 1,
       processorCount: 4,
+      jobBudget: 4,
       runProject: async () => {
         throw error;
       },

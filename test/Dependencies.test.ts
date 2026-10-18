@@ -25,6 +25,13 @@ jest.mock("../src/StepRunner", () => ({
   runStep: jest.fn(),
 }));
 
+// Fix the processor count. Choice for the implementer: the default job count comes from
+// processorCount() exported by src/BuildScheduler, which Dependencies must import from there.
+jest.mock("../src/BuildScheduler", () => ({
+  ...jest.requireActual("../src/BuildScheduler"),
+  processorCount: () => 6,
+}));
+
 import { execSync } from "child_process";
 import { runStep } from "../src/StepRunner";
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
@@ -140,6 +147,13 @@ describe("test Dependencies", () => {
       expect(result).toBe(false);
     });
 
+    it("uses options.jobs for the compile step", async () => {
+      await installLib(config, repo, "test-dir", "native", { jobs: 3 });
+
+      const compile = stepsRun().find((step) => step.label === "test-dir compile")!;
+      expect(compile).toMatchObject({ program: "make", args: ["-j3"], cwd: "test-dir" });
+    });
+
     it("runs the five steps in order from the current directory", async () => {
       await installLib(config, repo, "test-dir", "native");
 
@@ -150,7 +164,7 @@ describe("test Dependencies", () => {
       expect(steps[0]).toMatchObject({ program: "git", args: ["clone", repo, "test-dir"] });
       expect(steps[1]).toMatchObject({ program: "./autogen.sh", cwd: "test-dir" });
       expect(steps[2]).toMatchObject({ program: "./configure", cwd: "test-dir" });
-      expect(steps[3]).toMatchObject({ program: "make", cwd: "test-dir" });
+      expect(steps[3]).toMatchObject({ program: "make", args: ["-j6"], cwd: "test-dir" });
       expect(steps[4]).toMatchObject({ program: "make", args: ["install"], cwd: "test-dir" });
       for (const call of mockedRunStep.mock.calls) {
         expect(call[1]).toEqual(expect.objectContaining({ baseDir: process.cwd() }));
@@ -454,11 +468,35 @@ describe("test Dependencies", () => {
           args: ["--prefix=" + prefix],
           cwd: lib,
         });
-        expect(byLabel("compile")).toMatchObject({ program: "make", args: [], cwd: lib });
+        expect(byLabel("compile")).toMatchObject({ program: "make", args: ["-j6"], cwd: lib });
         expect(byLabel("install")).toMatchObject({ program: "make", args: ["install"], cwd: lib });
       }
       for (const step of forLib(steps, "lib")) {
         expect(step).not.toHaveProperty("command");
+      }
+    });
+
+    it("gives every library's compile step make -j<processorCount()> for both targets", () => {
+      for (const target of ["native", "windows"]) {
+        const compiles = getInstallSteps(config, target).filter((step) => step.label.endsWith(" compile"));
+        expect(compiles).toHaveLength(2);
+        for (const step of compiles) {
+          expect(step.program).toBe("make");
+          expect(step.args).toEqual(["-j6"]);
+        }
+      }
+    });
+
+    it("uses make -j<jobs> when jobs is given and changes no other step", () => {
+      const byDefault = getInstallSteps(config, "native");
+      const bounded = getInstallSteps(config, "native", 2);
+      expect(bounded).toHaveLength(byDefault.length);
+      for (let i = 0; i < bounded.length; i++) {
+        if (bounded[i].label.endsWith(" compile")) {
+          expect(bounded[i].args).toEqual(["-j2"]);
+        } else {
+          expect(bounded[i]).toEqual(byDefault[i]);
+        }
       }
     });
 

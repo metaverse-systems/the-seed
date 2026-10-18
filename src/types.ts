@@ -305,6 +305,11 @@ export interface RecursiveBuildOptions {
    */
   parallel?: number;
   /**
+   * Compile jobs to share among the projects building at once (a positive
+   * integer). Defaults to the processor count.
+   */
+  jobs?: number;
+  /**
    * Optional second, forced cancellation. Aborting `signal` stops running
    * steps but lets an install in progress finish; aborting this also stops
    * the install.
@@ -324,6 +329,8 @@ export interface BuildRequest {
   release: boolean;
   /** Maximum number of projects to build at once; 1 unless --parallel was given */
   parallel: number;
+  /** Compile job limit; absent unless --jobs was given */
+  jobs?: number;
   /** The deprecated bare word "recursive" was used */
   deprecatedBareWord: boolean;
 }

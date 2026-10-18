@@ -31,6 +31,14 @@ jest.mock("../src/ProcessRunner", () => ({
   findOnPath: jest.fn((name: string) => "/mock/bin/" + name),
 }));
 
+// Choice for the implementer: the default job count comes from processorCount() exported by
+// src/BuildScheduler, which Build must import from there so this mock applies.
+const mockProcessors = { count: 6 };
+jest.mock("../src/BuildScheduler", () => ({
+  ...jest.requireActual("../src/BuildScheduler"),
+  processorCount: () => mockProcessors.count,
+}));
+
 import { runCommand, findOnPath, formatCommand, CommandResult, RunCommandOptions } from "../src/ProcessRunner";
 const mockedFindOnPath = findOnPath as jest.MockedFunction<typeof findOnPath>;
 const mockedRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
@@ -465,6 +473,54 @@ describe("test Build", () => {
     });
   });
 
+  describe("buildProject jobs", () => {
+    let projectDir: string;
+
+    beforeEach(() => {
+      projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "build-jobs-test-"));
+      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({ name: "@scope/proj" }));
+      mockedRunCommand.mockReset();
+      mockedRunCommand.mockResolvedValue(commandResult());
+    });
+
+    afterEach(() => {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    });
+
+    function options(extra: Record<string, unknown> = {}) {
+      return {
+        projectDir,
+        target: "native" as "native" | "windows" | undefined,
+        release: false,
+        configDir,
+        log: () => undefined,
+        output: { stdout: () => undefined, stderr: () => undefined },
+        ...extra,
+      };
+    }
+
+    function compileArgs(): string[][] {
+      return mockedRunCommand.mock.calls
+        .filter((call) => call[0] === "make" && String((call[1] as string[])[0]).startsWith("-j"))
+        .map((call) => call[1] as string[]);
+    }
+
+    it("passes jobs to getSteps for a full build", async () => {
+      await build.buildProject(options({ jobs: 3 }));
+      expect(compileArgs()).toEqual([["-j3"]]);
+    });
+
+    it("passes jobs to getSteps for an incremental build", async () => {
+      await build.buildProject(options({ jobs: 2, target: undefined }));
+      expect(compileArgs()).toEqual([["-j2"]]);
+    });
+
+    it("uses the processor count when no jobs are given", async () => {
+      await build.buildProject(options());
+      expect(compileArgs()).toEqual([["-j6"]]);
+    });
+  });
+
   describe("getSteps", () => {
     const prefix = () => config.config.prefix;
 
@@ -540,10 +596,10 @@ describe("test Build", () => {
       expect(step.args).toHaveLength(1);
     });
 
-    it("compile step is make -j without jobs", () => {
+    it("compile step is make -j<processorCount()> without jobs", () => {
       const step = stepOf(build.getSteps("native", true), "compile");
       expect(step.program).toBe("make");
-      expect(step.args).toEqual(["-j"]);
+      expect(step.args).toEqual(["-j6"]);
     });
 
     it("install step is make install", () => {
@@ -552,32 +608,51 @@ describe("test Build", () => {
       expect(step.args).toEqual(["install"]);
     });
 
-    it("keeps make -j for every target and mode when jobs is not given", () => {
+    it("getSteps uses make -j<processorCount()> by default for every target and mode", () => {
+      for (const count of [1, 6, 16]) {
+        mockProcessors.count = count;
+        for (const target of ["native", "windows"]) {
+          for (const fullReconfigure of [true, false]) {
+            const compileStep = stepOf(build.getSteps(target, fullReconfigure), "compile");
+            expect(compileStep.program).toBe("make");
+            expect(compileStep.args).toEqual([`-j${count}`]);
+          }
+        }
+      }
+      mockProcessors.count = 6;
+    });
+
+    it("never emits an unbounded make -j", () => {
       for (const target of ["native", "windows"]) {
         for (const fullReconfigure of [true, false]) {
-          const compileStep = stepOf(build.getSteps(target, fullReconfigure), "compile");
-          expect(compileStep.program).toBe("make");
-          expect(compileStep.args).toEqual(["-j"]);
+          for (const step of build.getSteps(target, fullReconfigure)) {
+            expect(step.args).not.toContain("-j");
+          }
         }
       }
     });
 
-    it("uses make -j<jobs> when jobs is given and changes no other step", () => {
+    it("uses make -j<jobs> when given and changes no other step", () => {
       for (const target of ["native", "windows"]) {
         for (const fullReconfigure of [true, false]) {
-          const unbounded = build.getSteps(target, fullReconfigure);
+          const byDefault = build.getSteps(target, fullReconfigure);
           const bounded = build.getSteps(target, fullReconfigure, 3);
-          expect(bounded).toHaveLength(unbounded.length);
+          expect(bounded).toHaveLength(byDefault.length);
           for (let i = 0; i < bounded.length; i++) {
             if (bounded[i].label === "compile") {
               expect(bounded[i].program).toBe("make");
               expect(bounded[i].args).toEqual(["-j3"]);
             } else {
-              expect(bounded[i]).toEqual(unbounded[i]);
+              expect(bounded[i]).toEqual(byDefault[i]);
             }
           }
         }
       }
+    });
+
+    it("accepts a job count above the processor count", () => {
+      const step = stepOf(build.getSteps("native", true, 64), "compile");
+      expect(step.args).toEqual(["-j64"]);
     });
 
     it("gives no step a command field", () => {

@@ -9,8 +9,8 @@ const printHelp = () => {
   const options = optionHelp();
   const width = Math.max(...options.map((option) => option.usage.length)) + 2;
 
-  console.log("\nUsage: the-seed build <target> [--recursive] [--parallel N] [--release]");
-  console.log("       the-seed build                 Rebuild the current project (make, install, sign)");
+  console.log("\nUsage: the-seed build <target> [--recursive] [--parallel N] [--jobs N] [--release]");
+  console.log("       the-seed build [--jobs N]      Rebuild the current project (make, install, sign)");
   console.log("\nAvailable build targets:");
   console.log("  native   - Builds for the current Linux environment");
   console.log("  windows  - Cross-compiles for Windows using MinGW");
@@ -18,9 +18,10 @@ const printHelp = () => {
   for (const option of options) {
     console.log(`  ${option.usage.padEnd(width)}${option.help}`);
   }
-  console.log("  --parallel=N is the same as --parallel N; N above the processor count is reduced to it.");
+  console.log("  --parallel=N and --jobs=N are the same as --parallel N and --jobs N. --parallel above the processor count, or above --jobs, is reduced to it.");
   console.log("\nExamples:");
   console.log("  the-seed build native                                  - Build for Linux");
+  console.log("  the-seed build native --jobs 4                         - Build for Linux with at most 4 compile jobs");
   console.log("  the-seed build native --release                        - Build for Linux (stripped)");
   console.log("  the-seed build native --recursive                      - Build all deps + project for Linux");
   console.log("  the-seed build native --recursive --parallel 4 --release");
@@ -29,8 +30,9 @@ const printHelp = () => {
   console.log("  the-seed build windows --recursive --release           - Build all deps + project for Windows (stripped)");
   console.log("\nWith --recursive, dependencies always finish installing before anything that needs them");
   console.log("starts, and all components finish before systems, and systems before programs. Installs");
-  console.log("(with strip and sign) never overlap. With --parallel above 1, the compile jobs of the");
-  console.log("projects building at once never add up to more than the processor count.");
+  console.log("(with strip and sign) never overlap.");
+  console.log("With --recursive and --parallel above 1, the compile jobs of the projects building at once");
+  console.log("never add up to more than --jobs, or the processor count when --jobs is not given.");
   console.log("\nPress Ctrl+C once to stop the running builds; an install in progress finishes first.");
   console.log("Press it again to stop at once.");
   console.log("\nThe bare word \"recursive\" after the target is deprecated; it still works for now");
@@ -83,7 +85,7 @@ const withCancellation = async (
   }
 };
 
-const runRecursiveBuild = (target: string, release: boolean, parallel: number) =>
+const runRecursiveBuild = (target: string, release: boolean, parallel: number, jobs: number | undefined) =>
   withCancellation(async ({ signal, forceSignal }) => {
     const result = await buildRecursive({
       target,
@@ -91,6 +93,7 @@ const runRecursiveBuild = (target: string, release: boolean, parallel: number) =
       projectDir: process.cwd(),
       release,
       parallel,
+      jobs,
       signal,
       forceSignal,
     });
@@ -101,12 +104,13 @@ const runRecursiveBuild = (target: string, release: boolean, parallel: number) =
   });
 
 /** Runs a plain (target given) or incremental (no target) build of the current project. */
-const runProjectBuild = (build: Build, configDir: string, target: "native" | "windows" | undefined, release: boolean) =>
+const runProjectBuild = (build: Build, configDir: string, target: "native" | "windows" | undefined, release: boolean, jobs: number | undefined) =>
   withCancellation(async ({ signal, forceSignal }) => {
     const result = await build.buildProject({
       projectDir: process.cwd(),
       target,
       release,
+      jobs,
       configDir,
       signal,
       forceSignal,
@@ -141,7 +145,7 @@ const BuildCLI = async (scriptConfig: ScriptArgsType) => {
   const build = new Build(config);
 
   if (request.mode === "incremental") {
-    return runProjectBuild(build, scriptConfig.configDir, undefined, false);
+    return runProjectBuild(build, scriptConfig.configDir, undefined, false, request.jobs);
   }
 
   const target = request.target as "native" | "windows";
@@ -150,10 +154,10 @@ const BuildCLI = async (scriptConfig: ScriptArgsType) => {
     if (request.deprecatedBareWord) {
       console.error("Warning: \"recursive\" is deprecated; use \"--recursive\" instead.");
     }
-    return runRecursiveBuild(target, request.release, request.parallel);
+    return runRecursiveBuild(target, request.release, request.parallel, request.jobs);
   }
 
-  return runProjectBuild(build, scriptConfig.configDir, target, request.release);
+  return runProjectBuild(build, scriptConfig.configDir, target, request.release, request.jobs);
 };
 
 export default BuildCLI;

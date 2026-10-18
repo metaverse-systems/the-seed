@@ -3,6 +3,7 @@ import path from "path";
 import Config from "./Config";
 import { BuildStep, ProjectBuildOptions, ProjectBuildResult, StripResult } from "./types";
 import Signing from "./Signing";
+import { processorCount } from "./BuildScheduler";
 import { runStep, stepText } from "./StepRunner";
 import { runCommand, commandFailedMessage, findOnPath, formatCommand } from "./ProcessRunner";
 
@@ -105,9 +106,9 @@ class Build {
    * Returns an ordered array of BuildStep objects for the given target and mode.
    * @param target - 'native' or 'windows'
    * @param fullReconfigure - if true, includes autogen/distclean/configure steps; if false, only compile+install
-   * @param jobs - compile job limit; when omitted the compile step is an unbounded "make -j"
+   * @param jobs - compile job limit; defaults to the processor count, so the compile step is always "make -j<jobs>"
    */
-  getSteps = (target: string, fullReconfigure: boolean, jobs?: number): BuildStep[] => {
+  getSteps = (target: string, fullReconfigure: boolean, jobs: number = processorCount()): BuildStep[] => {
     const newTarget = targets[target];
     const prefix = this.config.config.prefix + "/" + newTarget;
 
@@ -129,7 +130,7 @@ class Build {
       });
     }
 
-    steps.push({ label: "compile", program: "make", args: [jobs === undefined ? "-j" : `-j${jobs}`] });
+    steps.push({ label: "compile", program: "make", args: [`-j${jobs}`] });
 
     steps.push({ label: "install", program: "make", args: ["install"] });
 

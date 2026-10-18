@@ -95,21 +95,21 @@ export function effectiveTiers(order: BuildableProject[], edges: Map<string, str
 }
 
 /**
- * The compile job limit for each project of a tier. At concurrency 1 there is
- * no limit (an unbounded "make -j", as a sequential build has always used).
- * Otherwise the processors are shared among the projects of the tier that can
- * run at once; tiers never overlap, so the running total never exceeds the
- * processor count.
+ * The compile job limit for each project of a tier. At concurrency 1 the
+ * project gets the whole budget. Otherwise the budget is shared among the
+ * projects of the tier that can run at once; tiers never overlap, so the
+ * running total never exceeds the budget (except that every project gets at
+ * least one job).
  */
-export function tierJobs(concurrency: number, processors: number, tierSize: number): number | undefined {
-  if (concurrency <= 1) return undefined;
-  return Math.max(1, Math.floor(processors / Math.min(concurrency, tierSize)));
+export function tierJobs(concurrency: number, budget: number, tierSize: number): number {
+  if (concurrency <= 1) return budget;
+  return Math.max(1, Math.floor(budget / Math.min(concurrency, tierSize)));
 }
 
 /** What runSchedule hands each project it starts. */
 export interface ScheduleContext {
-  /** Compile job limit for this project, or undefined for no limit */
-  jobs: number | undefined;
+  /** Compile job limit for this project */
+  jobs: number;
   /** Aborted when the build is cancelled; for every step outside the install phase */
   signal: AbortSignal;
   /**
@@ -141,10 +141,12 @@ export interface ScheduleOptions<F> {
   order: BuildableProject[];
   /** Project path → paths of its dependencies */
   edges: Map<string, string[]>;
-  /** Maximum number of projects at once; capped at processorCount */
+  /** Maximum number of projects at once; capped at processorCount and jobBudget */
   concurrency: number;
   /** Processors to share out as compile jobs */
   processorCount: number;
+  /** Compile jobs to share out among the projects building at once */
+  jobBudget: number;
   /** Graceful cancellation: start nothing new */
   signal?: AbortSignal;
   /** Forced cancellation */
@@ -174,7 +176,8 @@ export interface ScheduleResult<F> {
  * - no project starts while a project of a lower effective tier is unfinished;
  * - among startable projects, the earliest in build order starts first, so at
  *   concurrency 1 projects start in exactly the build order;
- * - at most `concurrency` projects (and never more than the processors) run
+ * - at most `concurrency` projects (and never more than the processors or the
+ *   job budget) run
  *   at once, and install phases never overlap;
  * - after the first failure or a cancellation nothing new starts, and the
  *   promise resolves only once every running project has settled.
@@ -182,7 +185,8 @@ export interface ScheduleResult<F> {
 export function runSchedule<F>(options: ScheduleOptions<F>): Promise<ScheduleResult<F>> {
   const { order, signal, forceSignal, runProject } = options;
   const processors = Math.max(1, options.processorCount);
-  const concurrency = Math.max(1, Math.min(options.concurrency, processors));
+  const budget = Math.max(1, options.jobBudget);
+  const concurrency = Math.max(1, Math.min(options.concurrency, processors, budget));
 
   const known = new Set(order.map((project) => project.path));
   const edges = new Map(order.map((project) => [
@@ -282,7 +286,7 @@ export function runSchedule<F>(options: ScheduleOptions<F>): Promise<ScheduleRes
       follow(installController, [forceSignal]);
 
       const context: ScheduleContext = {
-        jobs: tierJobs(concurrency, processors, tierSizes.get(tier) ?? 1),
+        jobs: tierJobs(concurrency, budget, tierSizes.get(tier) ?? 1),
         signal: projectController.signal,
         ordinal,
         tier,

@@ -22,6 +22,13 @@ jest.mock("../src/Build", () => {
   };
 });
 
+// Fix the processor count so the help text and default are predictable. Choice for the implementer:
+// the help text reads the count through processorCount() exported by src/BuildScheduler.
+jest.mock("../src/BuildScheduler", () => ({
+  ...jest.requireActual("../src/BuildScheduler"),
+  processorCount: () => 6,
+}));
+
 // Mock RecursiveBuild
 jest.mock("../src/RecursiveBuild", () => ({
   buildRecursive: jest.fn().mockResolvedValue({
@@ -240,6 +247,11 @@ describe("BuildCLI rejects invalid arguments", () => {
     [["native", "--recursive", "--parallel", "2", "--parallel", "3"], "--parallel was given more than once."],
     [["--recursive"], "A build target is required: native or windows."],
     [["--release"], "A build target is required: native or windows."],
+    [["native", "--jobs"], "--jobs requires a positive whole number."],
+    [["native", "--jobs", "0"], "Invalid value \"0\" for --jobs; expected a positive whole number."],
+    [["native", "--recursive", "--jobs=abc"], "Invalid value \"abc\" for --jobs; expected a positive whole number."],
+    [["--jobs", "01"], "Invalid value \"01\" for --jobs; expected a positive whole number."],
+    [["native", "--jobs", "2", "--jobs", "3"], "--jobs was given more than once."],
     [["foo"], "Unrecognized build target \"foo\"; expected native or windows."],
   ])("rejects %p before doing any work", async (args, message) => {
     await BuildCLI(makeArgs(args));
@@ -247,7 +259,7 @@ describe("BuildCLI rejects invalid arguments", () => {
     expect(process.exitCode).toBe(1);
     expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
       message,
-      "Valid options: --recursive, --parallel N, --release",
+      "Valid options: --recursive, --parallel N, --jobs N, --release",
       "Run \"the-seed build help\" for details.",
     ]);
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
@@ -260,6 +272,62 @@ describe("BuildCLI rejects invalid arguments", () => {
       expect.objectContaining({ target: "native", parallel: 3 })
     );
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("BuildCLI --jobs", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockBuildProject.mockReset();
+    mockBuildProject.mockResolvedValue(completed);
+    mockedBuildRecursive.mockClear();
+    process.exitCode = undefined;
+  });
+
+  afterEach(() => {
+    process.exitCode = undefined;
+  });
+
+  it("passes --jobs to plain, incremental and recursive builds", async () => {
+    await BuildCLI(makeArgs(["native", "--jobs", "3"]));
+    expect(lastBuildOptions()).toEqual(expect.objectContaining({ target: "native", jobs: 3 }));
+
+    mockBuildProject.mockClear();
+    await BuildCLI(makeArgs(["--jobs=2"]));
+    const incremental = lastBuildOptions();
+    expect(incremental.target).toBeUndefined();
+    expect(incremental.jobs).toBe(2);
+
+    expect(mockedBuildRecursive).not.toHaveBeenCalled();
+    await BuildCLI(makeArgs(["native", "--recursive", "--jobs", "5", "--parallel", "2"]));
+    expect(mockedBuildRecursive).toHaveBeenCalledWith(
+      expect.objectContaining({ target: "native", parallel: 2, jobs: 5 })
+    );
+  });
+
+  it("leaves jobs undefined when --jobs is not given", async () => {
+    await BuildCLI(makeArgs(["native"]));
+    expect(lastBuildOptions().jobs).toBeUndefined();
+
+    await BuildCLI(makeArgs(["native", "--recursive"]));
+    expect(mockedBuildRecursive.mock.calls[0][0].jobs).toBeUndefined();
+  });
+
+  it("accepts --jobs above the processor count", async () => {
+    await BuildCLI(makeArgs(["native", "--jobs", "64"]));
+    expect(lastBuildOptions().jobs).toBe(64);
+  });
+
+  it("rejects a bad incremental --jobs before doing any work", async () => {
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await BuildCLI(makeArgs(["--jobs", "0"]));
+      expect(process.exitCode).toBe(1);
+      expect(mockBuildProject).not.toHaveBeenCalled();
+      expect(mockedBuildRecursive).not.toHaveBeenCalled();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
 
@@ -586,7 +654,7 @@ describe("BuildCLI help", () => {
       logSpy.mockRestore();
     }
 
-    expect(text).toContain("the-seed build <target> [--recursive] [--parallel N] [--release]");
+    expect(text).toContain("the-seed build <target> [--recursive] [--parallel N] [--jobs N] [--release]");
     expect(text).toContain("--recursive");
     expect(text).toContain("--parallel N");
     expect(text).toContain("--release");
@@ -600,5 +668,50 @@ describe("BuildCLI help", () => {
     }
     expect(text).not.toMatch(/the-seed build (native|windows) recursive/);
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
+  });
+});
+
+describe("BuildCLI help › lists --jobs with its default", () => {
+  async function helpText(): Promise<string> {
+    jest.clearAllMocks();
+    const logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await BuildCLI(makeArgs(["help"]));
+      return logSpy.mock.calls.map((call) => String(call[0])).join("\n");
+    } finally {
+      logSpy.mockRestore();
+    }
+  }
+
+  it("shows both usage forms and the incremental line", async () => {
+    const text = await helpText();
+    expect(text).toContain("the-seed build <target> [--recursive] [--parallel N] [--jobs N] [--release]");
+    expect(text).toContain("the-seed build [--jobs N]");
+    expect(text).toContain("Rebuild the current project (make, install, sign)");
+  });
+
+  it("lists --jobs with the processor count as its default", async () => {
+    const text = await helpText();
+    expect(text).toContain("--jobs N");
+    expect(text).toContain(
+      "Run at most N compile jobs at once (default: the processor count, 6 here); with --parallel, the projects building at once share N"
+    );
+  });
+
+  it("explains the = forms, the reduction and the shared budget", async () => {
+    // Whitespace is collapsed so the sentences may be wrapped over several lines.
+    const text = (await helpText()).replace(/\s+/g, " ");
+    expect(text).toContain(
+      "--parallel=N and --jobs=N are the same as --parallel N and --jobs N. --parallel above the processor count, or above --jobs, is reduced to it."
+    );
+    expect(text).toContain(
+      "With --recursive and --parallel above 1, the compile jobs of the projects building at once never add up to more than --jobs, or the processor count when --jobs is not given."
+    );
+  });
+
+  it("gives an example with --jobs", async () => {
+    const text = await helpText();
+    expect(text).toContain("the-seed build native --jobs 4");
+    expect(text).toContain("Build for Linux with at most 4 compile jobs");
   });
 });

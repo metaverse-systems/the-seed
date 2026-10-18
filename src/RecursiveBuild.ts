@@ -34,6 +34,16 @@ function validateParallel(parallel: number | undefined): void {
 }
 
 /**
+ * Throws a RangeError unless `jobs` is omitted or a positive safe integer.
+ */
+function validateJobs(jobs: number | undefined): void {
+  if (jobs === undefined) return;
+  if (!Number.isSafeInteger(jobs) || jobs < 1) {
+    throw new RangeError(`jobs must be a positive whole number, got ${jobs}`);
+  }
+}
+
+/**
  * The environment for build steps when several projects build at once.
  * An inherited MAKEFLAGS or MFLAGS (for example from an outer make) could
  * carry its own -j or jobserver and override each project's job share.
@@ -101,10 +111,11 @@ function printReport(result: RecursiveBuildResult, total: number): void {
  * 5. Return RecursiveBuildResult
  *
  * At the default limit the same commands run in the same order as a
- * sequential build always has, including an unbounded "make -j".
+ * sequential build always has, with the same compile job limit as a plain
+ * build (`jobs`, or the processor count).
  *
  * Build failures and cancellation are reported in the result; the promise
- * rejects only for discovery errors and an invalid `parallel`, both before
+ * rejects only for discovery errors and an invalid `parallel` or `jobs`, both before
  * any step runs.
  *
  * @param options - Build configuration including target, project, and callbacks
@@ -116,6 +127,7 @@ export async function buildRecursive(
   const { target, fullReconfigure, projectDir, signal, callbacks, release } = options;
 
   validateParallel(options.parallel);
+  validateJobs(options.jobs);
 
   // Discover dependency graph and resolve build order
   const graph = await walkDependencies(projectDir);
@@ -123,7 +135,8 @@ export async function buildRecursive(
   const total = buildOrder.length;
 
   const processors = processorCount();
-  const concurrency = Math.min(options.parallel ?? 1, processors);
+  const budget = options.jobs ?? processors;
+  const concurrency = Math.min(options.parallel ?? 1, processors, budget);
   const env = concurrency > 1 ? boundedEnv() : process.env;
 
   // Log build plan
@@ -137,7 +150,7 @@ export async function buildRecursive(
   }
   if (concurrency > 1) {
     console.log(
-      `Building up to ${concurrency} projects at once (${processors} processors; compile jobs are shared out per tier)`
+      `Building up to ${concurrency} projects at once (${budget} compile jobs shared out per tier)`
     );
   }
   console.log("");
@@ -269,6 +282,7 @@ export async function buildRecursive(
     edges: graph.edges,
     concurrency,
     processorCount: processors,
+    jobBudget: budget,
     signal,
     forceSignal: options.forceSignal,
     runProject,
@@ -314,7 +328,8 @@ export async function buildRecursive(
 export async function getRecursiveBuildSteps(
   projectDir: string,
   target: string,
-  fullReconfigure: boolean
+  fullReconfigure: boolean,
+  jobs?: number
 ): Promise<Array<{ project: BuildableProject; steps: BuildStep[] }>> {
   const graph = await walkDependencies(projectDir);
   const buildOrder = resolveBuildOrder(graph, projectDir);
@@ -325,6 +340,6 @@ export async function getRecursiveBuildSteps(
 
   return buildOrder.map((project) => ({
     project,
-    steps: build.getSteps(target, fullReconfigure),
+    steps: build.getSteps(target, fullReconfigure, jobs),
   }));
 }

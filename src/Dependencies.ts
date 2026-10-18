@@ -4,6 +4,7 @@ import { execSync } from "child_process";
 import { targets } from "./Build";
 import { BuildStep } from "./types";
 import { runStep, stepText } from "./StepRunner";
+import { processorCount } from "./BuildScheduler";
 
 const execOptions = { stdio: "pipe" as const, shell: "/bin/bash", env: { ...process.env } };
 const libEcsRepo = "https://github.com/metaverse-systems/libecs-cpp.git";
@@ -76,7 +77,7 @@ export const installLibTheSeed = async (config: Config, target: string) => {
  * The steps that fetch and install one library: clone it, or update the
  * existing clone, then autogen, configure, compile and install inside it.
  */
-const getLibrarySteps = (name: string, repo: string, installDir: string, prefix: string, target: string): BuildStep[] => {
+const getLibrarySteps = (name: string, repo: string, installDir: string, prefix: string, target: string, jobs: number): BuildStep[] => {
   const hostArgs = target !== "native" ? ["--host=" + targets[target]] : [];
   return [
     fs.existsSync(installDir)
@@ -84,7 +85,7 @@ const getLibrarySteps = (name: string, repo: string, installDir: string, prefix:
       : { label: `clone ${name}`, program: "git", args: ["clone", repo, installDir] },
     { label: `${name} autogen`, program: "./autogen.sh", args: [], cwd: installDir },
     { label: `${name} configure`, program: "./configure", args: [`--prefix=${prefix}`, ...hostArgs], cwd: installDir },
-    { label: `${name} compile`, program: "make", args: [], cwd: installDir },
+    { label: `${name} compile`, program: "make", args: [`-j${jobs}`], cwd: installDir },
     { label: `${name} install`, program: "make", args: ["install"], cwd: installDir },
   ];
 };
@@ -94,7 +95,13 @@ const getLibrarySteps = (name: string, repo: string, installDir: string, prefix:
  * its output as it arrives. Stops at the first step that does not complete and
  * resolves false; resolves true when every step completed.
  */
-export const installLib = async (config: Config, repo: string, installDir: string, target: string) => {
+export const installLib = async (
+  config: Config,
+  repo: string,
+  installDir: string,
+  target: string,
+  options: { jobs?: number } = {}
+) => {
   const prefix = config.config.prefix + "/" + targets[target];
   const output = {
     stdout: (chunk: Buffer) => {
@@ -105,7 +112,7 @@ export const installLib = async (config: Config, repo: string, installDir: strin
     },
   };
 
-  for (const step of getLibrarySteps(installDir, repo, installDir, prefix, target)) {
+  for (const step of getLibrarySteps(installDir, repo, installDir, prefix, target, options.jobs ?? processorCount())) {
     const text = stepText(step);
     console.log(`==> ${step.label}: ${text}`);
 
@@ -139,7 +146,7 @@ export const installLib = async (config: Config, repo: string, installDir: strin
  * Checks which libraries are missing and generates clone + build steps for each.
  * Order: libecs-cpp first, then libthe-seed (compile-time dependency).
  */
-export const getInstallSteps = (config: Config, target: string): BuildStep[] => {
+export const getInstallSteps = (config: Config, target: string, jobs: number = processorCount()): BuildStep[] => {
   const targetDir = targets[target];
   const prefix = config.config.prefix + "/" + targetDir;
   const steps: BuildStep[] = [];
@@ -155,7 +162,7 @@ export const getInstallSteps = (config: Config, target: string): BuildStep[] => 
       continue;
     }
 
-    steps.push(...getLibrarySteps(lib.name, lib.repo, lib.installDir, prefix, target));
+    steps.push(...getLibrarySteps(lib.name, lib.repo, lib.installDir, prefix, target, jobs));
   }
 
   return steps;
