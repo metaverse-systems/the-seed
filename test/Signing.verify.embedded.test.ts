@@ -2,6 +2,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import Signing from "../src/Signing";
+import { SigningManifestFormat } from "../src/types";
+import { expectPresent } from "./helpers/Assert";
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "signing-verify-test-"));
@@ -23,8 +25,11 @@ function writeConfig(configDir: string, data: { scope?: string; name?: string; e
   fs.writeFileSync(configPath, JSON.stringify({ prefix: "", scopes }, null, 2));
 }
 
+const configDirs: string[] = [];
+
 function fixturePath(name: string): string {
-  return path.join(__dirname, "fixtures", "binaries", name);
+  const directory = name.startsWith("tiny-macho-") ? path.join("binaries", "genuine") : "binaries";
+  return path.join(__dirname, "fixtures", directory, name);
 }
 
 function copyFixture(name: string, destDir: string): string {
@@ -36,6 +41,7 @@ function copyFixture(name: string, destDir: string): string {
 
 async function setupSigning(): Promise<{ signing: Signing; configDir: string; scope: string }> {
   const configDir = createTempDir();
+  configDirs.push(configDir);
   const scope = "@test";
   writeConfig(configDir, { scope, name: "Test User", email: "test@test.com" });
   const signing = new Signing(configDir);
@@ -64,12 +70,18 @@ describe("verifyFile (embedded auto-detection)", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  afterAll(() => {
+    for (const dir of configDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("verifies an embedded Authenticode-signed PE file", async () => {
     const peFile = copyFixture("tiny.exe", tempDir);
     await signing.signFile(peFile, { scope });
 
     const result = await signing.verifyFile(peFile);
-    expect(result.valid).toBe(true);
+    expect(result.status).toBe("VALID");
     expect(result.signatureType).toBe("embedded");
   });
 
@@ -78,7 +90,7 @@ describe("verifyFile (embedded auto-detection)", () => {
     await signing.signFile(peFile, { scope, detached: true });
 
     const result = await signing.verifyFile(peFile);
-    expect(result.valid).toBe(true);
+    expect(result.status).toBe("VALID");
     expect(result.signatureType).toBe("detached");
   });
 
@@ -87,7 +99,7 @@ describe("verifyFile (embedded auto-detection)", () => {
     await signing.signFile(machoFile, { scope });
 
     const result = await signing.verifyFile(machoFile);
-    expect(result.valid).toBe(true);
+    expect(result.status).toBe("VALID");
     expect(result.signatureType).toBe("embedded");
   });
 
@@ -112,13 +124,13 @@ describe("verifyFile (embedded auto-detection)", () => {
   it("returns invalid for unsigned PE file", async () => {
     const peFile = copyFixture("tiny.exe", tempDir);
     const result = await signing.verifyFile(peFile);
-    expect(result.valid).toBe(false);
+    expect(result.status).toBe("NOT_FOUND");
   });
 
   it("returns invalid for unsigned Mach-O file", async () => {
     const machoFile = copyFixture("tiny-macho-x86_64", tempDir);
     const result = await signing.verifyFile(machoFile);
-    expect(result.valid).toBe(false);
+    expect(result.status).toBe("NOT_FOUND");
   });
 });
 
@@ -143,20 +155,26 @@ describe("verifyFileAuthenticode", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  afterAll(() => {
+    for (const dir of configDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("verifies a signed PE file", async () => {
     const peFile = copyFixture("tiny.exe", tempDir);
     await signing.signFileAuthenticode(peFile, scope);
 
     const result = await signing.verifyFileAuthenticode(peFile);
-    expect(result.valid).toBe(true);
+    expect(result.status).toBe("VALID");
     expect(result.signatureType).toBe("embedded");
-    expect(result.fingerprint).toMatch(/^SHA256:/);
+    expect(expectPresent(result.signer, "signer").fingerprint).toMatch(/^SHA256:/);
   });
 
   it("returns invalid for an unsigned PE file", async () => {
     const peFile = copyFixture("tiny.exe", tempDir);
     const result = await signing.verifyFileAuthenticode(peFile);
-    expect(result.valid).toBe(false);
+    expect(result.status).toBe("NOT_FOUND");
   });
 
   it("detects tampering after signing", async () => {
@@ -172,7 +190,7 @@ describe("verifyFileAuthenticode", () => {
     fs.closeSync(fd);
 
     const result = await signing.verifyFileAuthenticode(peFile);
-    expect(result.valid).toBe(false);
+    expect(result.status).toBe("INVALID");
   });
 });
 
@@ -197,19 +215,25 @@ describe("verifyFileMachO", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  afterAll(() => {
+    for (const dir of configDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("verifies a signed Mach-O file", async () => {
     const machoFile = copyFixture("tiny-macho-x86_64", tempDir);
     await signing.signFileMachO(machoFile, scope);
 
     const result = await signing.verifyFileMachO(machoFile);
-    expect(result.valid).toBe(true);
+    expect(result.status).toBe("VALID");
     expect(result.signatureType).toBe("embedded");
   });
 
   it("returns invalid for an unsigned Mach-O file", async () => {
     const machoFile = copyFixture("tiny-macho-x86_64", tempDir);
     const result = await signing.verifyFileMachO(machoFile);
-    expect(result.valid).toBe(false);
+    expect(result.status).toBe("NOT_FOUND");
   });
 });
 
@@ -234,6 +258,12 @@ describe("signDirectory with mixed formats", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  afterAll(() => {
+    for (const dir of configDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("generates a v2 manifest with mixed signatureTypes", async () => {
     const dir = path.join(tempDir, "mixed-project");
     fs.mkdirSync(dir, { recursive: true });
@@ -250,27 +280,24 @@ describe("signDirectory with mixed formats", () => {
     expect(result.manifestPath).toBeTruthy();
     expect(fs.existsSync(result.manifestPath)).toBe(true);
 
-    const manifest: { version: number; entries: Array<{ file: string; signatureType: string; signatureFile: string | null }> } =
-      JSON.parse(fs.readFileSync(result.manifestPath, "utf-8"));
+    const manifest = JSON.parse(fs.readFileSync(result.manifestPath, "utf-8")) as SigningManifestFormat;
 
     expect(manifest.version).toBe(2);
 
     // Check that PE and Mach-O entries have embedded signatureType
-    const peEntry = manifest.entries.find(e => e.file.includes("tiny.exe"));
+    const peEntry = manifest.files.find(e => e.path.includes("tiny.exe"));
     expect(peEntry).toBeDefined();
     expect(peEntry!.signatureType).toBe("embedded");
     expect(peEntry!.signatureFile).toBeNull();
 
-    const machoEntry = manifest.entries.find(e => e.file.includes("tiny-macho-x86_64"));
+    const machoEntry = manifest.files.find(e => e.path.includes("tiny-macho-x86_64"));
     expect(machoEntry).toBeDefined();
     expect(machoEntry!.signatureType).toBe("embedded");
     expect(machoEntry!.signatureFile).toBeNull();
 
-    // Plain text file should have detached signatureType
-    const txtEntry = manifest.entries.find(e => e.file.includes("readme.txt"));
-    expect(txtEntry).toBeDefined();
-    expect(txtEntry!.signatureType).toBe("detached");
-    expect(txtEntry!.signatureFile).not.toBeNull();
+    // The tool skips non-binary files in a directory: no manifest entry, listed as skipped
+    expect(manifest.files.find(e => e.path.includes("readme.txt"))).toBeUndefined();
+    expect(result.skipped.some(f => f.includes("readme.txt"))).toBe(true);
   });
 
   it("verifyDirectory succeeds after signDirectory with mixed formats", async () => {
@@ -283,8 +310,10 @@ describe("signDirectory with mixed formats", () => {
     await signing.signDirectory(dir, { scope });
     const result = await signing.verifyDirectory(dir);
 
-    expect(result.valid).toBe(true);
-    expect(result.totalFiles).toBeGreaterThan(0);
-    expect(result.validFiles).toBe(result.totalFiles);
+    expect(result.overallPass).toBe(true);
+    expect(result.results.length).toBeGreaterThan(0);
+    expect(result.passed).toBe(result.results.length);
+    expect(result.failed).toBe(0);
+    expect(result.notFound).toBe(0);
   });
 });

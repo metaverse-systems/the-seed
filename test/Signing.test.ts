@@ -4,6 +4,7 @@ import path from "path";
 import crypto from "crypto";
 import Signing from "../src/Signing";
 import Config from "../src/Config";
+import { expectPresent } from "./helpers/Assert";
 import {
   CertInfo,
   SigFileFormat,
@@ -220,7 +221,7 @@ describe("Signing", () => {
       expect(result.fingerprint).toMatch(/^SHA256:/);
 
       // .sig file should be valid JSON with expected fields
-      const sigContent = JSON.parse(fs.readFileSync(result.signaturePath, "utf-8")) as SigFileFormat;
+      const sigContent = JSON.parse(fs.readFileSync(expectPresent(result.signaturePath, "signaturePath"), "utf-8")) as SigFileFormat;
       expect(sigContent.version).toBe(1);
       expect(sigContent.algorithm).toBe("SHA256");
       expect(sigContent.curve).toBe("P-256");
@@ -267,7 +268,7 @@ describe("Signing", () => {
       // manifest should exist
       expect(fs.existsSync(result.manifestPath)).toBe(true);
       const manifest = JSON.parse(fs.readFileSync(result.manifestPath, "utf-8")) as SigningManifestFormat;
-      expect(manifest.version).toBe(1);
+      expect(manifest.version).toBe(2);
       expect(manifest.files.length).toBe(2);
       expect(manifest.certificate).toContain("-----BEGIN CERTIFICATE-----");
       expect(manifest.certificateFingerprint).toMatch(/^SHA256:/);
@@ -275,7 +276,7 @@ describe("Signing", () => {
       // signed files should have .sig
       expect(result.signed.length).toBe(2);
       for (const s of result.signed) {
-        expect(fs.existsSync(s.signaturePath)).toBe(true);
+        expect(fs.existsSync(expectPresent(s.signaturePath, "signaturePath"))).toBe(true);
       }
     });
 

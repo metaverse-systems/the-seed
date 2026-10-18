@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import * as runChecks from "../scripts/run-checks";
 import { KnownGapEntry, runKnownGap, itKnownGap, staleMessage } from "./helpers/KnownGap";
+import { expectPresent } from "./helpers/Assert";
 
 // Expected shapes of the runner's pure functions, as exercised here:
 //   summariseResults(jest, entries) -> { lines: string[], failed: boolean }
@@ -391,5 +392,23 @@ describe("runKnownGap", () => {
     expect(() => itKnownGap("no-such-gap", "does not matter", () => undefined)).toThrow(
       "MALFORMED KNOWN GAP: unknown id \"no-such-gap\"",
     );
+  });
+});
+
+describe("expectPresent", () => {
+  it("returns a present value unchanged, including falsy ones", () => {
+    const object = { a: 1 };
+    expect(expectPresent(object, "object")).toBe(object);
+    expect(expectPresent(0, "number")).toBe(0);
+    expect(expectPresent("", "text")).toBe("");
+    expect(expectPresent(false, "flag")).toBe(false);
+  });
+
+  it("fails with \"<what> is missing\" for null", () => {
+    expect(() => expectPresent(null, "signaturePath")).toThrow("signaturePath is missing");
+  });
+
+  it("fails with \"<what> is missing\" for undefined", () => {
+    expect(() => expectPresent(undefined, "signer")).toThrow("signer is missing");
   });
 });
