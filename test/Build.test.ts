@@ -12,11 +12,14 @@ jest.mock("child_process", () => ({
 jest.mock("../src/ProcessRunner", () => ({
   ...jest.requireActual("../src/ProcessRunner"),
   runCommand: jest.fn(),
+  // The resolved tool path is "/mock/bin/<name>"; stripBinaries is expected to run that path.
+  findOnPath: jest.fn((name: string) => "/mock/bin/" + name),
 }));
 
 import { execSync } from "child_process";
-import { runCommand, CommandResult } from "../src/ProcessRunner";
+import { runCommand, findOnPath, formatCommand, CommandResult } from "../src/ProcessRunner";
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
+const mockedFindOnPath = findOnPath as jest.MockedFunction<typeof findOnPath>;
 const mockedRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
 
 function commandResult(overrides: Partial<CommandResult> = {}): CommandResult {
@@ -142,9 +145,16 @@ describe("test Build", () => {
   });
 
   describe("getSteps", () => {
+    const prefix = () => config.config.prefix;
+
+    function stepOf(steps: BuildStep[], label: string): BuildStep {
+      const step = steps.find((s) => s.label === label);
+      expect(step).toBeDefined();
+      return step!;
+    }
+
     it("returns 5 steps for full native build", () => {
       const steps: BuildStep[] = build.getSteps("native", true);
-      expect(steps).toHaveLength(5);
       expect(steps.map(s => s.label)).toEqual([
         "autogen", "distclean", "configure", "compile", "install"
       ]);
@@ -152,7 +162,6 @@ describe("test Build", () => {
 
     it("returns 5 steps for full windows build", () => {
       const steps: BuildStep[] = build.getSteps("windows", true);
-      expect(steps).toHaveLength(5);
       expect(steps.map(s => s.label)).toEqual([
         "autogen", "distclean", "configure", "compile", "install"
       ]);
@@ -160,82 +169,74 @@ describe("test Build", () => {
 
     it("returns 2 steps for incremental build (fullReconfigure=false)", () => {
       const steps: BuildStep[] = build.getSteps("native", false);
-      expect(steps).toHaveLength(2);
       expect(steps.map(s => s.label)).toEqual(["compile", "install"]);
-    });
-
-    it("native configure step does not contain --host flag", () => {
-      const steps = build.getSteps("native", true);
-      const configureStep = steps.find(s => s.label === "configure");
-      expect(configureStep).toBeDefined();
-      expect(configureStep!.command).not.toContain("--host");
-    });
-
-    it("windows configure step contains --host=x86_64-w64-mingw32", () => {
-      const steps = build.getSteps("windows", true);
-      const configureStep = steps.find(s => s.label === "configure");
-      expect(configureStep).toBeDefined();
-      expect(configureStep!.command).toContain("--host=x86_64-w64-mingw32");
-    });
-
-    it("distclean step has ignoreExitCode set to true", () => {
-      const steps = build.getSteps("native", true);
-      const distcleanStep = steps.find(s => s.label === "distclean");
-      expect(distcleanStep).toBeDefined();
-      expect(distcleanStep!.ignoreExitCode).toBe(true);
-    });
-
-    it("non-distclean steps do not have ignoreExitCode set to true", () => {
-      const steps = build.getSteps("native", true);
-      const nonDistclean = steps.filter(s => s.label !== "distclean");
-      for (const step of nonDistclean) {
-        expect(step.ignoreExitCode).toBeFalsy();
-      }
-    });
-
-    it("configure step includes correct prefix path for native", () => {
-      const steps = build.getSteps("native", true);
-      const configureStep = steps.find(s => s.label === "configure");
-      const expectedPrefix = config.config.prefix + "/x86_64-linux-gnu";
-      expect(configureStep!.command).toContain("--prefix=" + expectedPrefix);
-      expect(configureStep!.command).toContain("PKG_CONFIG_PATH=" + expectedPrefix + "/lib/pkgconfig/");
-    });
-
-    it("configure step includes correct prefix path for windows", () => {
-      const steps = build.getSteps("windows", true);
-      const configureStep = steps.find(s => s.label === "configure");
-      const expectedPrefix = config.config.prefix + "/x86_64-w64-mingw32";
-      expect(configureStep!.command).toContain("--prefix=" + expectedPrefix);
-    });
-
-    it("autogen step command is ./autogen.sh", () => {
-      const steps = build.getSteps("native", true);
-      expect(steps[0].command).toBe("./autogen.sh");
-    });
-
-    it("compile step command is make -j", () => {
-      const steps = build.getSteps("native", true);
-      const compileStep = steps.find(s => s.label === "compile");
-      expect(compileStep!.command).toBe("make -j");
-    });
-
-    it("install step command is make install", () => {
-      const steps = build.getSteps("native", true);
-      const installStep = steps.find(s => s.label === "install");
-      expect(installStep!.command).toBe("make install");
     });
 
     it("incremental build for windows returns 2 steps", () => {
       const steps = build.getSteps("windows", false);
-      expect(steps).toHaveLength(2);
       expect(steps.map(s => s.label)).toEqual(["compile", "install"]);
+    });
+
+    it("autogen step runs ./autogen.sh with no arguments", () => {
+      const step = stepOf(build.getSteps("native", true), "autogen");
+      expect(step.program).toBe("./autogen.sh");
+      expect(step.args).toEqual([]);
+    });
+
+    it("distclean step runs make distclean and is the only step with ignoreExitCode", () => {
+      const steps = build.getSteps("native", true);
+      const distclean = stepOf(steps, "distclean");
+      expect(distclean.program).toBe("make");
+      expect(distclean.args).toEqual(["distclean"]);
+      expect(distclean.ignoreExitCode).toBe(true);
+      for (const step of steps.filter((s) => s.label !== "distclean")) {
+        expect(step.ignoreExitCode).toBeFalsy();
+      }
+    });
+
+    it("native configure step has the prefix argument, no --host and the prefix's pkgconfig path", () => {
+      const step = stepOf(build.getSteps("native", true), "configure");
+      const target = prefix() + "/x86_64-linux-gnu";
+      expect(step.program).toBe("./configure");
+      expect(step.args).toEqual(["--prefix=" + target]);
+      expect(step.env).toEqual({ PKG_CONFIG_PATH: path.join(target, "lib/pkgconfig") });
+    });
+
+    it("windows configure step adds --host=x86_64-w64-mingw32", () => {
+      const step = stepOf(build.getSteps("windows", true), "configure");
+      const target = prefix() + "/x86_64-w64-mingw32";
+      expect(step.program).toBe("./configure");
+      expect(step.args).toEqual(["--prefix=" + target, "--host=x86_64-w64-mingw32"]);
+      expect(step.env).toEqual({ PKG_CONFIG_PATH: path.join(target, "lib/pkgconfig") });
+    });
+
+    it("keeps a prefix with a space, quote, double quote and dollar as one unmodified argument", () => {
+      const awkward = "/tmp/my prefix/it's \"x\" $HOME";
+      const awkwardConfig = new Config(configDir);
+      awkwardConfig.config.prefix = awkward;
+      const step = stepOf(new Build(awkwardConfig).getSteps("native", true), "configure");
+      expect(step.args).toEqual(["--prefix=" + awkward + "/x86_64-linux-gnu"]);
+      expect(step.args).toHaveLength(1);
+    });
+
+    it("compile step is make -j without jobs", () => {
+      const step = stepOf(build.getSteps("native", true), "compile");
+      expect(step.program).toBe("make");
+      expect(step.args).toEqual(["-j"]);
+    });
+
+    it("install step is make install", () => {
+      const step = stepOf(build.getSteps("native", true), "install");
+      expect(step.program).toBe("make");
+      expect(step.args).toEqual(["install"]);
     });
 
     it("keeps make -j for every target and mode when jobs is not given", () => {
       for (const target of ["native", "windows"]) {
         for (const fullReconfigure of [true, false]) {
-          const compileStep = build.getSteps(target, fullReconfigure).find(s => s.label === "compile");
-          expect(compileStep!.command).toBe("make -j");
+          const compileStep = stepOf(build.getSteps(target, fullReconfigure), "compile");
+          expect(compileStep.program).toBe("make");
+          expect(compileStep.args).toEqual(["-j"]);
         }
       }
     });
@@ -248,10 +249,23 @@ describe("test Build", () => {
           expect(bounded).toHaveLength(unbounded.length);
           for (let i = 0; i < bounded.length; i++) {
             if (bounded[i].label === "compile") {
-              expect(bounded[i].command).toBe("make -j3");
+              expect(bounded[i].program).toBe("make");
+              expect(bounded[i].args).toEqual(["-j3"]);
             } else {
               expect(bounded[i]).toEqual(unbounded[i]);
             }
+          }
+        }
+      }
+    });
+
+    it("gives no step a command field", () => {
+      for (const target of ["native", "windows"]) {
+        for (const fullReconfigure of [true, false]) {
+          for (const step of build.getSteps(target, fullReconfigure)) {
+            expect(step).not.toHaveProperty("command");
+            expect(typeof step.program).toBe("string");
+            expect(Array.isArray(step.args)).toBe(true);
           }
         }
       }
@@ -357,8 +371,9 @@ describe("isBinaryByMagic", () => {
 describe("stripBinaries", () => {
   let tmpDir: string;
 
-  function runCommandCalls(): string[] {
-    return mockedRunCommand.mock.calls.map((call) => String(call[0]));
+  // [program, args] of every runCommand call
+  function runCommandCalls(): Array<[string, string[]]> {
+    return mockedRunCommand.mock.calls.map((call) => [String(call[0]), call[1] as string[]]);
   }
 
   beforeEach(() => {
@@ -366,6 +381,7 @@ describe("stripBinaries", () => {
     mockedExecSync.mockClear();
     mockedRunCommand.mockReset();
     mockedRunCommand.mockResolvedValue(commandResult());
+    mockedFindOnPath.mockClear();
   });
 
   afterEach(() => {
@@ -381,28 +397,27 @@ describe("stripBinaries", () => {
   }
 
   it("throws if strip tool is not found", async () => {
-    mockedRunCommand.mockImplementation(async (cmd: string) =>
-      cmd.includes("command -v") ? commandResult({ exitCode: 1 }) : commandResult()
-    );
+    writeElf("libfoo.so");
+    mockedFindOnPath.mockReturnValueOnce(null);
 
     await expect(stripBinaries(tmpDir, "native")).rejects.toThrow(
       "Strip tool 'strip' not found on this system"
     );
+    expect(mockedRunCommand).not.toHaveBeenCalled();
   });
 
   it("throws if strip tool not found for windows target", async () => {
-    mockedRunCommand.mockImplementation(async (cmd: string) =>
-      cmd.includes("command -v") ? commandResult({ exitCode: 1 }) : commandResult()
-    );
+    mockedFindOnPath.mockReturnValueOnce(null);
 
     await expect(stripBinaries(tmpDir, "windows")).rejects.toThrow(
       "x86_64-w64-mingw32-strip"
     );
   });
 
-  it("checks for the strip tool through the process runner", async () => {
+  it("looks the strip tool up with findOnPath and starts no shell", async () => {
     await stripBinaries(tmpDir, "native");
-    expect(runCommandCalls()[0]).toBe("command -v strip");
+    expect(mockedFindOnPath).toHaveBeenCalledWith("strip");
+    expect(runCommandCalls()).toEqual([]);
     expect(mockedExecSync).not.toHaveBeenCalled();
   });
 
@@ -425,8 +440,7 @@ describe("stripBinaries", () => {
     expect(result.stripTool).toBe("strip");
 
     // Verify strip --strip-unneeded was called
-    const stripCalls = runCommandCalls().filter((cmd) => cmd.includes("strip --strip-unneeded"));
-    expect(stripCalls).toEqual([`strip --strip-unneeded ${elfFile}`]);
+    expect(runCommandCalls()).toEqual([["/mock/bin/strip", ["--strip-unneeded", elfFile]]]);
     expect(mockedExecSync).not.toHaveBeenCalled();
   });
 
@@ -444,10 +458,10 @@ describe("stripBinaries", () => {
     expect(result.stripTool).toBe("x86_64-w64-mingw32-strip");
 
     // Verify the correct strip tool was used
-    const stripCalls = runCommandCalls().filter(
-      (cmd) => cmd.includes("x86_64-w64-mingw32-strip --strip-unneeded")
-    );
-    expect(stripCalls.length).toBe(1);
+    expect(mockedFindOnPath).toHaveBeenCalledWith("x86_64-w64-mingw32-strip");
+    expect(runCommandCalls()).toEqual([
+      ["/mock/bin/x86_64-w64-mingw32-strip", ["--strip-unneeded", peFile]],
+    ]);
   });
 
   it("skips non-binary files silently", async () => {
@@ -467,14 +481,12 @@ describe("stripBinaries", () => {
   it("throws when strip fails on a file", async () => {
     const elfFile = writeElf("libfoo.so");
 
-    mockedRunCommand.mockImplementation(async (cmd: string) =>
-      cmd.includes("strip --strip-unneeded")
-        ? commandResult({ exitCode: 1, stderr: "File format not recognized\n" })
-        : commandResult()
+    mockedRunCommand.mockResolvedValue(
+      commandResult({ exitCode: 1, stderr: "File format not recognized\n" })
     );
 
     await expect(stripBinaries(tmpDir, "native")).rejects.toThrow(
-      `strip failed on src/.libs/libfoo.so: Command failed: strip --strip-unneeded ${elfFile}\nFile format not recognized\n`
+      `strip failed on src/.libs/libfoo.so: Command failed: ${formatCommand("/mock/bin/strip", ["--strip-unneeded", elfFile])}\nFile format not recognized\n`
     );
   });
 
@@ -485,9 +497,9 @@ describe("stripBinaries", () => {
 
     await stripBinaries(tmpDir, "native", controller.signal);
 
-    expect(mockedRunCommand).toHaveBeenCalledTimes(3);
+    expect(mockedRunCommand).toHaveBeenCalledTimes(2);
     for (const call of mockedRunCommand.mock.calls) {
-      expect(call[1]).toEqual(expect.objectContaining({ signal: controller.signal }));
+      expect(call[2]).toEqual(expect.objectContaining({ signal: controller.signal }));
     }
   });
 
@@ -498,8 +510,8 @@ describe("stripBinaries", () => {
     const controller = new AbortController();
 
     let stripCount = 0;
-    mockedRunCommand.mockImplementation(async (cmd: string) => {
-      if (cmd.includes("--strip-unneeded")) {
+    mockedRunCommand.mockImplementation(async (_program: string, args: string[]) => {
+      if (args.includes("--strip-unneeded")) {
         stripCount++;
         controller.abort();
       }

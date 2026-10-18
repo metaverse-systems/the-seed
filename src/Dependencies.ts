@@ -121,17 +121,16 @@ export const getInstallSteps = (config: Config, target: string): BuildStep[] => 
       continue;
     }
 
-    const hostFlag = target !== "native" ? " --host=" + targetDir : "";
-
     if (fs.existsSync(lib.installDir)) {
-      steps.push({ label: `update ${lib.name}`, command: `git -C ${lib.installDir} pull --ff-only` });
+      steps.push({ label: `update ${lib.name}`, program: "git", args: ["-C", lib.installDir, "pull", "--ff-only"] });
     } else {
-      steps.push({ label: `clone ${lib.name}`, command: `git clone ${lib.repo}` });
+      steps.push({ label: `clone ${lib.name}`, program: "git", args: ["clone", lib.repo, lib.installDir] });
     }
-    steps.push({ label: `${lib.name} autogen`, command: `cd ${lib.installDir} && ./autogen.sh` });
-    steps.push({ label: `${lib.name} configure`, command: `cd ${lib.installDir} && ./configure --prefix=${prefix}${hostFlag}` });
-    steps.push({ label: `${lib.name} compile`, command: `cd ${lib.installDir} && make` });
-    steps.push({ label: `${lib.name} install`, command: `cd ${lib.installDir} && make install` });
+    const hostArgs = target !== "native" ? ["--host=" + targetDir] : [];
+    steps.push({ label: `${lib.name} autogen`, program: "./autogen.sh", args: [], cwd: lib.installDir });
+    steps.push({ label: `${lib.name} configure`, program: "./configure", args: [`--prefix=${prefix}`, ...hostArgs], cwd: lib.installDir });
+    steps.push({ label: `${lib.name} compile`, program: "make", args: [], cwd: lib.installDir });
+    steps.push({ label: `${lib.name} install`, program: "make", args: ["install"], cwd: lib.installDir });
   }
 
   return steps;

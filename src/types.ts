@@ -65,8 +65,14 @@ export interface DependencyResultType {
 export interface BuildStep {
   /** Human-readable step name (e.g., 'autogen', 'configure', 'compile', 'install') */
   label: string;
-  /** Shell command to execute */
-  command: string;
+  /** Program to run; never interpreted by a shell */
+  program: string;
+  /** Arguments passed to the program as they are */
+  args: string[];
+  /** Working directory, relative to the project directory; the project directory when omitted */
+  cwd?: string;
+  /** Environment values laid over the inherited environment */
+  env?: Record<string, string>;
   /** If true, non-zero exit codes do not abort the build (used for 'make distclean') */
   ignoreExitCode?: boolean;
 }

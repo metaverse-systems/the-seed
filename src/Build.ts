@@ -4,7 +4,7 @@ import Config from "./Config";
 import { execSync } from "child_process";
 import { BuildStep, StripResult } from "./types";
 import Signing from "./Signing";
-import { runCommand, commandFailedMessage } from "./ProcessRunner";
+import { runCommand, commandFailedMessage, findOnPath, formatCommand } from "./ProcessRunner";
 
 export const targets: {
   [key: string]: string;
@@ -107,40 +107,24 @@ class Build {
     const steps: BuildStep[] = [];
 
     if (fullReconfigure) {
-      steps.push({
-        label: "autogen",
-        command: "./autogen.sh",
-      });
+      steps.push({ label: "autogen", program: "./autogen.sh", args: [] });
 
-      steps.push({
-        label: "distclean",
-        command: "make distclean",
-        ignoreExitCode: true,
-      });
-
-      const configureCommand =
-        "PKG_CONFIG_PATH=" +
-        prefix +
-        "/lib/pkgconfig/ " +
-        "./configure --prefix=" +
-        prefix +
-        (target === "windows" ? " --host=" + targets["windows"] : "");
+      steps.push({ label: "distclean", program: "make", args: ["distclean"], ignoreExitCode: true });
 
       steps.push({
         label: "configure",
-        command: configureCommand,
+        program: "./configure",
+        args: [
+          "--prefix=" + prefix,
+          ...(target === "windows" ? ["--host=" + targets["windows"]] : []),
+        ],
+        env: { PKG_CONFIG_PATH: path.join(prefix, "lib/pkgconfig") },
       });
     }
 
-    steps.push({
-      label: "compile",
-      command: jobs === undefined ? "make -j" : `make -j${jobs}`,
-    });
+    steps.push({ label: "compile", program: "make", args: [jobs === undefined ? "-j" : `-j${jobs}`] });
 
-    steps.push({
-      label: "install",
-      command: "make install",
-    });
+    steps.push({ label: "install", program: "make", args: ["install"] });
 
     return steps;
   };
@@ -325,15 +309,11 @@ export async function stripBinaries(
 ): Promise<StripResult> {
   const stripTool = getStripTool(target);
 
-  // Verify strip tool exists
-  const probe = await runCommand(`command -v ${stripTool}`, { signal });
-  if (probe.killed) {
-    throw new Error("Strip cancelled");
-  }
-  if (probe.exitCode !== 0) {
+  const toolPath = findOnPath(stripTool);
+  if (toolPath === null) {
     const hint = target === "windows"
       ? "\nInstall the MinGW binutils package (e.g., binutils-mingw-w64-x86-64) and try again."
-      : "";
+      : "\nInstall binutils (for example the binutils package) and try again.";
     throw new Error(`Strip tool '${stripTool}' not found on this system.${hint}`);
   }
 
@@ -358,15 +338,15 @@ export async function stripBinaries(
     // Completes the line begun above, or reports it whole to the logger.
     const finishLine = (status: string) => (log ? log(`Stripping ${rel}... ${status}`) : console.log(status));
 
-    const command = `${stripTool} --strip-unneeded ${filePath}`;
-    const result = await runCommand(command, { signal });
+    const stripArgs = ["--strip-unneeded", filePath];
+    const result = await runCommand(toolPath, stripArgs, { signal });
     if (result.killed) {
       finishLine("cancelled");
       throw new Error("Strip cancelled");
     }
     if (result.exitCode !== 0) {
       finishLine("FAILED");
-      throw new Error(`strip failed on ${rel}: ${commandFailedMessage(command, result.stderr)}`);
+      throw new Error(`strip failed on ${rel}: ${commandFailedMessage(formatCommand(toolPath, stripArgs), result.stderr)}`);
     }
     finishLine("done");
     strippedFiles.push(filePath);

@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import Config from "../src/Config";
+import { BuildStep } from "../src/types";
 import {
   checkLib,
   checkLibEcs,
@@ -231,14 +232,85 @@ describe("test Dependencies", () => {
     it("getInstallSteps includes a library whose installed version is too old", () => {
       installed({ "ecs-cpp": requiredLibEcsVersion, "the-seed": "0.7.0" });
       const steps = getInstallSteps(config, "native");
-      const commands = steps.map((step) => step.command).join("\n");
-      expect(commands).toContain("libthe-seed");
-      expect(commands).not.toContain("libecs-cpp");
+      const labels = steps.map((step) => step.label).join("\n");
+      expect(labels).toContain("libthe-seed");
+      expect(labels).not.toContain("libecs-cpp");
     });
 
     it("getInstallSteps is empty when both libraries are current", () => {
       installed({ "ecs-cpp": requiredLibEcsVersion, "the-seed": requiredLibTheSeedVersion });
       expect(getInstallSteps(config, "native")).toEqual([]);
+    });
+  });
+
+  describe("getInstallSteps structured steps", () => {
+    beforeEach(() => {
+      // No library is installed: every pkg-config query fails
+      mockedExecSync.mockImplementation((() => {
+        throw new Error("No package found");
+      }) as unknown as typeof execSync);
+    });
+
+    const forLib = (steps: BuildStep[], name: string) =>
+      steps.filter((step) => step.label.includes(name));
+
+    it("lists clone, autogen, configure, compile and install for each library with unchanged labels", () => {
+      const steps = getInstallSteps(config, "native");
+      expect(steps.map((step) => step.label)).toEqual([
+        "clone libecs-cpp", "libecs-cpp autogen", "libecs-cpp configure", "libecs-cpp compile", "libecs-cpp install",
+        "clone libthe-seed", "libthe-seed autogen", "libthe-seed configure", "libthe-seed compile", "libthe-seed install",
+      ]);
+    });
+
+    it("clones a repository into the named directory", () => {
+      const steps = getInstallSteps(config, "native");
+      for (const lib of ["libecs-cpp", "libthe-seed"]) {
+        const clone = steps.find((step) => step.label === "clone " + lib)!;
+        expect(clone.program).toBe("git");
+        expect(clone.args).toEqual(["clone", expect.stringContaining(lib), lib]);
+        expect(clone).not.toHaveProperty("command");
+      }
+    });
+
+    it("pulls an existing directory with git -C", () => {
+      const existsSpy = jest.spyOn(fs, "existsSync").mockImplementation(
+        (target: fs.PathLike) => path.basename(String(target)) === "libecs-cpp"
+      );
+      try {
+        const update = getInstallSteps(config, "native").find((step) => step.label === "update libecs-cpp")!;
+        expect(update.program).toBe("git");
+        expect(update.args).toEqual(["-C", "libecs-cpp", "pull", "--ff-only"]);
+      } finally {
+        existsSpy.mockRestore();
+      }
+    });
+
+    it("runs autogen, configure, compile and install with the library directory as cwd", () => {
+      const steps = getInstallSteps(config, "native");
+      const prefix = config.config.prefix + "/x86_64-linux-gnu";
+      for (const lib of ["libecs-cpp", "libthe-seed"]) {
+        const byLabel = (suffix: string) => steps.find((step) => step.label === `${lib} ${suffix}`)!;
+        expect(byLabel("autogen")).toMatchObject({ program: "./autogen.sh", args: [], cwd: lib });
+        expect(byLabel("configure")).toMatchObject({
+          program: "./configure",
+          args: ["--prefix=" + prefix],
+          cwd: lib,
+        });
+        expect(byLabel("compile")).toMatchObject({ program: "make", args: [], cwd: lib });
+        expect(byLabel("install")).toMatchObject({ program: "make", args: ["install"], cwd: lib });
+      }
+      for (const step of forLib(steps, "lib")) {
+        expect(step).not.toHaveProperty("command");
+      }
+    });
+
+    it("adds --host for the windows target", () => {
+      const steps = getInstallSteps(config, "windows");
+      const configure = steps.find((step) => step.label === "libecs-cpp configure")!;
+      expect(configure.args).toEqual([
+        "--prefix=" + config.config.prefix + "/x86_64-w64-mingw32",
+        "--host=x86_64-w64-mingw32",
+      ]);
     });
   });
 
@@ -297,12 +369,14 @@ describe("test Dependencies", () => {
         }
         throw new Error("No package found");
       }) as unknown as typeof execSync);
-      const steps = getInstallSteps(config, "native").map((step) => step.command);
-      const pull = steps.findIndex((command) => command.includes("git -C libthe-seed pull --ff-only"));
-      const compile = steps.findIndex((command) => /\bmake$/.test(command));
+      const steps = getInstallSteps(config, "native");
+      const pull = steps.findIndex(
+        (step) => step.program === "git" && step.args.join(" ") === "-C libthe-seed pull --ff-only"
+      );
+      const compile = steps.findIndex((step) => step.label === "libthe-seed compile");
       expect(pull).toBeGreaterThanOrEqual(0);
       expect(compile).toBeGreaterThan(pull);
-      expect(steps.some((command) => command.includes("git clone") && command.includes("libthe-seed"))).toBe(false);
+      expect(steps.some((step) => step.program === "git" && step.args[0] === "clone" && step.args.includes("libthe-seed"))).toBe(false);
     });
   });
 });

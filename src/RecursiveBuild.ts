@@ -1,6 +1,6 @@
 import Config from "./Config";
 import Build, { autoSignIfCertExists, stripBinaries } from "./Build";
-import { runCommand, formatFailureOutput } from "./ProcessRunner";
+import { runStep } from "./StepRunner";
 import {
   runSchedule,
   processorCount,
@@ -124,7 +124,7 @@ export async function buildRecursive(
 
   const processors = processorCount();
   const concurrency = Math.min(options.parallel ?? 1, processors);
-  const env = concurrency > 1 ? boundedEnv() : undefined;
+  const env = concurrency > 1 ? boundedEnv() : process.env;
 
   // Log build plan
   console.log(`Scanning dependencies for ${buildOrder[buildOrder.length - 1]?.name ?? "project"}...`);
@@ -174,39 +174,39 @@ export async function buildRecursive(
     const installSteps = installIndex === -1 ? [] : steps.slice(installIndex);
 
     // Runs one step; returns null when it succeeded or its failure was ignorable.
-    const runStep = async (step: BuildStep, stepSignal: AbortSignal): Promise<ProjectOutcome<StepFailure> | null> => {
+    const runProjectStep = async (step: BuildStep, stepSignal: AbortSignal): Promise<ProjectOutcome<StepFailure> | null> => {
       if (stepSignal.aborted) {
         return { status: "interrupted" };
       }
 
       progress(project, `${step.label}...`);
 
-      const run = await runCommand(step.command, { cwd: project.path, signal: stepSignal, env });
+      const stepResult = await runStep(step, {
+        baseDir: project.path,
+        baseEnv: env,
+        signal: stepSignal,
+        output: { mode: "capture" },
+      });
 
-      // A step stopped by cancellation is never a failure and never ignorable.
-      if (run.killed) {
-        return { status: "interrupted" };
-      }
-
-      if (run.exitCode !== 0) {
-        if (step.ignoreExitCode) {
-          // Step like 'make distclean' — ignore failures
+      switch (stepResult.status) {
+        case "interrupted":
+          // A step stopped by cancellation is never a failure and never ignorable.
+          return { status: "interrupted" };
+        case "failed":
+          return { status: "failed", failure: { step: step.label, output: stepResult.output } };
+        case "notFound":
+          return { status: "failed", failure: { step: step.label, output: stepResult.message } };
+        case "completed":
+        case "ignored":
           progress(project, `${step.label}... done`);
           callbacks?.onStepComplete?.(project, step);
           return null;
-        }
-        const output = formatFailureOutput(step.command, run.stdout, run.stderr);
-        return { status: "failed", failure: { step: step.label, output } };
       }
-
-      progress(project, `${step.label}... done`);
-      callbacks?.onStepComplete?.(project, step);
-      return null;
     };
 
-    const buildProject = async (): Promise<ProjectOutcome<StepFailure>> => {
+    const buildOneProject = async (): Promise<ProjectOutcome<StepFailure>> => {
       for (const step of buildSteps) {
-        const outcome = await runStep(step, context.signal);
+        const outcome = await runProjectStep(step, context.signal);
         if (outcome) return outcome;
       }
 
@@ -219,7 +219,7 @@ export async function buildRecursive(
       }
       return context.withInstallLock(async (installSignal): Promise<ProjectOutcome<StepFailure>> => {
         for (const step of installSteps) {
-          const stepOutcome = await runStep(step, installSignal);
+          const stepOutcome = await runProjectStep(step, installSignal);
           if (stepOutcome) return stepOutcome;
         }
 
@@ -235,9 +235,7 @@ export async function buildRecursive(
         }
 
         try {
-          const signConfig = new Config();
-          signConfig.loadConfig();
-          await autoSignIfCertExists(signConfig.configDir, project.path, log);
+          await autoSignIfCertExists(config.configDir, project.path, log);
         } catch (e: unknown) {
           return { status: "failed", failure: { step: "sign", output: (e as Error).message ?? String(e) } };
         }
@@ -248,7 +246,7 @@ export async function buildRecursive(
 
     let outcome: ProjectOutcome<StepFailure>;
     try {
-      outcome = await buildProject();
+      outcome = await buildOneProject();
     } catch (e: unknown) {
       // A cancellation withdrew this project's request for the install lock.
       if (!(e instanceof InstallCancelled)) throw e;
