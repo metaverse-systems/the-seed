@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { groupOutputs, outputKind, placeStaged, readStage, runInstallPhase, signOutputs, stripOutputs } from "../src/InstallPhase";
+import { buildTreeCopies, groupOutputs, outputKind, placeStaged, readStage, runInstallPhase, signOutputs, stripOutputs } from "../src/InstallPhase";
 import Signing from "../src/Signing";
 import { findOnPath } from "../src/ProcessRunner";
 import { InstallPhaseOptions, InstallPhaseResult, OutputGroup, SigningOutcome } from "../src/types";
@@ -26,6 +26,11 @@ import { InstallPhaseOptions, InstallPhaseResult, OutputGroup, SigningOutcome } 
 //   (signature files and links included); `report.stripped` and `report.signed[].display` hold the
 //   installed paths in the prefix. The fake `make` is found through `options.env.PATH`.
 // - The log line of a completed phase is `Installed <n> file(s) into <prefix>`.
+// - `buildTreeCopies(projectDir, stagedGroups, target)` is synchronous and returns `OutputGroup[]`; its
+//   `display` is the project-relative path of the group's `file` with "/" separators (`src/.libs/tiny`),
+//   and `file` is the first name in name order that is a regular file, as for staged groups.
+// - In `runInstallPhase`, `report.stripped` and `report.signed[].display` list the installed paths first
+//   and then the build-tree display paths; the `Signed (detached): <display>` lines are in the same order.
 
 const nativeTriplet = "x86_64-linux-gnu";
 const windowsTriplet = "x86_64-w64-mingw32";
@@ -498,6 +503,154 @@ describe("groupOutputs", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].file).toBe(path.join(s.root, "bin", "tiny"));
     expect(groups[0].display).toBe(path.join(s.configPrefix, nativeTriplet, "bin", "tiny"));
+  });
+});
+
+// ── buildTreeCopies ─────────────────────────────────────────
+
+describe("buildTreeCopies", () => {
+  /** A project directory next to a stage with the given staged outputs (relative to the prefix); returns both. */
+  function treeCase(target: "native" | "windows", staged: Array<[string, Buffer]>) {
+    const s = makeStage(target);
+    for (const [rel, content] of staged) {
+      writeFile(path.join(s.root, rel), content, 0o755);
+    }
+    const projectDir = path.join(s.base, "project");
+    fs.mkdirSync(path.join(projectDir, "src"), { recursive: true });
+    const stagedGroups = groupOutputs(readStage(s.stageDir, s.configPrefix, target));
+    return { s, projectDir, stagedGroups };
+  }
+
+  it("takes src/.libs/<name> and not the wrapper script in src/ (native)", () => {
+    const { projectDir, stagedGroups } = treeCase("native", [["bin/tiny", elfHeader(2, "installed")]]);
+    writeFile(path.join(projectDir, "src", ".libs", "tiny"), elfHeader(2, "built"), 0o755);
+    writeFile(path.join(projectDir, "src", "tiny"), shellScript, 0o755);
+
+    const groups = buildTreeCopies(projectDir, stagedGroups, "native");
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].file).toBe(path.join(projectDir, "src", ".libs", "tiny"));
+    expect(groups[0].kind).toBe("elfExecutable");
+    expect(groups[0].names).toEqual([path.join(projectDir, "src", ".libs", "tiny")]);
+    expect(groups[0].display).toBe("src/.libs/tiny");
+  });
+
+  it("takes src/.libs/<name> and not the PE wrapper program in src/ (windows)", () => {
+    const { projectDir, stagedGroups } = treeCase("windows", [["bin/tiny.exe", peHeader(0x22, "installed")]]);
+    writeFile(path.join(projectDir, "src", ".libs", "tiny.exe"), peHeader(0x22, "built"), 0o755);
+    // The libtool wrapper for a cross build is itself a PE program
+    writeFile(path.join(projectDir, "src", "tiny.exe"), peHeader(0x22, "wrapper"), 0o755);
+
+    const groups = buildTreeCopies(projectDir, stagedGroups, "windows");
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].file).toBe(path.join(projectDir, "src", ".libs", "tiny.exe"));
+    expect(groups[0].kind).toBe("peProgram");
+    expect(groups[0].display).toBe("src/.libs/tiny.exe");
+  });
+
+  it("falls back to src/<name> when src/.libs has no copy", () => {
+    const { projectDir, stagedGroups } = treeCase("native", [["bin/tiny", elfHeader(2, "installed")]]);
+    writeFile(path.join(projectDir, "src", "tiny"), elfHeader(2, "built"), 0o755);
+    fs.mkdirSync(path.join(projectDir, "src", ".libs"));
+
+    const groups = buildTreeCopies(projectDir, stagedGroups, "native");
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].file).toBe(path.join(projectDir, "src", "tiny"));
+    expect(groups[0].display).toBe("src/tiny");
+  });
+
+  it("falls back to src/<name> when src/.libs does not exist", () => {
+    const { projectDir, stagedGroups } = treeCase("native", [["bin/tiny", elfHeader(2, "installed")]]);
+    writeFile(path.join(projectDir, "src", "tiny"), elfHeader(2, "built"), 0o755);
+
+    const groups = buildTreeCopies(projectDir, stagedGroups, "native");
+
+    expect(groups.map((g) => g.display)).toEqual(["src/tiny"]);
+  });
+
+  it("drops copies that are not outputs and names with no build-tree copy", () => {
+    const { projectDir, stagedGroups } = treeCase("native", [
+      ["bin/tiny", elfHeader(2, "a")],
+      ["bin/script-tool", elfHeader(2, "b")],
+      ["lib/libx.so.0.0.0", elfHeader(3, "c")],
+      ["bin/missing", elfHeader(2, "d")],
+    ]);
+    writeFile(path.join(projectDir, "src", ".libs", "tiny"), elfHeader(2, "built"), 0o755);
+    // A script, an object file and an archive are not outputs
+    writeFile(path.join(projectDir, "src", ".libs", "script-tool"), shellScript, 0o755);
+    writeFile(path.join(projectDir, "src", ".libs", "libx.so.0.0.0"), arArchive);
+    // Files with no installed counterpart are never taken
+    writeFile(path.join(projectDir, "src", ".libs", "unrelated"), elfHeader(2, "e"), 0o755);
+
+    const groups = buildTreeCopies(projectDir, stagedGroups, "native");
+
+    expect(groups.map((g) => g.display)).toEqual(["src/.libs/tiny"]);
+  });
+
+  it("a PE copy is not an output for native and an ELF copy is not an output for windows", () => {
+    const native = treeCase("native", [["bin/tiny", elfHeader(2, "a")]]);
+    writeFile(path.join(native.projectDir, "src", ".libs", "tiny"), peHeader(0x22), 0o755);
+    expect(buildTreeCopies(native.projectDir, native.stagedGroups, "native")).toEqual([]);
+
+    const windows = treeCase("windows", [["bin/tiny.exe", peHeader(0x22, "a")]]);
+    writeFile(path.join(windows.projectDir, "src", ".libs", "tiny.exe"), elfHeader(2), 0o755);
+    expect(buildTreeCopies(windows.projectDir, windows.stagedGroups, "windows")).toEqual([]);
+  });
+
+  it("a link chain in src/.libs is one group with its links", () => {
+    const { s, projectDir, stagedGroups } = treeCase("native", [["lib/libx.so.0.0.0", elfHeader(3, "installed")]]);
+    fs.symlinkSync("libx.so.0.0.0", path.join(s.root, "lib", "libx.so.0"));
+    fs.symlinkSync("libx.so.0", path.join(s.root, "lib", "libx.so"));
+    const libs = path.join(projectDir, "src", ".libs");
+    writeFile(path.join(libs, "libx.so.0.0.0"), elfHeader(3, "built"), 0o755);
+    fs.symlinkSync("libx.so.0.0.0", path.join(libs, "libx.so.0"));
+    fs.symlinkSync("libx.so.0", path.join(libs, "libx.so"));
+    // libtool also leaves a .la file and a wrapper-free libx.a beside them; neither is an output
+    writeFile(path.join(libs, "libx.a"), arArchive);
+
+    const groups = buildTreeCopies(projectDir, groupOutputs(readStage(s.stageDir, s.configPrefix, "native")), "native");
+    expect(stagedGroups).toHaveLength(1);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].file).toBe(path.join(libs, "libx.so.0.0.0"));
+    expect([...groups[0].names].sort()).toEqual(
+      [path.join(libs, "libx.so"), path.join(libs, "libx.so.0"), path.join(libs, "libx.so.0.0.0")].sort()
+    );
+    expect([...groups[0].links].sort((a, b) => a.path.localeCompare(b.path))).toEqual([
+      { path: path.join(libs, "libx.so"), target: "libx.so.0" },
+      { path: path.join(libs, "libx.so.0"), target: "libx.so.0.0.0" },
+    ]);
+    expect(groups[0].display).toBe("src/.libs/libx.so.0.0.0");
+  });
+
+  it("looks at nothing outside src/ and src/.libs/", () => {
+    const { projectDir, stagedGroups } = treeCase("native", [
+      ["lib/libfoo.so.0.0.0", elfHeader(3, "installed")],
+      ["bin/tiny", elfHeader(2, "installed")],
+    ]);
+    writeFile(path.join(projectDir, "lib", "foo", ".libs", "libfoo.so.0.0.0"), elfHeader(3, "built"), 0o755);
+    writeFile(path.join(projectDir, "libfoo.so.0.0.0"), elfHeader(3, "top"), 0o755);
+    writeFile(path.join(projectDir, ".libs", "tiny"), elfHeader(2, "top"), 0o755);
+    writeFile(path.join(projectDir, "tiny"), elfHeader(2, "top"), 0o755);
+    writeFile(path.join(projectDir, "src", "sub", "tiny"), elfHeader(2, "deeper"), 0o755);
+    writeFile(path.join(projectDir, "src", "sub", ".libs", "tiny"), elfHeader(2, "deeper"), 0o755);
+
+    expect(buildTreeCopies(projectDir, stagedGroups, "native")).toEqual([]);
+  });
+
+  it("the display is project-relative also for a project directory with special characters", () => {
+    const s = makeStage("native");
+    writeFile(path.join(s.root, "bin", "tiny"), elfHeader(2, "installed"), 0o755);
+    const projectDir = path.join(s.base, specialName);
+    writeFile(path.join(projectDir, "src", ".libs", "tiny"), elfHeader(2, "built"), 0o755);
+
+    const groups = buildTreeCopies(projectDir, groupOutputs(readStage(s.stageDir, s.configPrefix, "native")), "native");
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].file).toBe(path.join(projectDir, "src", ".libs", "tiny"));
+    expect(groups[0].display).toBe("src/.libs/tiny");
   });
 });
 
@@ -1493,5 +1646,127 @@ describe("runInstallPhase", () => {
     expect(failed.step).toBe("install");
     expect(failed.output).toContain("make: *** deliberate failure");
     expect(fs.existsSync(path.join(c.prefix, "bin", "tiny"))).toBe(false);
+  });
+
+  // ── Build-tree copies ─────────────────────────────────────
+
+  /** A hand-made build-tree file under the case's project directory. */
+  function buildTreeFile(c: PhaseCase, rel: string, content: Buffer | string, mode = 0o755): string {
+    const file = path.join(c.projectDir, rel);
+    writeFile(file, content, mode);
+    return file;
+  }
+
+  it("strips and signs the build-tree copies after the staged ones, each as its own file", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    payload(c, "bin/tiny", elfHeader(2, "installed program"));
+    payload(c, "lib/libx.so.0.0.0", elfHeader(3, "installed library"));
+    fs.symlinkSync("libx.so.0.0.0", path.join(c.payloadRoot + c.prefix, "lib", "libx.so.0"));
+    const builtProgram = buildTreeFile(c, "src/.libs/tiny", elfHeader(2, "built program"));
+    const builtLibrary = buildTreeFile(c, "src/.libs/libx.so.0.0.0", elfHeader(3, "built library"));
+    fs.symlinkSync("libx.so.0.0.0", path.join(c.projectDir, "src", ".libs", "libx.so.0"));
+    // The wrapper script and a file with no installed counterpart are left alone
+    const wrapper = buildTreeFile(c, "src/tiny", shellScript);
+    buildTreeFile(c, "src/.libs/unrelated", elfHeader(2, "unrelated"));
+    fakeMake(c);
+
+    const result = expectCompleted(await runInstallPhase(options(c, { release: true, configDir: certDir })));
+
+    const stage = recorded(c).stage;
+    const stripped = strippedFiles(c.stripLog);
+    const stagedStripped = [path.join(stage + c.prefix, "bin", "tiny"), path.join(stage + c.prefix, "lib", "libx.so.0.0.0")];
+    expect(stripped.slice(0, 2).sort()).toEqual(stagedStripped.sort());
+    expect(stripped.slice(2).sort()).toEqual([builtLibrary, builtProgram].sort());
+    expect(stripped).toHaveLength(4);
+
+    // Installed display paths first, then project-relative ones, in the report and in the log
+    const installedDisplays = [path.join(c.prefix, "bin", "tiny"), path.join(c.prefix, "lib", "libx.so.0.0.0")];
+    const buildDisplays = ["src/.libs/libx.so.0.0.0", "src/.libs/tiny"];
+    expect(result.report.stripped.slice(0, 2).sort()).toEqual(installedDisplays.sort());
+    expect(result.report.stripped.slice(2).sort()).toEqual(buildDisplays);
+    expect(result.report.signed.slice(0, 2).map((entry) => entry.display).sort()).toEqual(installedDisplays.sort());
+    expect(result.report.signed.slice(2).map((entry) => entry.display).sort()).toEqual(buildDisplays);
+    const signedLines = c.lines.filter((line) => line.startsWith("Signed (detached): "));
+    expect(signedLines).toHaveLength(4);
+    expect(signedLines.slice(0, 2).every((line) => line.includes(c.prefix))).toBe(true);
+    expect(signedLines.slice(2).every((line) => line.startsWith("Signed (detached): src/.libs/"))).toBe(true);
+    expect(c.lines).toContain("Stripped 4 file(s)");
+    expect(c.lines).toContain("Auto-signed 4 file(s) using scope '@t'");
+
+    // Each copy has its own signature and verifies against its own bytes
+    const signing = new Signing(certDir);
+    for (const file of [path.join(c.prefix, "bin", "tiny"), path.join(c.prefix, "lib", "libx.so.0.0.0"), builtProgram, builtLibrary]) {
+      expect([file, fs.lstatSync(file + ".sig").isFile()]).toEqual([file, true]);
+      expect([file, (await signing.verifyFile(file)).status]).toEqual([file, "VALID"]);
+    }
+    expect(fs.readFileSync(builtProgram + ".sig").equals(fs.readFileSync(path.join(c.prefix, "bin", "tiny.sig")))).toBe(false);
+
+    // The build-tree signature links are written in the build tree
+    const libs = path.join(c.projectDir, "src", ".libs");
+    expect(fs.readlinkSync(path.join(libs, "libx.so.0.sig"))).toBe("libx.so.0.0.0.sig");
+    expect((await signing.verifyFile(path.join(libs, "libx.so.0"))).status).toBe("VALID");
+    expect(fs.readFileSync(wrapper, "utf8")).toBe(shellScript.toString());
+    expect(fs.existsSync(wrapper + ".sig")).toBe(false);
+    expect(fs.existsSync(path.join(libs, "unrelated.sig"))).toBe(false);
+  });
+
+  it("falls back to src/<name> for the build-tree copy and processes it", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    payload(c, "bin/tiny", elfHeader(2, "installed"));
+    const built = buildTreeFile(c, "src/tiny", elfHeader(2, "built"));
+    fakeMake(c);
+
+    const result = expectCompleted(await runInstallPhase(options(c, { release: true, configDir: certDir })));
+
+    expect(result.report.stripped).toEqual([path.join(c.prefix, "bin", "tiny"), "src/tiny"]);
+    expect(strippedFiles(c.stripLog).pop()).toBe(built);
+    expect((await new Signing(certDir).verifyFile(built)).status).toBe("VALID");
+  });
+
+  it("strips the build-tree copies of an unsigned project with release and leaves them unsigned", async () => {
+    const c = makeCase("native");
+    payload(c, "bin/tiny", elfHeader(2, "installed"));
+    const built = buildTreeFile(c, "src/.libs/tiny", elfHeader(2, "built"));
+    fakeMake(c);
+
+    const result = expectCompleted(await runInstallPhase(options(c, { release: true })));
+
+    expect(strippedFiles(c.stripLog).pop()).toBe(built);
+    expect(result.report.stripped).toEqual([path.join(c.prefix, "bin", "tiny"), "src/.libs/tiny"]);
+    expect(result.report.signed).toEqual([]);
+    expect(fs.existsSync(built + ".sig")).toBe(false);
+  });
+
+  it("does not strip the build-tree copies without release, but signs them", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    payload(c, "bin/tiny", elfHeader(2, "installed"));
+    const built = buildTreeFile(c, "src/.libs/tiny", elfHeader(2, "built"));
+    fakeMake(c);
+
+    const result = expectCompleted(await runInstallPhase(options(c, { release: false, configDir: certDir })));
+
+    expect(readLines(c.stripLog)).toEqual([]);
+    expect(result.report.stripped).toEqual([]);
+    expect(result.report.signed.map((entry) => entry.display)).toEqual([path.join(c.prefix, "bin", "tiny"), "src/.libs/tiny"]);
+    expect((await new Signing(certDir).verifyFile(built)).status).toBe("VALID");
+  });
+
+  it("does not touch build-tree outputs when the install step installed no program or library", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    payload(c, "include/x.h", "int x;\n", 0o644);
+    const built = buildTreeFile(c, "src/.libs/tiny", elfHeader(2, "built"));
+    const before = fs.readFileSync(built);
+    fakeMake(c);
+
+    const result = expectCompleted(await runInstallPhase(options(c, { release: true, configDir: certDir })));
+
+    expect(result.report.stripped).toEqual([]);
+    expect(result.report.signed).toEqual([]);
+    expect(fs.readFileSync(built).equals(before)).toBe(true);
+    expect(fs.existsSync(built + ".sig")).toBe(false);
   });
 });

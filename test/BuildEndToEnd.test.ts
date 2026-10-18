@@ -4,6 +4,7 @@ import path from "path";
 import { spawnSync } from "child_process";
 import Config from "../src/Config";
 import Build from "../src/Build";
+import Package from "../src/Package";
 import Signing from "../src/Signing";
 import { buildRecursive } from "../src/RecursiveBuild";
 import { findOnPath } from "../src/ProcessRunner";
@@ -438,6 +439,12 @@ describe("BuildEndToEnd", () => {
       expect(installedTiny()).toBe(path.join(prefix, "x86_64-linux-gnu", "bin", "tiny"));
       expect(installedDescription).toContain("stripped");
       expect(installedDescription).not.toContain("not stripped");
+      // ... and so is the copy built in the project directory, which the packaging command reads
+      // (src/.libs/tiny when libtool wrapped the program, otherwise src/tiny)
+      const builtTiny = [path.join(projectDir, "src", ".libs", "tiny"), path.join(projectDir, "src", "tiny")].find((file) => fs.existsSync(file)) as string;
+      const builtDescription = spawnSync("file", ["--brief", builtTiny], { encoding: "utf-8" }).stdout;
+      expect(builtDescription).toContain("stripped");
+      expect(builtDescription).not.toContain("not stripped");
       expect(runInstalledTiny()).toContain("tiny ok");
       expectNothingElse(before, snapshot());
     } finally {
@@ -651,6 +658,57 @@ describe("BuildEndToEnd", () => {
       const inLibs = path.join(projectDir, "src", ".libs", name);
       return fs.existsSync(inLibs) ? inLibs : path.join(projectDir, "src", name);
     }
+
+    it("the relinked library's installed and build-tree copies are each signed and each verifies", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      const result = await fullBuild("native", true);
+
+      expect(result).toEqual({ status: "completed" });
+      // libtool relinks libtinyrelink during install (it links libtinygreet), so the two copies are different files
+      const installed = path.join(nativePrefix, "lib", "libtinyrelink.so.0.0.0");
+      const built = path.join(projectDir, "src", ".libs", "libtinyrelink.so.0.0.0");
+      expect(fs.existsSync(built)).toBe(true);
+      expect(fs.readFileSync(installed).equals(fs.readFileSync(built))).toBe(false);
+      for (const file of [installed, built]) {
+        expect([file, fs.lstatSync(file + ".sig").isFile()]).toEqual([file, true]);
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+      // Each signature belongs to its own copy
+      expect(fs.readFileSync(installed + ".sig").equals(fs.readFileSync(built + ".sig"))).toBe(false);
+      // The link names in the build tree verify too
+      await expectValid(path.join(projectDir, "src", ".libs", "libtinyrelink.so.0"), "detached");
+    }, GROUP_TIMEOUT);
+
+    it("package output after a release build is stripped and signed", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      expect(await fullBuild("native", true)).toEqual({ status: "completed" });
+      const outputDir = path.join(root, "dist");
+      // Package reads the configuration of the scratch config directory and prints on the console
+      const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+      let packaged: boolean;
+      try {
+        packaged = new Package(new Config(configDir)).run(outputDir, [projectDir]);
+      } finally {
+        errorSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+
+      expect(packaged).toBe(true);
+      // The program comes from src/.libs, the libraries it loads from the prefix (copied under their real names)
+      const shipped = ["tiny", "libtinyrelink.so.0.0.0", "libtinygreet.so.0.0.0"].map((name) => path.join(outputDir, name));
+      for (const file of shipped) {
+        expect([file, fs.statSync(file).isFile()]).toEqual([file, true]);
+        expect([file, fs.existsSync(file + ".sig")]).toEqual([file, true]);
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+      expect(fs.readFileSync(path.join(outputDir, "tiny")).equals(fs.readFileSync(path.join(projectDir, "src", ".libs", "tiny")))).toBe(true);
+      expect(fs.readFileSync(path.join(outputDir, "libtinygreet.so.0.0.0")).equals(fs.readFileSync(path.join(nativePrefix, "lib", "libtinygreet.so.0.0.0")))).toBe(true);
+    }, GROUP_TIMEOUT);
 
     it("building twice leaves one valid signature and the same size (native)", async () => {
       if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;

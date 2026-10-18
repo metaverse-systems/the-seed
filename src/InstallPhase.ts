@@ -296,6 +296,54 @@ export function groupOutputs(tree: StagedTree): OutputGroup[] {
   return [...groups.values()];
 }
 
+/**
+ * The build-tree copies of the staged outputs, the files the packaging
+ * command reads: for every name among the staged groups, `src/.libs/<name>`
+ * if it exists, else `src/<name>`. They are grouped like staged outputs and
+ * kept when they are programs or libraries for the target, so a libtool
+ * wrapper script is never taken. Nothing outside `src/` and `src/.libs/` is
+ * looked at. A group's display is the path relative to the project.
+ */
+export function buildTreeCopies(projectDir: string, stagedGroups: OutputGroup[], target: TargetName): OutputGroup[] {
+  const names = new Set<string>();
+  for (const group of stagedGroups) {
+    for (const name of group.names) {
+      names.add(path.basename(name));
+    }
+  }
+
+  const srcDir = path.join(projectDir, "src");
+  const entries: StagedEntry[] = [];
+  for (const name of [...names].sort()) {
+    for (const relPath of [".libs/" + name, name]) {
+      const full = path.join(srcDir, relPath);
+      const st = lstatOrNull(full);
+      if (st === null || st.isDirectory()) {
+        continue;
+      }
+      const entry: StagedEntry = {
+        relPath,
+        type: st.isSymbolicLink() ? "symlink" : "file",
+        mode: st.mode,
+        dev: st.dev,
+        ino: st.ino,
+      };
+      if (entry.type === "symlink") {
+        entry.linkTarget = fs.readlinkSync(full);
+      }
+      entries.push(entry);
+      break;
+    }
+  }
+
+  // Absolute link targets under the project resolve to themselves
+  const tree: StagedTree = { stageDir: "", target, prefix: projectDir, root: srcDir, entries };
+  return groupOutputs(tree).map((group) => ({
+    ...group,
+    display: path.relative(projectDir, group.file).split(path.sep).join("/"),
+  }));
+}
+
 // ── Placement ───────────────────────────────────────────────
 
 function lstatOrNull(file: string): fs.Stats | null {
@@ -753,6 +801,13 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
     } catch (err) {
       return { status: "failed", step: "install", message: reasonOf(err) };
     }
+    let buildTree: OutputGroup[];
+    try {
+      buildTree = buildTreeCopies(options.projectDir, groups, target);
+    } catch (err) {
+      return { status: "failed", step: "install", message: reasonOf(err) };
+    }
+    const processed = [...groups, ...buildTree];
     let signingResult: SigningOutcome;
     try {
       signingResult = signingOutcome(options.projectDir, options.configDir);
@@ -763,8 +818,8 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
     const stripped: string[] = [];
     if (options.release && options.target !== undefined) {
       try {
-        await stripOutputs(groups, target, options.signal, options.log);
-        stripped.push(...groups.map((group) => group.display));
+        await stripOutputs(processed, target, options.signal, options.log);
+        stripped.push(...processed.map((group) => group.display));
       } catch (err) {
         if (options.signal?.aborted) {
           return { status: "interrupted" };
@@ -774,9 +829,9 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
     }
 
     let signed: InstallReport["signed"] = [];
-    if (signingResult.kind === "signed" && groups.length > 0) {
+    if (signingResult.kind === "signed" && processed.length > 0) {
       try {
-        signed = await signOutputs(groups, signingResult.scope, options.configDir, target, options.signal, options.log);
+        signed = await signOutputs(processed, signingResult.scope, options.configDir, target, options.signal, options.log);
       } catch (err) {
         if (options.signal?.aborted) {
           return { status: "interrupted" };
