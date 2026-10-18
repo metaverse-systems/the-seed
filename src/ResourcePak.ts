@@ -32,14 +32,10 @@ class ResourcePak {
 
   createPackage = (scope: string, name: string) => {
     const scopeDir = this.config.config.prefix + "/projects/" + scope;
-    if(!fs.existsSync(scopeDir)) {
-      fs.mkdirSync(scopeDir);
-    }
+    fs.mkdirSync(scopeDir, { recursive: true });
 
     this.packageDir = scopeDir + "/" + name;
-    if(!fs.existsSync(this.packageDir)) {
-      fs.mkdirSync(this.packageDir);
-    }
+    fs.mkdirSync(this.packageDir, { recursive: true });
 
     // Create default package.json
     execSync("npm init --yes", { cwd: this.packageDir });
