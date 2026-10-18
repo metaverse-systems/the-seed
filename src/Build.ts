@@ -6,6 +6,7 @@ import Signing from "./Signing";
 import { processorCount } from "./BuildScheduler";
 import { librarySearchEnv } from "./LibrarySearch";
 import { runStep, stepText } from "./StepRunner";
+import { runInstallPhase } from "./InstallPhase";
 import { runCommand, commandFailedMessage, findOnPath, formatCommand } from "./ProcessRunner";
 
 export const targets: {
@@ -35,13 +36,14 @@ class Build {
   /**
    * Builds the project in `options.projectDir`: a full build (autogen,
    * distclean, configure, compile, install) when a target is given, otherwise
-   * an incremental one (compile and install). A release build then strips the
-   * installed binaries, and the built binaries are signed when a certificate
-   * exists.
+   * an incremental one (compile and install). The install step runs as the
+   * install phase: the installed programs and libraries are stripped (a
+   * release build with a target) and signed (when the project's scope has a
+   * certificate) before they are placed in the prefix.
    *
    * Each step's output is passed on as it arrives, never kept, so a build can
    * write any amount. The first cancellation stops the running step and
-   * starts no other; install, strip and sign run under the force signal so a
+   * starts no other; the install phase runs under the force signal so a
    * single Ctrl+C lets an install in progress finish.
    */
   buildProject = async (options: ProjectBuildOptions): Promise<ProjectBuildResult> => {
@@ -50,19 +52,46 @@ class Build {
     const fullReconfigure = options.target !== undefined;
     const target = options.target ?? "native";
 
-    for (const step of this.getSteps(target, fullReconfigure, options.jobs, options.env)) {
+    const steps = this.getSteps(target, fullReconfigure, options.jobs, options.env);
+
+    for (let index = 0; index < steps.length; index++) {
+      const step = steps[index];
       const isInstall = step.label === "install";
       if (isInstall && (options.signal?.aborted || options.forceSignal?.aborted)) {
         return { status: "cancelled" };
       }
 
+      options.onStepStart?.(step, index, steps.length);
       const text = stepText(step);
       log(`==> ${step.label}: ${text}`);
+
+      if (isInstall) {
+        const phase = await runInstallPhase({
+          projectDir: options.projectDir,
+          configPrefix: this.config.config.prefix,
+          configDir: options.configDir,
+          target: options.target,
+          release: options.release,
+          installStep: step,
+          env: options.env,
+          signal: options.forceSignal,
+          output: { mode: "stream", output },
+          log,
+        });
+        switch (phase.status) {
+          case "completed":
+            return { status: "completed" };
+          case "failed":
+            return { status: "failed", step: phase.step, message: phase.message };
+          case "interrupted":
+            return { status: "cancelled" };
+        }
+      }
 
       const outcome = await runStep(step, {
         baseDir: options.projectDir,
         baseEnv: options.env,
-        signal: isInstall ? options.forceSignal : options.signal,
+        signal: options.signal,
         output: { mode: "stream", output },
       });
 
@@ -83,21 +112,6 @@ class Build {
         case "completed":
           break;
       }
-    }
-
-    if (options.release && options.target !== undefined) {
-      try {
-        await stripBinaries(options.projectDir, options.target, options.forceSignal, options.log);
-      } catch (e: unknown) {
-        if (options.forceSignal?.aborted) return { status: "cancelled" };
-        return { status: "failed", step: "strip", message: (e as Error).message ?? String(e) };
-      }
-    }
-
-    try {
-      await autoSignIfCertExists(options.configDir, options.projectDir, options.log);
-    } catch (e: unknown) {
-      return { status: "failed", step: "sign", message: (e as Error).message ?? String(e) };
     }
 
     return { status: "completed" };

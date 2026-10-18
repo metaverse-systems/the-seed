@@ -4,6 +4,7 @@ import path from "path";
 import { spawnSync } from "child_process";
 import Config from "../src/Config";
 import Build from "../src/Build";
+import Signing from "../src/Signing";
 import { buildRecursive } from "../src/RecursiveBuild";
 import { findOnPath } from "../src/ProcessRunner";
 import { installLib } from "../src/Dependencies";
@@ -72,6 +73,10 @@ describe("BuildEndToEnd", () => {
     delete env.PKG_CONFIG_LIBDIR;
     delete env.MAKEFLAGS;
     delete env.MFLAGS;
+    // A libtool cross build of a library runs winepath, and wine writes menu files under the
+    // configuration home; both homes are the case's scratch home, never the process's.
+    env.HOME = home;
+    env.XDG_CONFIG_HOME = path.join(home, ".config");
     return env;
   }
 
@@ -407,7 +412,7 @@ describe("BuildEndToEnd", () => {
     }
   }, CASE_TIMEOUT);
 
-  it("release build strips the program in that directory", async () => {
+  it("release build strips the installed program in that directory", async () => {
     if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
     const restoreTmp = savedTmpdir();
     try {
@@ -428,11 +433,11 @@ describe("BuildEndToEnd", () => {
       });
 
       expect(result).toEqual({ status: "completed" });
-      // The stripped file is the one built in the project directory (src/tiny).
-      const built = path.join(projectDir, "src", "tiny");
-      const described = spawnSync("file", ["--brief", built], { encoding: "utf-8" }).stdout;
-      expect(described).toContain("stripped");
-      expect(described).not.toContain("not stripped");
+      // The program installed in the prefix, not only the one built in the project directory, is stripped
+      const installedDescription = spawnSync("file", ["--brief", installedTiny()], { encoding: "utf-8" }).stdout;
+      expect(installedTiny()).toBe(path.join(prefix, "x86_64-linux-gnu", "bin", "tiny"));
+      expect(installedDescription).toContain("stripped");
+      expect(installedDescription).not.toContain("not stripped");
       expect(runInstalledTiny()).toContain("tiny ok");
       expectNothingElse(before, snapshot());
     } finally {
@@ -516,6 +521,167 @@ describe("BuildEndToEnd", () => {
       restoreTmp();
     }
   }, CASE_TIMEOUT);
+
+  describe("strip and sign", () => {
+    const SCOPE = "@t";
+    const windowsPrefix = () => path.join(prefix, "x86_64-w64-mingw32");
+    const mingwAvailable = ["x86_64-w64-mingw32-gcc", "x86_64-w64-mingw32-strip", "x86_64-w64-mingw32-objdump"].every((tool) => findOnPath(tool) !== null);
+    const mingwReason = "x86_64-w64-mingw32-gcc, x86_64-w64-mingw32-strip or x86_64-w64-mingw32-objdump not found";
+    const GROUP_TIMEOUT = CASE_TIMEOUT * 2;
+    let signing: Signing;
+
+    beforeEach(async () => {
+      // A scratch certificate for the scope, in the scratch home; the project belongs to that scope and has the libraries
+      fs.writeFileSync(
+        path.join(configDir, "config.json"),
+        JSON.stringify({ prefix, scopes: { [SCOPE]: { author: { name: "Test User", email: "t@example.invalid", url: "" } } } })
+      );
+      signing = new Signing(configDir);
+      await signing.createCert({ validityDays: 365, scope: SCOPE });
+      fs.rmSync(projectDir, { recursive: true, force: true });
+      copyFixture(projectDir, { withLibrary: true, packageName: "@t/tiny" });
+    });
+
+    function fullBuild(target: "native" | "windows", release: boolean) {
+      // buildProject gets its environment as an option; the process environment is cleared of the same names as well
+      useProcessEnv({ HOME: home });
+      return new Build(new Config(configDir)).buildProject({
+        projectDir,
+        target,
+        release,
+        jobs: JOBS,
+        configDir,
+        env: caseEnv({}),
+        output: new TailSink(),
+        log: () => undefined,
+      });
+    }
+
+    function describeFile(file: string): string {
+      return spawnSync("file", ["--brief", file], { encoding: "utf-8" }).stdout;
+    }
+
+    function expectStripped(file: string): void {
+      const described = describeFile(file);
+      expect([file, described.includes("stripped")]).toEqual([file, true]);
+      expect([file, described.includes("not stripped")]).toEqual([file, false]);
+    }
+
+    function expectNotStripped(file: string): void {
+      expect([file, describeFile(file).includes("not stripped")]).toEqual([file, true]);
+    }
+
+    async function expectValid(file: string, type: "embedded" | "detached"): Promise<void> {
+      const result = await signing.verifyFile(file);
+      expect([file, result.status, result.reason]).toEqual([file, "VALID", undefined]);
+      expect([file, result.signatureType]).toEqual([file, type]);
+    }
+
+    const nativeLibraries = () => ["libtinygreet.so.0.0.0", "libtinyrelink.so.0.0.0"].map((name) => path.join(nativePrefix, "lib", name));
+    const nativeLinkNames = () => ["libtinygreet.so.0", "libtinygreet.so", "libtinyrelink.so.0", "libtinyrelink.so"].map((name) => path.join(nativePrefix, "lib", name));
+    const windowsFiles = () => ["tiny.exe", "libtinygreet-0.dll", "libtinyrelink-0.dll"].map((name) => path.join(windowsPrefix(), "bin", name));
+
+    it("native release build strips and signs the installed program and library", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      const result = await fullBuild("native", true);
+
+      expect(result).toEqual({ status: "completed" });
+      const installed = [installedTiny(), ...nativeLibraries()];
+      for (const file of installed) {
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+      // Every name of a library verifies, not only the real file
+      for (const link of nativeLinkNames()) {
+        expect([link, fs.lstatSync(link).isSymbolicLink()]).toEqual([link, true]);
+        await expectValid(link, "detached");
+      }
+      expect(runInstalledTiny()).toContain("tiny library ok");
+    }, GROUP_TIMEOUT);
+
+    it("windows release build strips and signs the installed program and DLL", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && mingwAvailable, mingwReason)) return;
+
+      const result = await fullBuild("windows", true);
+
+      expect(result).toEqual({ status: "completed" });
+      for (const file of windowsFiles()) {
+        const sections = spawnSync("x86_64-w64-mingw32-objdump", ["-h", file], { encoding: "utf-8" }).stdout;
+        expect([file, sections.length > 0, /\.debug_/.test(sections)]).toEqual([file, true, false]);
+        await expectValid(file, "embedded");
+        expect([file, fs.existsSync(file + ".sig")]).toEqual([file, false]);
+      }
+    }, GROUP_TIMEOUT);
+
+    it("native build without release signs the installed files and does not strip them", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      const result = await fullBuild("native", false);
+
+      expect(result).toEqual({ status: "completed" });
+      for (const file of [installedTiny(), ...nativeLibraries()]) {
+        expectNotStripped(file);
+        await expectValid(file, "detached");
+        expect([file, fs.existsSync(file + ".sig")]).toEqual([file, true]);
+      }
+    }, GROUP_TIMEOUT);
+
+    it("detached signatures sit beside the installed file and each of its link names", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      const result = await fullBuild("native", true);
+
+      expect(result).toEqual({ status: "completed" });
+      const lib = path.join(nativePrefix, "lib");
+      expect(fs.lstatSync(path.join(lib, "libtinygreet.so.0.0.0.sig")).isFile()).toBe(true);
+      // Each signature link points where its name's link points, with .sig added (libtool decides the shape of the chain)
+      for (const name of ["libtinygreet.so.0", "libtinygreet.so"]) {
+        const sig = path.join(lib, name + ".sig");
+        expect([sig, fs.lstatSync(sig).isSymbolicLink()]).toEqual([sig, true]);
+        expect([sig, fs.readlinkSync(sig)]).toEqual([sig, fs.readlinkSync(path.join(lib, name)) + ".sig"]);
+      }
+      // ... so the link reaches the real signature through the chain
+      expect(fs.realpathSync(path.join(lib, "libtinygreet.so.sig"))).toBe(fs.realpathSync(path.join(lib, "libtinygreet.so.0.0.0.sig")));
+      expect((await signing.verifyFile(path.join(lib, "libtinygreet.so"))).status).toBe("VALID");
+    }, GROUP_TIMEOUT);
+
+    /** The program built in the project, where the build leaves it */
+    function buildTreeProgram(name: string): string {
+      const inLibs = path.join(projectDir, "src", ".libs", name);
+      return fs.existsSync(inLibs) ? inLibs : path.join(projectDir, "src", name);
+    }
+
+    it("building twice leaves one valid signature and the same size (native)", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+      const files = () => [installedTiny(), ...nativeLibraries(), buildTreeProgram("tiny")];
+
+      expect(await fullBuild("native", true)).toEqual({ status: "completed" });
+      const sizes = files().map((file) => fs.statSync(file).size);
+      expect(await fullBuild("native", true)).toEqual({ status: "completed" });
+
+      expect(files().map((file) => fs.statSync(file).size)).toEqual(sizes);
+      for (const file of [installedTiny(), ...nativeLibraries()]) {
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+    }, GROUP_TIMEOUT * 2);
+
+    it("building twice leaves one valid signature and the same size (windows)", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && mingwAvailable, mingwReason)) return;
+      const files = () => [...windowsFiles(), buildTreeProgram("tiny.exe")];
+
+      expect(await fullBuild("windows", true)).toEqual({ status: "completed" });
+      const sizes = files().map((file) => fs.statSync(file).size);
+      expect(await fullBuild("windows", true)).toEqual({ status: "completed" });
+
+      expect(files().map((file) => fs.statSync(file).size)).toEqual(sizes);
+      for (const file of windowsFiles()) {
+        await expectValid(file, "embedded");
+        expect([file, fs.existsSync(file + ".sig")]).toEqual([file, false]);
+      }
+    }, GROUP_TIMEOUT * 2);
+  });
 
   describe("library search", () => {
     const pkgConfigAvailable = findOnPath("pkg-config") !== null;

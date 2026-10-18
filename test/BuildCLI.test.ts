@@ -163,8 +163,8 @@ describe("BuildCLI dashed --recursive", () => {
     );
   });
 
-  it("still runs compile, install and auto-sign for 'build' with no target", async () => {
-    // An incremental build is a buildProject call without a target (compile and install only; signing is its last step).
+  it("runs an incremental build through buildProject with no target", async () => {
+    // An incremental build is a buildProject call without a target (compile and install; the install phase strips and signs).
     await BuildCLI(makeArgs([]));
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
     const options = lastBuildOptions();
@@ -200,6 +200,8 @@ describe("BuildCLI plain and incremental result handling", () => {
   it.each([
     [["native"], "compile", "make -j exited with status 2"],
     [[], "install", "make install exited with status 1"],
+    [["native", "--release"], "strip", "strip failed on /p/x86_64-linux-gnu/bin/tiny: Command failed: strip --strip-unneeded /stage/bin/tiny"],
+    [["native"], "sign", "signing failed on /p/x86_64-linux-gnu/lib/libtiny.so.0.0.0: key file unreadable"],
   ])("prints the failed step on stderr, sets exit status 1 and repeats no output for %p", async (args, step, message) => {
     mockBuildProject.mockResolvedValue({ status: "failed", step, message });
     await BuildCLI(makeArgs(args));

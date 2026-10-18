@@ -359,11 +359,14 @@ export interface ProjectBuildOptions {
   output?: { stdout(chunk: Buffer): void; stderr(chunk: Buffer): void };
   /** Receives each progress line; console.log when omitted */
   log?: (line: string) => void;
+  /** Called before each step, the install step included; `index` is 0-based */
+  onStepStart?(step: BuildStep, index: number, total: number): void;
 }
 
 /** How Build.buildProject() ended. */
 export type ProjectBuildResult =
   | { status: "completed" }
+  /** `step` is a build step label, or strip, sign or place from the install phase */
   | { status: "failed"; step: string; message: string }
   | { status: "cancelled" };
 

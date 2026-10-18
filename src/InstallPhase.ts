@@ -1,7 +1,19 @@
 import fs from "fs";
 import path from "path";
-import { targets } from "./Build";
-import { OutputGroup, OutputKind, SigningOutcome, StagedEntry, StagedTree } from "./types";
+import { extractScope, getStripTool, targets } from "./Build";
+import Signing from "./Signing";
+import { commandFailedMessage, findOnPath, formatCommand, runCommand } from "./ProcessRunner";
+import { runStep, stepText } from "./StepRunner";
+import {
+  InstallPhaseOptions,
+  InstallPhaseResult,
+  InstallReport,
+  OutputGroup,
+  OutputKind,
+  SigningOutcome,
+  StagedEntry,
+  StagedTree,
+} from "./types";
 
 type TargetName = "native" | "windows";
 
@@ -384,6 +396,7 @@ export function placeStaged(tree: StagedTree, groups: OutputGroup[], outcome: Si
     }
   }
   const placedHardLink = new Map<OutputGroup, string>();
+  const stagedPaths = new Set(tree.entries.map((entry) => entry.relPath));
   let placed = 0;
 
   const rootStat = fs.lstatSync(tree.root);
@@ -413,6 +426,10 @@ export function placeStaged(tree: StagedTree, groups: OutputGroup[], outcome: Si
   for (const group of groups) {
     for (const name of group.names) {
       const sigSource = name + ".sig";
+      if (stagedPaths.has(path.relative(tree.root, sigSource))) {
+        // The install step staged this signature itself and the entry loop placed it
+        continue;
+      }
       const sigDest = path.join(tree.prefix, path.relative(tree.root, sigSource));
       const sigStat = lstatOrNull(sigSource);
       if (sigStat !== null) {
@@ -431,4 +448,360 @@ export function placeStaged(tree: StagedTree, groups: OutputGroup[], outcome: Si
     }
   }
   return placed;
+}
+
+// ── Stripping ───────────────────────────────────────────────
+
+/** Runs `action` with owner write on `file`, and puts the mode back in every outcome. */
+async function withOwnerWrite<T>(file: string, action: () => Promise<T>): Promise<T> {
+  const mode = fs.statSync(file).mode & 0o7777;
+  const changed = (mode & 0o200) === 0;
+  if (changed) {
+    fs.chmodSync(file, mode | 0o200);
+  }
+  try {
+    return await action();
+  } finally {
+    if (changed) {
+      try {
+        fs.chmodSync(file, mode);
+      } catch {
+        // The file is gone; there is no mode to restore
+      }
+    }
+  }
+}
+
+/** Makes every other name of the group a hard link to the file again, when a tool replaced the file. */
+function restoreHardLinks(group: OutputGroup): void {
+  if (group.hardLinks.length === 0) {
+    return;
+  }
+  const ino = fs.statSync(group.file).ino;
+  for (const name of group.hardLinks) {
+    const st = lstatOrNull(name);
+    if (st === null || st.ino !== ino) {
+      linkEntry(group.file, name);
+    }
+  }
+}
+
+function stripToolMissing(tool: string, target: TargetName): Error {
+  const hint =
+    target === "windows"
+      ? "\nInstall the MinGW binutils package (e.g., binutils-mingw-w64-x86-64) and try again."
+      : "\nInstall binutils (for example the binutils package) and try again.";
+  return new Error("Strip tool '" + tool + "' not found on this system." + hint);
+}
+
+/**
+ * Strips each output group's real file with `strip --strip-unneeded`. A PE
+ * loses its embedded signature first, since the tool would leave a damaged
+ * file behind. Hard-link names are made links again when the tool replaced
+ * the file. Returns at once with no groups, so a project that installs only
+ * headers and data needs no strip tool. Throws on the first failure; aborting
+ * `signal` throws `Strip cancelled`.
+ */
+export async function stripOutputs(
+  groups: OutputGroup[],
+  target: TargetName,
+  signal: AbortSignal | undefined,
+  log: (line: string) => void
+): Promise<void> {
+  if (groups.length === 0) {
+    return;
+  }
+  const tool = getStripTool(target);
+  const toolPath = findOnPath(tool);
+  if (toolPath === null) {
+    throw stripToolMissing(tool, target);
+  }
+  log("Using strip tool: " + tool);
+
+  const signing = new Signing();
+  for (const group of groups) {
+    if (signal?.aborted) {
+      throw new Error("Strip cancelled");
+    }
+    const args = ["--strip-unneeded", group.file];
+    await withOwnerWrite(group.file, async () => {
+      if (target === "windows") {
+        signing.removeEmbeddedSignature(group.file);
+      }
+      const result = await runCommand(toolPath, args, { signal });
+      if (result.killed) {
+        log("Stripping " + group.display + "... cancelled");
+        throw new Error("Strip cancelled");
+      }
+      if (result.exitCode !== 0) {
+        log("Stripping " + group.display + "... FAILED");
+        throw new Error("strip failed on " + group.display + ": " + commandFailedMessage(formatCommand(toolPath, args), result.stderr));
+      }
+      if (target === "windows" && signing.detectBinaryFormat(group.file).format !== "pe") {
+        log("Stripping " + group.display + "... FAILED");
+        throw new Error("strip failed on " + group.display + ": the result is not a valid PE file");
+      }
+    });
+    restoreHardLinks(group);
+    log("Stripping " + group.display + "... done");
+  }
+  log("Stripped " + groups.length + " file(s)");
+}
+
+// ── Signing ─────────────────────────────────────────────────
+
+/** Replaces `dest` with a symbolic link holding `text`. */
+function replaceWithSymlink(text: string, dest: string): void {
+  const temporary = temporaryName(dest);
+  try {
+    fs.symlinkSync(text, temporary);
+    fs.renameSync(temporary, dest);
+  } catch (err) {
+    fs.rmSync(temporary, { force: true });
+    throw err;
+  }
+}
+
+/**
+ * Signs each output group's real file: an embedded signature for a Windows
+ * output, a detached `.sig` for a native one. Every other name of the group
+ * gets its own signature: a link to the signature of the name it points at,
+ * or a hard link to the signature file. Returns the form each file got.
+ * Every signer error becomes `signing failed on <display>: <message>`.
+ */
+export async function signOutputs(
+  groups: OutputGroup[],
+  scope: string,
+  configDir: string,
+  target: TargetName,
+  signal: AbortSignal | undefined,
+  log: (line: string) => void
+): Promise<{ display: string; form: "embedded" | "detached" }[]> {
+  const signing = new Signing(configDir);
+  const expected = target === "windows" ? "embedded" : "detached";
+  const signed: { display: string; form: "embedded" | "detached" }[] = [];
+
+  for (const group of groups) {
+    if (signal?.aborted) {
+      throw new Error("Sign cancelled");
+    }
+    const failure = (message: string) => new Error("signing failed on " + group.display + ": " + message);
+    const result = await withOwnerWrite(group.file, async () => {
+      try {
+        return await signing.signFile(group.file, { scope });
+      } catch (err) {
+        throw failure(reasonOf(err));
+      }
+    });
+
+    if (result.signatureType !== expected) {
+      const unrecognised =
+        target === "windows" && signing.detectBinaryFormat(group.file).format !== "pe"
+          ? " (the file is not recognised as a valid PE file, for example one left damaged by an earlier version that stripped a signed file; a full build rebuilds it)"
+          : "";
+      throw failure("expected an " + expected + " signature, got " + result.signatureType + unrecognised);
+    }
+
+    try {
+      if (result.signatureType === "embedded") {
+        restoreHardLinks(group);
+        log("Signed (embedded): " + group.display);
+      } else {
+        const signature = group.file + ".sig";
+        for (const link of group.links) {
+          replaceWithSymlink(link.target + ".sig", link.path + ".sig");
+        }
+        for (const name of group.hardLinks) {
+          linkEntry(signature, name + ".sig");
+        }
+        log("Signed (detached): " + group.display + " → " + path.basename(signature));
+      }
+    } catch (err) {
+      throw failure(reasonOf(err));
+    }
+    signed.push({ display: group.display, form: result.signatureType });
+  }
+
+  if (signed.length > 0) {
+    log("Auto-signed " + signed.length + " file(s) using scope '" + scope + "'");
+  }
+  return signed;
+}
+
+/**
+ * Whether the project is signed: its package name has a scope whose
+ * certificate exists and has not expired. Otherwise the reason it is not.
+ */
+export function signingOutcome(projectDir: string, configDir: string): SigningOutcome {
+  const packageJson = path.join(projectDir, "package.json");
+  if (!fs.existsSync(packageJson)) {
+    return { kind: "unsigned", reason: "noPackageJson" };
+  }
+  let name: unknown;
+  try {
+    name = (JSON.parse(fs.readFileSync(packageJson, "utf-8")) as { name?: unknown }).name;
+  } catch (err) {
+    return { kind: "unsigned", reason: "unreadablePackageJson", detail: reasonOf(err) };
+  }
+  const scope = typeof name === "string" ? extractScope(name) : undefined;
+  if (scope === undefined) {
+    return { kind: "unsigned", reason: "noScope", name: typeof name === "string" ? name : undefined };
+  }
+  const signing = new Signing(configDir);
+  if (!signing.hasCert(scope)) {
+    return { kind: "unsigned", reason: "noCertificate", scope, name: name as string };
+  }
+  const info = signing.getCertInfo(scope);
+  if (info === null) {
+    return { kind: "unsigned", reason: "noCertificate", scope, name: name as string };
+  }
+  if (info.isExpired) {
+    return { kind: "unsigned", reason: "expired", scope, name: name as string, expiredOn: info.notAfter };
+  }
+  return { kind: "signed", scope };
+}
+
+// ── The phase ───────────────────────────────────────────────
+
+/** Removes a directory tree, making directories writable first when a mode stops the removal. */
+function removeTree(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    return;
+  } catch {
+    // Fall through to the writable retry
+  }
+  const makeWritable = (current: string): void => {
+    const st = lstatOrNull(current);
+    if (st === null || !st.isDirectory()) {
+      return;
+    }
+    fs.chmodSync(current, (st.mode & 0o7777) | 0o700);
+    for (const name of fs.readdirSync(current)) {
+      makeWritable(path.join(current, name));
+    }
+  };
+  try {
+    makeWritable(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // A stage that cannot be removed is left behind; the build outcome stands
+  }
+}
+
+/**
+ * The install step of a build: runs it into a staging directory under the
+ * configured prefix, identifies the programs and libraries it staged, strips
+ * them (a release build with a target), signs them (a scope with a valid
+ * certificate) and only then places everything in the prefix. Libtool
+ * relinks installed files while installing, so the files that were staged,
+ * not the ones in the build tree, are the ones processed. Never throws for
+ * build outcomes.
+ */
+export async function runInstallPhase(options: InstallPhaseOptions): Promise<InstallPhaseResult> {
+  if (options.signal?.aborted) {
+    return { status: "interrupted" };
+  }
+
+  const stagingRoot = path.join(options.configPrefix, ".the-seed-staging");
+  let stageDir: string;
+  try {
+    fs.mkdirSync(stagingRoot, { recursive: true });
+    stageDir = fs.mkdtempSync(path.join(stagingRoot, "stage-"));
+    fs.chmodSync(stageDir, 0o700);
+  } catch (err) {
+    return { status: "failed", step: "install", message: "cannot create the staging directory in " + stagingRoot + ": " + reasonOf(err) };
+  }
+
+  try {
+    const staged = { ...options.installStep, args: [...options.installStep.args, "DESTDIR=" + stageDir] };
+    const text = stepText(options.installStep);
+    const outcome = await runStep(staged, {
+      baseDir: options.projectDir,
+      baseEnv: options.env,
+      signal: options.signal,
+      output: options.output,
+    });
+    switch (outcome.status) {
+      case "interrupted":
+        return { status: "interrupted" };
+      case "notFound":
+        return { status: "failed", step: "install", message: outcome.message };
+      case "failed":
+        return {
+          status: "failed",
+          step: "install",
+          message: outcome.exitCode === null ? text + " was ended by " + outcome.signal : text + " exited with status " + outcome.exitCode,
+          output: outcome.output === "" ? undefined : outcome.output,
+        };
+      default:
+        break;
+    }
+    options.onInstalled?.();
+
+    let tree: StagedTree;
+    try {
+      tree = readStage(stageDir, options.configPrefix, options.target);
+    } catch (err) {
+      return { status: "failed", step: "install", message: reasonOf(err) };
+    }
+    const target = tree.target;
+
+    let groups: OutputGroup[];
+    try {
+      groups = groupOutputs(tree);
+    } catch (err) {
+      return { status: "failed", step: "install", message: reasonOf(err) };
+    }
+    let signingResult: SigningOutcome;
+    try {
+      signingResult = signingOutcome(options.projectDir, options.configDir);
+    } catch (err) {
+      return { status: "failed", step: "sign", message: reasonOf(err) };
+    }
+
+    const stripped: string[] = [];
+    if (options.release && options.target !== undefined) {
+      try {
+        await stripOutputs(groups, target, options.signal, options.log);
+        stripped.push(...groups.map((group) => group.display));
+      } catch (err) {
+        if (options.signal?.aborted) {
+          return { status: "interrupted" };
+        }
+        return { status: "failed", step: "strip", message: reasonOf(err) };
+      }
+    }
+
+    let signed: InstallReport["signed"] = [];
+    if (signingResult.kind === "signed" && groups.length > 0) {
+      try {
+        signed = await signOutputs(groups, signingResult.scope, options.configDir, target, options.signal, options.log);
+      } catch (err) {
+        if (options.signal?.aborted) {
+          return { status: "interrupted" };
+        }
+        return { status: "failed", step: "sign", message: reasonOf(err) };
+      }
+    }
+
+    let installed: number;
+    try {
+      installed = placeStaged(tree, groups, signingResult);
+    } catch (err) {
+      return { status: "failed", step: "place", message: reasonOf(err) };
+    }
+    options.log("Installed " + installed + " file(s) into " + tree.prefix);
+    return {
+      status: "completed",
+      report: { prefix: tree.prefix, installed, stripped, signed, outcome: signingResult },
+    };
+  } finally {
+    removeTree(stageDir);
+    try {
+      fs.rmdirSync(stagingRoot);
+    } catch {
+      // Not empty (another build is staging) or already gone
+    }
+  }
 }
