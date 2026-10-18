@@ -10,9 +10,21 @@ import { CfbPackage, loadReference, parsePackage, storedDigest } from "./helpers
 /**
  * Create a temporary directory for test isolation.
  */
+const createdDirs: string[] = [];
+
 function createTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "signing-embedded-test-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "signing-embedded-test-"));
+  createdDirs.push(dir);
+  return dir;
 }
+
+// Removes every directory the file created, including the signing configuration directories
+// that the groups keep for their whole run.
+afterAll(() => {
+  for (const dir of createdDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 /**
  * Write a minimal config.json with a scope containing author info.

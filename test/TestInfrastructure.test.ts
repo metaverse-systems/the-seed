@@ -412,3 +412,133 @@ describe("expectPresent", () => {
     expect(() => expectPresent(undefined, "signer")).toThrow("signer is missing");
   });
 });
+
+// Expected shapes of the runner's scratch-area and real-home functions, as exercised here:
+//   findLeftovers(scratchRoot) -> string[]   paths under scratchRoot (normally holding home/ and tmp/),
+//     relative to it, with forward slashes, for every file or directory found (nested ones included)
+//   snapshotRealHome(home) -> opaque value   describes <home>/the-seed/config.json and the entries
+//     directly inside <home>/the-seed; "absent" parts are allowed
+//   compareRealHome(before, after) -> string[]   one "<entry>: <before> -> <after>" line per difference,
+//     where a missing side is written "absent"; empty when equal
+describe("scratch area and real-home checks", () => {
+  let roots: string[] = [];
+
+  function makeRoot(): string {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "the-seed-infra-scratch-"));
+    roots.push(root);
+    return root;
+  }
+
+  function makeHome(): string {
+    const home = makeRoot();
+    fs.mkdirSync(path.join(home, "the-seed"));
+    return home;
+  }
+
+  afterEach(() => {
+    for (const root of roots) {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+    roots = [];
+  });
+
+  describe("findLeftovers", () => {
+    it("reports nothing for empty home and tmp directories", () => {
+      const root = makeRoot();
+      fs.mkdirSync(path.join(root, "home"));
+      fs.mkdirSync(path.join(root, "tmp"));
+      expect(runChecks.findLeftovers(root)).toEqual([]);
+    });
+
+    it("reports nested files and directories relative to the scratch root", () => {
+      const root = makeRoot();
+      fs.mkdirSync(path.join(root, "home", ".config", "the-seed"), { recursive: true });
+      fs.mkdirSync(path.join(root, "tmp", "build-1"), { recursive: true });
+      fs.writeFileSync(path.join(root, "home", "x"), "x");
+      fs.writeFileSync(path.join(root, "tmp", "build-1", "out.txt"), "y");
+
+      const leftovers: string[] = runChecks.findLeftovers(root).map((p: string) => p.split(path.sep).join("/"));
+      expect(leftovers).toEqual(
+        expect.arrayContaining(["home/x", "home/.config", "home/.config/the-seed", "tmp/build-1", "tmp/build-1/out.txt"]),
+      );
+      expect(leftovers).toHaveLength(5);
+    });
+  });
+
+  describe("snapshotRealHome and compareRealHome", () => {
+    it("treats an absent the-seed directory before and after as equal", () => {
+      const home = makeRoot();
+      const before = runChecks.snapshotRealHome(home);
+      const after = runChecks.snapshotRealHome(home);
+      expect(runChecks.compareRealHome(before, after)).toEqual([]);
+    });
+
+    it("treats an unchanged the-seed directory as equal", () => {
+      const home = makeHome();
+      fs.writeFileSync(path.join(home, "the-seed", "config.json"), "{}");
+      fs.mkdirSync(path.join(home, "the-seed", "projects"));
+      const before = runChecks.snapshotRealHome(home);
+      const after = runChecks.snapshotRealHome(home);
+      expect(runChecks.compareRealHome(before, after)).toEqual([]);
+    });
+
+    it("reports a changed config.json hash", () => {
+      const home = makeHome();
+      const config = path.join(home, "the-seed", "config.json");
+      fs.writeFileSync(config, "{\"a\":1}");
+      const before = runChecks.snapshotRealHome(home);
+      fs.writeFileSync(config, "{\"a\":2}");
+      const after = runChecks.snapshotRealHome(home);
+
+      const differences: string[] = runChecks.compareRealHome(before, after);
+      expect(differences.length).toBeGreaterThan(0);
+      expect(differences.some((d) => d.startsWith("config.json: ") && d.includes(" -> "))).toBe(true);
+    });
+
+    it("reports an added entry as <entry>: absent -> <after>", () => {
+      const home = makeHome();
+      const before = runChecks.snapshotRealHome(home);
+      fs.writeFileSync(path.join(home, "the-seed", "added.txt"), "x");
+      const after = runChecks.snapshotRealHome(home);
+
+      const differences: string[] = runChecks.compareRealHome(before, after);
+      expect(differences).toHaveLength(1);
+      expect(differences[0]).toMatch(/^added\.txt: absent -> .+/);
+    });
+
+    it("reports a removed entry as <entry>: <before> -> absent", () => {
+      const home = makeHome();
+      fs.writeFileSync(path.join(home, "the-seed", "gone.txt"), "x");
+      const before = runChecks.snapshotRealHome(home);
+      fs.rmSync(path.join(home, "the-seed", "gone.txt"));
+      const after = runChecks.snapshotRealHome(home);
+
+      const differences: string[] = runChecks.compareRealHome(before, after);
+      expect(differences).toHaveLength(1);
+      expect(differences[0]).toMatch(/^gone\.txt: .+ -> absent$/);
+    });
+
+    it("reports an entry whose modification time changed", () => {
+      const home = makeHome();
+      const file = path.join(home, "the-seed", "touched.txt");
+      fs.writeFileSync(file, "x");
+      fs.utimesSync(file, new Date(2020, 0, 1), new Date(2020, 0, 1));
+      const before = runChecks.snapshotRealHome(home);
+      fs.utimesSync(file, new Date(2021, 5, 6), new Date(2021, 5, 6));
+      const after = runChecks.snapshotRealHome(home);
+
+      const differences: string[] = runChecks.compareRealHome(before, after);
+      expect(differences).toHaveLength(1);
+      expect(differences[0]).toMatch(/^touched\.txt: .+ -> .+/);
+    });
+
+    it("reports a the-seed directory that appeared", () => {
+      const home = makeRoot();
+      const before = runChecks.snapshotRealHome(home);
+      fs.mkdirSync(path.join(home, "the-seed"));
+      fs.writeFileSync(path.join(home, "the-seed", "config.json"), "{}");
+      const after = runChecks.snapshotRealHome(home);
+      expect(runChecks.compareRealHome(before, after).length).toBeGreaterThan(0);
+    });
+  });
+});

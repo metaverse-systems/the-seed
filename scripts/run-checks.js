@@ -5,6 +5,8 @@
 
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const crypto = require("crypto");
 const { spawnSync } = require("child_process");
 
 const packageRoot = path.resolve(__dirname, "..");
@@ -272,6 +274,91 @@ function printSummary(resultsFile) {
   return summary;
 }
 
+// Lists every file and directory under <root>/home and <root>/tmp as paths relative to root.
+function findLeftovers(root) {
+  const found = [];
+  function walk(relative) {
+    let names;
+    try {
+      names = fs.readdirSync(path.join(root, relative));
+    } catch (error) {
+      return;
+    }
+    for (const name of names.sort()) {
+      const child = path.join(relative, name);
+      found.push(child);
+      let isDirectory = false;
+      try {
+        isDirectory = fs.lstatSync(path.join(root, child)).isDirectory();
+      } catch (error) {
+        isDirectory = false;
+      }
+      if (isDirectory) walk(child);
+    }
+  }
+  walk("home");
+  walk("tmp");
+  return found;
+}
+
+function entryType(stats) {
+  if (stats.isSymbolicLink()) return "link";
+  return stats.isDirectory() ? "directory" : "file";
+}
+
+// Describes <home>/the-seed without writing to it: the config.json hash and each entry directly inside.
+// Returns { configHash, entries } where entries is null when the directory is absent.
+function snapshotRealHome(home) {
+  const directory = path.join(home, "the-seed");
+  let configHash = "absent";
+  try {
+    configHash = crypto.createHash("sha256").update(fs.readFileSync(path.join(directory, "config.json"))).digest("hex");
+  } catch (error) {
+    configHash = "absent";
+  }
+  let entries = null;
+  try {
+    entries = {};
+    for (const name of fs.readdirSync(directory)) {
+      try {
+        const stats = fs.lstatSync(path.join(directory, name));
+        entries[name] = entryType(stats) + " " + stats.mtime.toISOString();
+      } catch (error) {
+        // The entry vanished between listing and inspection; a later snapshot will show it as absent.
+      }
+    }
+  } catch (error) {
+    entries = null;
+  }
+  return { configHash, entries };
+}
+
+// Returns one "<entry>: <before> -> <after>" line per difference; a missing side is "absent".
+function compareRealHome(before, after) {
+  const differences = [];
+  if (before.configHash !== after.configHash) {
+    const shorten = (hash) => (hash === "absent" ? hash : "sha256:" + hash.slice(0, 12));
+    differences.push("config.json: " + shorten(before.configHash) + " -> " + shorten(after.configHash));
+  }
+  const left = before.entries || {};
+  const right = after.entries || {};
+  const names = Array.from(new Set(Object.keys(left).concat(Object.keys(right)))).sort();
+  for (const name of names) {
+    const was = Object.prototype.hasOwnProperty.call(left, name) ? left[name] : "absent";
+    const now = Object.prototype.hasOwnProperty.call(right, name) ? right[name] : "absent";
+    if (was !== now) differences.push(name + ": " + was + " -> " + now);
+  }
+  if ((before.entries === null) !== (after.entries === null) && names.length === 0) {
+    differences.push("the-seed: " + (before.entries === null ? "absent" : "empty directory") + " -> " + (after.entries === null ? "absent" : "empty directory"));
+  }
+  return differences;
+}
+
+function inheritedHome() {
+  const value = process.platform === "win32" ? process.env.USERPROFILE : process.env.HOME;
+  return value || os.homedir();
+}
+
 function typecheckStage() {
   return runNode([localBin("typescript", "bin", "tsc"), "-p", "tsconfig.test.json"]);
 }
@@ -297,20 +384,56 @@ function unitStage(jestArgs) {
   fs.rmSync(resultsFile, { force: true });
   fs.mkdirSync(path.dirname(resultsFile), { recursive: true });
 
-  const jestOk = runNode([localBin("jest", "bin", "jest.js"), "--ci", "--json", "--outputFile=" + RESULTS_PATH].concat(jestArgs));
-
-  let results;
+  const realHome = inheritedHome();
+  const before = snapshotRealHome(realHome);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "the-seed-tests-"));
+  let passed = false;
   try {
-    results = JSON.parse(fs.readFileSync(resultsFile, "utf8"));
-  } catch (error) {
-    console.error("Jest produced no results");
-    return false;
+    const scratchHome = path.join(root, "home");
+    const scratchTmp = path.join(root, "tmp");
+    fs.mkdirSync(scratchHome);
+    fs.mkdirSync(scratchTmp);
+
+    const environment = Object.assign({}, process.env, {
+      HOME: scratchHome,
+      USERPROFILE: scratchHome,
+      XDG_CONFIG_HOME: path.join(scratchHome, ".config"),
+      TMPDIR: scratchTmp,
+      TMP: scratchTmp,
+      TEMP: scratchTmp,
+      THE_SEED_TEST_RUN: "1",
+    });
+    const jestOk = runNode(
+      [localBin("jest", "bin", "jest.js"), "--ci", "--json", "--outputFile=" + RESULTS_PATH].concat(jestArgs),
+      { env: environment },
+    );
+
+    let results = null;
+    try {
+      results = JSON.parse(fs.readFileSync(resultsFile, "utf8"));
+    } catch (error) {
+      console.error("Jest produced no results");
+    }
+
+    let summaryFailed = true;
+    if (results !== null) {
+      const summary = summariseResults(results, readKnownGapList(packageRoot).entries || []);
+      summary.lines.forEach((line) => console.log(line));
+      summaryFailed = summary.failed;
+    }
+
+    const leftovers = findLeftovers(root);
+    leftovers.forEach((leftover) => console.log("LEFTOVER: " + leftover.split(path.sep).join("/")));
+
+    passed = results !== null && jestOk && !summaryFailed && leftovers.length === 0;
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 
-  const summary = summariseResults(results, readKnownGapList(packageRoot).entries || []);
-  summary.lines.forEach((line) => console.log(line));
+  const differences = compareRealHome(before, snapshotRealHome(realHome));
+  differences.forEach((difference) => console.log("REAL HOME CHANGED: " + difference));
 
-  return jestOk && !summary.failed;
+  return passed && differences.length === 0;
 }
 
 function runStage(name, jestArgs) {
@@ -357,7 +480,7 @@ function main(argv) {
   return outcomes.every((o) => o.passed) ? 0 : 1;
 }
 
-module.exports = { parseArguments, STAGES, summariseResults, validateKnownGaps, validateKnownGapFiles };
+module.exports = { parseArguments, STAGES, summariseResults, validateKnownGaps, validateKnownGapFiles, findLeftovers, snapshotRealHome, compareRealHome };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));
