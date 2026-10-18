@@ -1,12 +1,12 @@
 import fs from "fs";
 import Config from "./Config";
-import { execSync } from "child_process";
+import path from "path";
+import { spawnSync } from "child_process";
 import { targets } from "./Build";
 import { BuildStep } from "./types";
 import { runStep, stepText } from "./StepRunner";
 import { processorCount } from "./BuildScheduler";
 
-const execOptions = { stdio: "pipe" as const, shell: "/bin/bash", env: { ...process.env } };
 const libEcsRepo = "https://github.com/metaverse-systems/libecs-cpp.git";
 const libTheSeedRepo = "https://github.com/metaverse-systems/libthe-seed.git";
 
@@ -15,32 +15,28 @@ export const requiredLibTheSeedVersion = "0.8.0";
 
 export const checkLib = (config: Config, library: string, target: string, minVersion?: string) => {
   const targetPrefix = targets[target];
-  const prefix = config.config.prefix + "/" + targetPrefix;
-  const pkgConfigCommand =
-    "PKG_CONFIG_PATH=" +
-    prefix +
-    "/lib/pkgconfig/ " +
-    "pkg-config --cflags --libs " +
-    library;
-  try {
-    const result = execSync(pkgConfigCommand, execOptions).toString();
-    if (!result.includes(library)) {
-      console.error("pkg-config did not find " + library);
-      return false;
-    }
-  } catch (e) {
+  const prefix = path.join(config.config.prefix, targetPrefix);
+  const options = {
+    env: { ...process.env, PKG_CONFIG_PATH: path.join(prefix, "lib", "pkgconfig") },
+    encoding: "utf8" as const,
+  };
+  const pkgConfig = (args: string[]) => spawnSync("pkg-config", args, options);
+
+  const lookup = pkgConfig(["--cflags", "--libs", library]);
+  if (lookup.error || lookup.status !== 0) {
+    return false;
+  }
+  if (!String(lookup.stdout ?? "").includes(library)) {
+    console.error("pkg-config did not find " + library);
     return false;
   }
   if (minVersion) {
-    const pkgConfigPath = "PKG_CONFIG_PATH=" + prefix + "/lib/pkgconfig/ ";
-    try {
-      execSync(pkgConfigPath + "pkg-config --atleast-version=" + minVersion + " " + library, execOptions);
-    } catch (e) {
+    const check = pkgConfig(["--atleast-version=" + minVersion, library]);
+    if (check.error || check.status !== 0) {
       let found = "unknown version";
-      try {
-        found = execSync(pkgConfigPath + "pkg-config --modversion " + library, execOptions).toString().trim();
-      } catch (versionError) {
-        // keep the placeholder
+      const version = pkgConfig(["--modversion", library]);
+      if (!version.error && version.status === 0) {
+        found = String(version.stdout ?? "").trim() || found;
       }
       console.error(library + " " + found + " is older than the required " + minVersion);
       return false;

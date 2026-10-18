@@ -6,6 +6,7 @@ import Config from "../src/Config";
 import Build from "../src/Build";
 import { buildRecursive } from "../src/RecursiveBuild";
 import { findOnPath } from "../src/ProcessRunner";
+import { installLib } from "../src/Dependencies";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
 
 // Real autotools, make and a C compiler build the fixture in test/fixtures/autotools-tiny with 50 MB of
@@ -302,5 +303,208 @@ describe("BuildEndToEnd", () => {
     const line = makeflagsLine(sink);
     expect(line).toMatch(/^MAKEFLAGS:.* -j4( |$)/);
     expect(line).not.toContain("-j64");
+  }, CASE_TIMEOUT);
+
+  // Paths with a space, a quote, parentheses, a semicolon, a glob character and a percent sign in them.
+  // Every one of them must reach every program as it is: nothing is split, expanded or unquoted on the way.
+  // Choice: no double quote, dollar sign, ampersand or backtick, because autoconf refuses them in the
+  // working directory ("unsafe absolute working directory name") and make expands a dollar sign or breaks
+  // on a double quote in the prefix. Those characters are covered where no autotools program is involved:
+  // the argument and environment assertions in the Dependencies, Build and StepRunner cases.
+  const SPECIAL_PROJECT = "proj q (x);y %z";
+  const SPECIAL_PREFIX = "prefix 'q (x);y *z ~";
+  const releaseToolsAvailable = ["strip", "file"].every((tool) => findOnPath(tool) !== null);
+  const gitAvailable = findOnPath("git") !== null;
+
+  /** Every path below dir, relative to it, sorted; symbolic links are listed, not followed. */
+  function listTree(dir: string): string[] {
+    const found: string[] = [];
+    const walk = (current: string) => {
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const full = path.join(current, entry.name);
+        found.push(path.relative(dir, full));
+        if (entry.isDirectory()) {
+          walk(full);
+        }
+      }
+    };
+    walk(dir);
+    return found.sort();
+  }
+
+  interface Places {
+    home: string;
+    tmp: string;
+    cwd: string;
+  }
+
+  /** Moves the case to the special-character project and prefix; returns where nothing may appear. */
+  function useSpecialPaths(): { places: Places; snapshot: () => Record<keyof Places, string[]> } {
+    projectDir = path.join(root, SPECIAL_PROJECT);
+    prefix = path.join(root, SPECIAL_PREFIX);
+    nativePrefix = path.join(prefix, "x86_64-linux-gnu");
+    fs.cpSync(fixtureDir, projectDir, { recursive: true });
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix, scopes: {} }));
+    const tmp = path.join(root, "tmp");
+    fs.mkdirSync(tmp, { recursive: true });
+    process.env.TMPDIR = tmp;
+    const places: Places = { home, tmp, cwd: process.cwd() };
+    const snapshot = () => ({
+      home: listTree(places.home),
+      tmp: listTree(places.tmp),
+      cwd: fs.readdirSync(places.cwd).sort(),
+    });
+    return { places, snapshot };
+  }
+
+  /** The prefix the installed program lives in is exactly the requested one, and nothing else was created. */
+  function expectNothingElse(before: Record<keyof Places, string[]>, after: Record<keyof Places, string[]>): void {
+    expect(after.home).toEqual(before.home);
+    expect(after.tmp).toEqual(before.tmp);
+    expect(after.cwd).toEqual(before.cwd);
+    // Directly under the case's directory only the fixed places, the project and the prefix exist.
+    const allowed = ["home", "project", "tmp", SPECIAL_PROJECT, SPECIAL_PREFIX];
+    expect(fs.readdirSync(root).filter((name) => !allowed.includes(name))).toEqual([]);
+  }
+
+  function savedTmpdir(): () => void {
+    const saved = process.env.TMPDIR;
+    return () => {
+      if (saved === undefined) {
+        delete process.env.TMPDIR;
+      } else {
+        process.env.TMPDIR = saved;
+      }
+    };
+  }
+
+  it("plain native build from a project directory and into a prefix named with space, ', ;, (, *, ~ installs at exactly that prefix", async () => {
+    if (!optionalExternalCheck("build-end-to-end", toolsAvailable, "autoreconf, make or cc not found")) return;
+    const restoreTmp = savedTmpdir();
+    try {
+      const { snapshot } = useSpecialPaths();
+      const before = snapshot();
+      const sink = new TailSink();
+
+      const result = await plainBuild(sink, {});
+
+      expect(result).toEqual({ status: "completed" });
+      expect(installedTiny()).toBe(path.join(root, SPECIAL_PREFIX, "x86_64-linux-gnu", "bin", "tiny"));
+      expect(fs.existsSync(installedTiny())).toBe(true);
+      expect(runInstalledTiny()).toContain("tiny ok");
+      expectNothingElse(before, snapshot());
+    } finally {
+      restoreTmp();
+    }
+  }, CASE_TIMEOUT);
+
+  it("release build strips the program in that directory", async () => {
+    if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+    const restoreTmp = savedTmpdir();
+    try {
+      const { snapshot } = useSpecialPaths();
+      const before = snapshot();
+      const sink = new TailSink();
+      const build = new Build(new Config(configDir));
+
+      const result = await build.buildProject({
+        projectDir,
+        target: "native",
+        release: true,
+        jobs: JOBS,
+        configDir,
+        env: caseEnv({}),
+        output: sink,
+        log: () => undefined,
+      });
+
+      expect(result).toEqual({ status: "completed" });
+      // The stripped file is the one built in the project directory (src/tiny).
+      const built = path.join(projectDir, "src", "tiny");
+      const described = spawnSync("file", ["--brief", built], { encoding: "utf-8" }).stdout;
+      expect(described).toContain("stripped");
+      expect(described).not.toContain("not stripped");
+      expect(runInstalledTiny()).toContain("tiny ok");
+      expectNothingElse(before, snapshot());
+    } finally {
+      restoreTmp();
+    }
+  }, CASE_TIMEOUT);
+
+  it("incremental build in that directory succeeds", async () => {
+    if (!optionalExternalCheck("build-end-to-end", toolsAvailable, "autoreconf, make or cc not found")) return;
+    const restoreTmp = savedTmpdir();
+    try {
+      const { snapshot } = useSpecialPaths();
+      prepareConfiguredTree();
+      const before = snapshot();
+      const sink = new TailSink();
+
+      const result = await incrementalBuild(sink, {});
+
+      expect(result).toEqual({ status: "completed" });
+      expect(runInstalledTiny()).toContain("tiny ok");
+      expectNothingElse(before, snapshot());
+    } finally {
+      restoreTmp();
+    }
+  }, CASE_TIMEOUT);
+
+  it("recursive build in that directory succeeds", async () => {
+    if (!optionalExternalCheck("build-end-to-end", toolsAvailable, "autoreconf, make or cc not found")) return;
+    const restoreTmp = savedTmpdir();
+    try {
+      const { snapshot } = useSpecialPaths();
+      useProcessEnv({ HOME: home });
+      const before = snapshot();
+
+      const result = await recursiveBuild();
+
+      expect(result.success).toBe(true);
+      expect(result.cancelled).toBe(false);
+      expect(runInstalledTiny()).toContain("tiny ok");
+      expectNothingElse(before, snapshot());
+    } finally {
+      restoreTmp();
+    }
+  }, CASE_TIMEOUT);
+
+  it("installLib clones a local repository and installs into the prefix with special characters", async () => {
+    if (!optionalExternalCheck("build-end-to-end", toolsAvailable && gitAvailable, "autoreconf, make, cc or git not found")) return;
+    const restoreTmp = savedTmpdir();
+    try {
+      const { snapshot } = useSpecialPaths();
+      // A repository made from the fixture, outside the project and the prefix; no network is used.
+      const repository = path.join(root, "tmp", "source repo");
+      fs.cpSync(fixtureDir, repository, { recursive: true });
+      const gitIn = (args: string[]) => {
+        const run = spawnSync("git", args, { cwd: repository, encoding: "utf-8", env: caseEnv({ GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }) });
+        if (run.status !== 0) {
+          throw new Error("git " + args.join(" ") + " failed while preparing the case: " + run.stderr);
+        }
+      };
+      gitIn(["init", "--quiet"]);
+      gitIn(["add", "-A"]);
+      gitIn(["-c", "user.name=Seed Test", "-c", "user.email=seed@example.invalid", "commit", "--quiet", "-m", "fixture"]);
+      // An absolute directory inside the case, so nothing is cloned into the Jest working directory.
+      const installDir = path.join(root, "tmp", "clone dir (x);y");
+      const before = snapshot();
+      useProcessEnv({ HOME: home });
+      const config = new Config(configDir);
+
+      const installed = await installLib(config, repository, installDir, "native", { jobs: JOBS });
+
+      expect(installed).toBe(true);
+      expect(fs.existsSync(path.join(installDir, ".git"))).toBe(true);
+      expect(fs.existsSync(installedTiny())).toBe(true);
+      expect(runInstalledTiny()).toContain("tiny ok");
+      // Only the clone directory is new under tmp; home and the working directory are unchanged.
+      const after = snapshot();
+      expect(after.home).toEqual(before.home);
+      expect(after.cwd).toEqual(before.cwd);
+      expect(after.tmp.filter((entry) => !before.tmp.includes(entry) && !entry.startsWith(path.basename(installDir)))).toEqual([]);
+    } finally {
+      restoreTmp();
+    }
   }, CASE_TIMEOUT);
 });

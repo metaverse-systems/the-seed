@@ -16,8 +16,9 @@ import {
   requiredLibTheSeedVersion
 } from "../src/Dependencies";
 
+// checkLib runs pkg-config through spawnSync with an argument array and an environment object; no shell.
 jest.mock("child_process", () => ({
-  execSync: jest.fn(() => Buffer.from(""))
+  spawnSync: jest.fn(),
 }));
 
 jest.mock("../src/StepRunner", () => ({
@@ -32,9 +33,27 @@ jest.mock("../src/BuildScheduler", () => ({
   processorCount: () => 6,
 }));
 
-import { execSync } from "child_process";
+import { spawnSync, SpawnSyncReturns } from "child_process";
 import { runStep } from "../src/StepRunner";
-const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
+const mockedSpawnSync = spawnSync as unknown as jest.Mock;
+
+/** What spawnSync returns for a pkg-config that ran. */
+function ran(status: number, stdout = ""): SpawnSyncReturns<string> {
+  return { status, signal: null, output: [null, stdout, ""], pid: 1, stdout, stderr: "" };
+}
+
+/** What spawnSync returns when the program could not be started. */
+function notStarted(): SpawnSyncReturns<string> {
+  return {
+    status: null, signal: null, output: [null, null, null], pid: 0, stdout: null as unknown as string,
+    stderr: null as unknown as string, error: new Error("spawn pkg-config ENOENT"),
+  };
+}
+
+/** Every pkg-config call made so far: [program, args, options]. */
+function pkgConfigCalls(): Array<[string, string[], { env?: NodeJS.ProcessEnv; encoding?: string }]> {
+  return mockedSpawnSync.mock.calls.map((call) => [call[0], call[1], call[2] ?? {}]);
+}
 const mockedRunStep = runStep as jest.MockedFunction<typeof runStep>;
 
 function createTempDir(): string {
@@ -51,8 +70,8 @@ describe("test Dependencies", () => {
   });
 
   beforeEach(() => {
-    mockedExecSync.mockClear();
-    mockedExecSync.mockReturnValue(Buffer.from(""));
+    mockedSpawnSync.mockReset();
+    mockedSpawnSync.mockReturnValue(ran(0, ""));
     mockedRunStep.mockReset();
     mockedRunStep.mockResolvedValue({ status: "completed" });
   });
@@ -63,47 +82,114 @@ describe("test Dependencies", () => {
 
   describe("checkLib", () => {
     it("returns true when library is found", () => {
-      mockedExecSync.mockReturnValue(Buffer.from("-l ecs-cpp -I/usr/include/ecs-cpp"));
+      mockedSpawnSync.mockReturnValue(ran(0, "-l ecs-cpp -I/usr/include/ecs-cpp"));
       const result = checkLib(config, "ecs-cpp", "native");
       expect(result).toBe(true);
     });
 
-    it("returns false when pkg-config throws", () => {
-      mockedExecSync.mockImplementation(() => {
-        throw new Error("pkg-config not found");
-      });
+    it("returns false when pkg-config cannot be started", () => {
+      mockedSpawnSync.mockReturnValue(notStarted());
+      const result = checkLib(config, "ecs-cpp", "native");
+      expect(result).toBe(false);
+    });
+
+    it("returns false when pkg-config does not know the library", () => {
+      mockedSpawnSync.mockReturnValue(ran(1, ""));
       const result = checkLib(config, "ecs-cpp", "native");
       expect(result).toBe(false);
     });
 
     it("returns false when output does not include library name", () => {
-      mockedExecSync.mockReturnValue(Buffer.from("-l other-lib"));
+      mockedSpawnSync.mockReturnValue(ran(0, "-l other-lib"));
       const result = checkLib(config, "ecs-cpp", "native");
       expect(result).toBe(false);
+    });
+
+    it("runs pkg-config itself with an argument array, no shell and no PKG_CONFIG_PATH in an argument", () => {
+      mockedSpawnSync.mockReturnValue(ran(0, "-l ecs-cpp"));
+      checkLib(config, "ecs-cpp", "native", "1.2.3");
+      const calls = pkgConfigCalls();
+      expect(calls.map(([program, args]) => [program, args])).toEqual([
+        ["pkg-config", ["--cflags", "--libs", "ecs-cpp"]],
+        ["pkg-config", ["--atleast-version=1.2.3", "ecs-cpp"]],
+      ]);
+      for (const [, args, options] of calls) {
+        expect(args.some((arg) => arg.includes("PKG_CONFIG_PATH="))).toBe(false);
+        expect(options).not.toHaveProperty("shell");
+        expect(options.env).toEqual(expect.objectContaining({ PKG_CONFIG_PATH: expect.any(String) }));
+      }
+    });
+
+    it("asks for the version with --modversion when the library is older", () => {
+      const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+      mockedSpawnSync.mockImplementation((_program: string, args: string[]) => {
+        if (args[0].startsWith("--atleast-version=")) return ran(1, "");
+        if (args[0] === "--modversion") return ran(0, "0.9.0\n");
+        return ran(0, "-l ecs-cpp");
+      });
+      try {
+        expect(checkLib(config, "ecs-cpp", "native", "1.0.0")).toBe(false);
+        expect(pkgConfigCalls().map(([, args]) => args)).toContainEqual(["--modversion", "ecs-cpp"]);
+        expect(errorSpy).toHaveBeenCalledWith("ecs-cpp 0.9.0 is older than the required 1.0.0");
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it("says unknown version when the version cannot be read", () => {
+      const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+      mockedSpawnSync.mockImplementation((_program: string, args: string[]) => {
+        if (args[0].startsWith("--atleast-version=")) return ran(1, "");
+        if (args[0] === "--modversion") return ran(1, "");
+        return ran(0, "-l ecs-cpp");
+      });
+      try {
+        expect(checkLib(config, "ecs-cpp", "native", "1.0.0")).toBe(false);
+        expect(errorSpy).toHaveBeenCalledWith("ecs-cpp unknown version is older than the required 1.0.0");
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it("checkLib passes the prefix exactly", () => {
+      // Choice: the lookup directory is <prefix>/<triplet>/lib/pkgconfig built with path.join, passed in
+      // env.PKG_CONFIG_PATH (a trailing separator is tolerated). Nothing of the prefix reaches an argument.
+      const odd = path.join(createTempDir(), "pre fix '$HOME \"q\"");
+      const configDir = createTempDir();
+      const oddConfig = new Config(configDir);
+      oddConfig.config.prefix = odd;
+      try {
+        mockedSpawnSync.mockReturnValue(ran(0, "-l ecs-cpp"));
+        expect(checkLib(oddConfig, "ecs-cpp", "native", "1.0.0")).toBe(true);
+        const calls = pkgConfigCalls();
+        expect(calls).toHaveLength(2);
+        const expected = path.join(odd, "x86_64-linux-gnu", "lib", "pkgconfig");
+        for (const [, args, options] of calls) {
+          expect(args.join(" ")).not.toContain(odd);
+          expect(String(options.env?.PKG_CONFIG_PATH).replace(/[\\/]+$/, "")).toBe(expected);
+        }
+      } finally {
+        fs.rmSync(path.dirname(odd), { recursive: true, force: true });
+        fs.rmSync(configDir, { recursive: true, force: true });
+      }
     });
   });
 
   describe("checkLibEcs", () => {
     it("delegates to checkLib with ecs-cpp", () => {
-      mockedExecSync.mockReturnValue(Buffer.from("-l ecs-cpp"));
+      mockedSpawnSync.mockReturnValue(ran(0, "-l ecs-cpp"));
       const result = checkLibEcs(config, "native");
       expect(result).toBe(true);
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        expect.stringContaining("ecs-cpp"),
-        expect.anything()
-      );
+      expect(pkgConfigCalls()[0][1]).toEqual(["--cflags", "--libs", "ecs-cpp"]);
     });
   });
 
   describe("checkLibTheSeed", () => {
     it("delegates to checkLib with the-seed", () => {
-      mockedExecSync.mockReturnValue(Buffer.from("-l the-seed"));
+      mockedSpawnSync.mockReturnValue(ran(0, "-l the-seed"));
       const result = checkLibTheSeed(config, "native");
       expect(result).toBe(true);
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        expect.stringContaining("the-seed"),
-        expect.anything()
-      );
+      expect(pkgConfigCalls()[0][1]).toEqual(["--cflags", "--libs", "the-seed"]);
     });
   });
 
@@ -338,24 +424,20 @@ describe("test Dependencies", () => {
         }
         return 0;
       };
-      mockedExecSync.mockImplementation(((command: string) => {
-        const text = String(command);
-        const library = Object.keys(versions).find((name) => new RegExp(name + "\\s*$|" + name + "\\s").test(text));
-        if (!library) {
-          throw new Error("No package found");
+      mockedSpawnSync.mockImplementation((_program: string, args: string[]) => {
+        const library = args[args.length - 1];
+        if (!(library in versions)) {
+          return ran(1, "");
         }
-        const atLeast = text.match(/--atleast-version=(\S+)/);
+        const atLeast = args[0].match(/^--atleast-version=(\S+)$/);
         if (atLeast) {
-          if (compare(versions[library], atLeast[1]) < 0) {
-            throw new Error("version too old");
-          }
-          return Buffer.from("");
+          return ran(compare(versions[library], atLeast[1]) < 0 ? 1 : 0, "");
         }
-        if (text.includes("--modversion")) {
-          return Buffer.from(versions[library] + "\n");
+        if (args[0] === "--modversion") {
+          return ran(0, versions[library] + "\n");
         }
-        return Buffer.from("-l" + library + " -I/prefix/include/" + library);
-      }) as unknown as typeof execSync);
+        return ran(0, "-l" + library + " -I/prefix/include/" + library);
+      });
     };
 
     let errorSpy: jest.SpyInstance;
@@ -389,10 +471,10 @@ describe("test Dependencies", () => {
     it("checkLibEcs passes the required libecs-cpp version", () => {
       installed({ "ecs-cpp": requiredLibEcsVersion });
       expect(checkLibEcs(config, "native")).toBe(true);
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        expect.stringContaining("--atleast-version=" + requiredLibEcsVersion),
-        expect.anything()
-      );
+      expect(pkgConfigCalls().map(([, args]) => args)).toContainEqual([
+        "--atleast-version=" + requiredLibEcsVersion,
+        "ecs-cpp",
+      ]);
     });
 
     it("checkLibEcs is false when libecs-cpp is older than required", () => {
@@ -418,9 +500,7 @@ describe("test Dependencies", () => {
   describe("getInstallSteps structured steps", () => {
     beforeEach(() => {
       // No library is installed: every pkg-config query fails
-      mockedExecSync.mockImplementation((() => {
-        throw new Error("No package found");
-      }) as unknown as typeof execSync);
+      mockedSpawnSync.mockReturnValue(ran(1, ""));
     });
 
     const forLib = (steps: BuildStep[], name: string) =>
@@ -564,12 +644,9 @@ describe("test Dependencies", () => {
 
     it("getInstallSteps updates an existing directory before compiling", () => {
       cloneExists("libthe-seed");
-      mockedExecSync.mockImplementation(((command: string) => {
-        if (String(command).includes("ecs-cpp")) {
-          return Buffer.from("-lecs-cpp");
-        }
-        throw new Error("No package found");
-      }) as unknown as typeof execSync);
+      mockedSpawnSync.mockImplementation((_program: string, args: string[]) =>
+        args[args.length - 1] === "ecs-cpp" ? ran(0, "-lecs-cpp") : ran(1, "")
+      );
       const steps = getInstallSteps(config, "native");
       const pull = steps.findIndex(
         (step) => step.program === "git" && step.args.join(" ") === "-C libthe-seed pull --ff-only"

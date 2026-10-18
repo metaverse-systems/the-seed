@@ -807,6 +807,58 @@ describe("stripBinaries", () => {
     );
   });
 
+  it("stripBinaries reports a missing tool before stripping anything, for a project path with special characters", async () => {
+    // Choice: the lookup goes through findOnPath (mocked here to search an empty directory as its PATH); the message is "Strip tool '<tool>' not found on this system." and the hint is on the
+    // lines after it: native "Install binutils ...", windows "Install the MinGW binutils package ...".
+    const special = path.join(tmpDir, "proj 'q\" $HOME");
+    fs.mkdirSync(path.join(special, "src", ".libs"), { recursive: true });
+    const elf = path.join(special, "src", ".libs", "libfoo.so");
+    fs.writeFileSync(elf, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]));
+    const before = fs.readFileSync(elf);
+    const emptyPath = fs.mkdtempSync(path.join(tmpDir, "empty-path-"));
+    const realFindOnPath = jest.requireActual("../src/ProcessRunner").findOnPath as typeof findOnPath;
+    mockedFindOnPath.mockImplementation((name: string) => realFindOnPath(name, emptyPath));
+    try {
+      for (const [target, tool, hint] of [
+        ["native", "strip", "Install binutils (for example the binutils package) and try again."],
+        ["windows", "x86_64-w64-mingw32-strip", "Install the MinGW binutils package (e.g., binutils-mingw-w64-x86-64) and try again."],
+      ]) {
+        let message = "";
+        try {
+          await stripBinaries(special, target);
+        } catch (error) {
+          message = (error as Error).message;
+        }
+        expect(message).toContain("Strip tool '" + tool + "' not found on this system.");
+        expect(message).toContain(hint);
+      }
+    } finally {
+      mockedFindOnPath.mockImplementation((name: string) => "/mock/bin/" + name);
+    }
+    expect(mockedRunCommand).not.toHaveBeenCalled();
+    expect(fs.readFileSync(elf).equals(before)).toBe(true);
+  });
+
+  it("finds the tool through PATH without a shell", async () => {
+    // The real findOnPath (not the mock) resolves the tool from the PATH string alone; the stripped file is then
+    // handed to runCommand as the resolved path with literal arguments.
+    const toolDir = fs.mkdtempSync(path.join(tmpDir, "tool-bin-"));
+    const tool = path.join(toolDir, "strip");
+    fs.writeFileSync(tool, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    const realFindOnPath = jest.requireActual("../src/ProcessRunner").findOnPath as typeof findOnPath;
+    mockedFindOnPath.mockImplementation((name: string) => realFindOnPath(name, toolDir));
+    const elf = writeElf("libfoo.so");
+    try {
+      await stripBinaries(tmpDir, "native");
+    } finally {
+      mockedFindOnPath.mockImplementation((name: string) => "/mock/bin/" + name);
+    }
+    expect(runCommandCalls()).toEqual([[tool, ["--strip-unneeded", elf]]]);
+    for (const call of mockedRunCommand.mock.calls) {
+      expect(call[2]).not.toHaveProperty("shell");
+    }
+  });
+
   it("looks the strip tool up with findOnPath and starts no shell", async () => {
     await stripBinaries(tmpDir, "native");
     expect(mockedFindOnPath).toHaveBeenCalledWith("strip");
