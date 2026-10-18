@@ -1,0 +1,8 @@
+lib_LTLIBRARIES = libtinygreet.la libtinyrelink.la
+libtinygreet_la_SOURCES = tinygreet.c
+libtinygreet_la_LDFLAGS = -no-undefined
+libtinyrelink_la_SOURCES = tinyrelink.c
+libtinyrelink_la_LDFLAGS = -no-undefined
+libtinyrelink_la_LIBADD = libtinygreet.la
+tiny_LDADD = libtinyrelink.la
+AM_CPPFLAGS = -DWITH_LIBRARY

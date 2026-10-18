@@ -9,6 +9,7 @@ import { findOnPath } from "../src/ProcessRunner";
 import { installLib } from "../src/Dependencies";
 import { WINDOWS_TOOLCHAIN_PKGCONFIG_DIRS } from "../src/LibrarySearch";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { copyFixture } from "./helpers/Fixture";
 import { findSystemOnlyPackage, writePackageDescription } from "./helpers/SystemPackage";
 
 // Real autotools, make and a C compiler build the fixture in test/fixtures/autotools-tiny with 50 MB of
@@ -16,13 +17,15 @@ import { findSystemOnlyPackage, writePackageDescription } from "./helpers/System
 // whose config.json names that prefix; nothing outside the temporary directory is touched. Compile jobs
 // are limited to 4 wherever the build accepts a job limit.
 
-const fixtureDir = path.join(__dirname, "fixtures", "autotools-tiny");
 const NOISE = 52428800;
 const TAIL_BYTES = 65536;
 const JOBS = 4;
 const CASE_TIMEOUT = 120000;
 
-const ENV_KEYS = ["HOME", "PKG_CONFIG", "SEED_TEST_REQUIRES", "SEED_TEST_NOISE", "SEED_TEST_FAIL", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS"];
+const ENV_KEYS = ["HOME", "PKG_CONFIG", "SEED_TEST_REQUIRES", "SEED_TEST_NOISE", "SEED_TEST_FAIL", "SEED_TEST_INSTALL_FAIL", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS"];
+
+/** Switches the fixture reads; a value inherited from the developer's shell must not reach a build. */
+const FIXTURE_SWITCHES = ["SEED_TEST_NOISE", "SEED_TEST_FAIL", "SEED_TEST_INSTALL_FAIL", "SEED_TEST_REQUIRES"];
 
 const toolsAvailable = ["autoreconf", "make", "cc"].every((tool) => findOnPath(tool) !== null);
 
@@ -60,7 +63,11 @@ describe("BuildEndToEnd", () => {
 
   /** The environment passed to builds: PKG_CONFIG_PATH is removed because the hosted job exports its own. */
   function caseEnv(vars: Record<string, string>): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { ...process.env, ...vars };
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of FIXTURE_SWITCHES) {
+      delete env[key];
+    }
+    Object.assign(env, vars);
     delete env.PKG_CONFIG_PATH;
     delete env.PKG_CONFIG_LIBDIR;
     delete env.MAKEFLAGS;
@@ -70,7 +77,7 @@ describe("BuildEndToEnd", () => {
 
   /** Recursive builds read the process environment, so the case's values are set there for its duration. */
   function useProcessEnv(vars: Record<string, string>): void {
-    for (const key of ["PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS"]) {
+    for (const key of ["PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS", ...FIXTURE_SWITCHES]) {
       delete process.env[key];
     }
     Object.assign(process.env, vars);
@@ -106,7 +113,7 @@ describe("BuildEndToEnd", () => {
     nativePrefix = path.join(prefix, "x86_64-linux-gnu");
     home = path.join(root, "home");
     configDir = path.join(home, "the-seed");
-    fs.cpSync(fixtureDir, projectDir, { recursive: true });
+    copyFixture(projectDir);
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix, scopes: {} }));
     // Properties are set one by one, never the whole object: os.homedir() reads the real environment.
@@ -345,7 +352,7 @@ describe("BuildEndToEnd", () => {
     projectDir = path.join(root, SPECIAL_PROJECT);
     prefix = path.join(root, SPECIAL_PREFIX);
     nativePrefix = path.join(prefix, "x86_64-linux-gnu");
-    fs.cpSync(fixtureDir, projectDir, { recursive: true });
+    copyFixture(projectDir);
     fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix, scopes: {} }));
     const tmp = path.join(root, "tmp");
     fs.mkdirSync(tmp, { recursive: true });
@@ -478,7 +485,7 @@ describe("BuildEndToEnd", () => {
       const { snapshot } = useSpecialPaths();
       // A repository made from the fixture, outside the project and the prefix; no network is used.
       const repository = path.join(root, "tmp", "source repo");
-      fs.cpSync(fixtureDir, repository, { recursive: true });
+      copyFixture(repository);
       const gitIn = (args: string[]) => {
         const run = spawnSync("git", args, { cwd: repository, encoding: "utf-8", env: caseEnv({ GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }) });
         if (run.status !== 0) {
