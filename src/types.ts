@@ -358,7 +358,8 @@ export type ProjectBuildResult =
   | { status: "completed" }
   /** `step` is a build step label, or strip, sign or place from the install phase */
   | { status: "failed"; step: string; message: string }
-  | { status: "cancelled" };
+  /** `installed` is set when the install phase finished and placed its files before the build stopped */
+  | { status: "cancelled"; installed?: true };
 
 /** What a file is for a build target. */
 export type OutputKind = "elfExecutable" | "elfShared" | "peProgram" | "peLibrary";

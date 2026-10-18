@@ -76,7 +76,8 @@ class Build {
         });
         switch (phase.status) {
           case "completed":
-            return { status: "completed" };
+            // One cancellation during the phase lets it finish; say so
+            return options.signal?.aborted ? { status: "cancelled", installed: true } : { status: "completed" };
           case "failed":
             return { status: "failed", step: phase.step, message: phase.message };
           case "interrupted":

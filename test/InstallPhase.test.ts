@@ -800,6 +800,128 @@ describe("placeStaged errors", () => {
 });
 
 
+// ── placeStaged (pre-check and cross-device fallback) ───────
+
+// Choices: the pre-check names either the offending directory or a path inside it in `cannot place <path>: <reason>`
+// (the tests only require the directory's path to appear in the message); a failed pre-check moves nothing.
+describe("placeStaged pre-check", () => {
+  const notRoot = process.getuid !== undefined && process.getuid() === 0 ? it.skip : it;
+
+  function stageTree(s: TestStage): void {
+    writeFile(path.join(s.root, "bin", "tiny"), elfHeader(2, "new"), 0o755);
+    writeFile(path.join(s.root, "lib", "libx.so.0.0.0"), elfHeader(3, "new"), 0o755);
+    writeFile(path.join(s.root, "share", "thing"), "staged file\n", 0o644);
+  }
+
+  function attempt(s: TestStage): string {
+    const tree = readStage(s.stageDir, s.configPrefix, "native");
+    try {
+      placeStaged(tree, groupOutputs(tree), unsigned);
+    } catch (err) {
+      return (err as Error).message;
+    }
+    return "";
+  }
+
+  function expectNothingMoved(s: TestStage): void {
+    expect(fs.existsSync(path.join(s.prefix, "bin", "tiny"))).toBe(false);
+    expect(fs.existsSync(path.join(s.root, "bin", "tiny"))).toBe(true);
+    expect(fs.existsSync(path.join(s.root, "lib", "libx.so.0.0.0"))).toBe(true);
+  }
+
+  notRoot("refuses an unwritable existing destination directory before anything is moved", () => {
+    const s = makeStage("native");
+    stageTree(s);
+    // bin sorts before lib, so a check done lazily would already have moved bin/tiny
+    fs.mkdirSync(path.join(s.prefix, "lib"), { recursive: true });
+    fs.chmodSync(path.join(s.prefix, "lib"), 0o555);
+
+    const message = attempt(s);
+
+    expect(message).toMatch(/^cannot place .+: .+/);
+    expect(message).toContain(path.join(s.prefix, "lib"));
+    expectNothingMoved(s);
+    expect(fs.readdirSync(path.join(s.prefix, "lib"))).toEqual([]);
+  });
+
+  it("refuses a directory where the stage has a file, before anything is moved", () => {
+    const s = makeStage("native");
+    stageTree(s);
+    writeFile(path.join(s.prefix, "share", "thing", "inner"), "prefix file\n", 0o644);
+
+    const message = attempt(s);
+
+    expect(message).toMatch(/^cannot place .+: .+/);
+    expect(message).toContain(path.join(s.prefix, "share", "thing"));
+    expectNothingMoved(s);
+    expect(fs.readFileSync(path.join(s.prefix, "share", "thing", "inner"), "utf8")).toBe("prefix file\n");
+  });
+
+  it("refuses a file where the stage has a directory, before anything is moved", () => {
+    const s = makeStage("native");
+    writeFile(path.join(s.root, "bin", "tiny"), elfHeader(2, "new"), 0o755);
+    writeFile(path.join(s.root, "lib", "libx.so.0.0.0"), elfHeader(3, "new"), 0o755);
+    writeFile(path.join(s.root, "share", "thing", "inner"), "staged file\n", 0o644);
+    writeFile(path.join(s.prefix, "share", "thing"), "prefix file\n", 0o644);
+
+    const message = attempt(s);
+
+    expect(message).toMatch(/^cannot place .+: .+/);
+    expect(message).toContain(path.join(s.prefix, "share", "thing"));
+    expectNothingMoved(s);
+    expect(fs.readFileSync(path.join(s.prefix, "share", "thing"), "utf8")).toBe("prefix file\n");
+    expect(fs.existsSync(path.join(s.prefix, "lib"))).toBe(false);
+  });
+});
+
+describe("placeStaged across file systems", () => {
+  it("falls back to a copy when rename fails with EXDEV once, keeps the mode and leaves no temporary file", () => {
+    const s = makeStage("native");
+    writeFile(path.join(s.root, "bin", "tiny"), elfHeader(2, "new"), 0o751);
+    writeFile(path.join(s.prefix, "bin", "tiny"), "old contents", 0o644);
+    const tree = readStage(s.stageDir, s.configPrefix, "native");
+    const groups = groupOutputs(tree);
+    const realRename = fs.renameSync;
+    let failures = 0;
+    jest.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (failures === 0) {
+        failures++;
+        throw Object.assign(new Error("EXDEV: cross-device link not permitted, rename"), { code: "EXDEV" });
+      }
+      return realRename(from, to);
+    });
+
+    placeStaged(tree, groups, unsigned);
+
+    expect(failures).toBe(1);
+    expect(fs.readFileSync(path.join(s.prefix, "bin", "tiny")).equals(elfHeader(2, "new"))).toBe(true);
+    expect(fs.statSync(path.join(s.prefix, "bin", "tiny")).mode & 0o7777).toBe(0o751);
+    expect(fs.readdirSync(path.join(s.prefix, "bin")).filter((name) => name.includes(".the-seed-"))).toEqual([]);
+  });
+
+  it("re-creates a symlink with its exact target after EXDEV", () => {
+    const s = makeStage("native");
+    writeFile(path.join(s.root, "lib", "libx.so.0.0.0"), elfHeader(3), 0o755);
+    fs.symlinkSync("libx.so.0.0.0", path.join(s.root, "lib", "libx.so.0"));
+    const tree = readStage(s.stageDir, s.configPrefix, "native");
+    const groups = groupOutputs(tree);
+    const realRename = fs.renameSync;
+    jest.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      // Every move from the stage fails once; the temporary names in the prefix rename normally
+      if (String(from).startsWith(s.stageDir)) {
+        throw Object.assign(new Error("EXDEV: cross-device link not permitted, rename"), { code: "EXDEV" });
+      }
+      return realRename(from, to);
+    });
+
+    placeStaged(tree, groups, unsigned);
+
+    expect(fs.readlinkSync(path.join(s.prefix, "lib", "libx.so.0"))).toBe("libx.so.0.0.0");
+    expect(fs.readdirSync(path.join(s.prefix, "lib")).filter((name) => name.includes(".the-seed-"))).toEqual([]);
+  });
+});
+
+
 // ── Fake tools ──────────────────────────────────────────────
 
 const originalPath = process.env.PATH ?? "";
@@ -2080,6 +2202,265 @@ describe("runInstallPhase", () => {
     expect(fs.readFileSync(path.join(c.prefix, "lib", "libtinygreet.dll.a")).equals(arArchive)).toBe(true);
     expect(fs.readFileSync(path.join(c.prefix, "share", "tiny", "stray")).equals(elfHeader(2))).toBe(true);
     expect(sigFilesUnder(c.prefix)).toEqual([]);
+  });
+
+  // ── All or nothing: cancellation and refusals ─────────────
+
+  // Choices: the existing `snapshot` (type, size, mode, link text) of the configured prefix, staging area included,
+  // is compared, so an unchanged snapshot also proves that no `.the-seed-staging` is left. A forced abort
+  // during the install step is made by a fake make that creates a marker file and then waits; the case aborts when
+  // the marker appears. Aborts between files are made from the `log` callback on the line of the first file's result.
+  /** A prefix that earlier builds populated, including a file the new install overwrites. */
+  function populatePrefix(c: PhaseCase): string[] {
+    writeFile(path.join(c.prefix, "bin", "tiny"), elfHeader(2, "old program"), 0o755);
+    writeFile(path.join(c.prefix, "lib", "libold.so.0.0.0"), elfHeader(3, "old library"), 0o755);
+    fs.symlinkSync("libold.so.0.0.0", path.join(c.prefix, "lib", "libold.so.0"));
+    writeFile(path.join(c.prefix, "share", "doc", "readme"), "old readme\n", 0o640);
+    return snapshot(c.configPrefix);
+  }
+
+  function stageNothingLeft(c: PhaseCase): void {
+    expect(fs.existsSync(path.join(c.configPrefix, ".the-seed-staging"))).toBe(false);
+  }
+
+  /** Payload with two programs and a library for the cancellation cases. */
+  function payloadForCancel(c: PhaseCase): void {
+    payload(c, "bin/tiny", elfHeader(2, "new program"));
+    payload(c, "bin/tiny2", elfHeader(2, "second new program"));
+    payload(c, "lib/libx.so.0.0.0", elfHeader(3, "new library"));
+  }
+
+  async function waitForFile(file: string): Promise<void> {
+    for (let i = 0; i < 500 && !fs.existsSync(file); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(fs.existsSync(file)).toBe(true);
+  }
+
+  it("returns interrupted for an already aborted signal and creates nothing", async () => {
+    const c = makeCase("native");
+    payloadForCancel(c);
+    fakeMake(c);
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await runInstallPhase(options(c, { signal: controller.signal }));
+
+    expect(result).toEqual({ status: "interrupted" });
+    expect(fs.existsSync(c.configPrefix)).toBe(false);
+    expect(fs.existsSync(c.makeRecord)).toBe(false);
+  });
+
+  it("a forced abort during the install step leaves the prefix as it was and no stage", async () => {
+    const c = makeCase("native");
+    const before = populatePrefix(c);
+    payloadForCancel(c);
+    const started = path.join(c.base, "install-started");
+    const script = [
+      "#!/bin/sh",
+      "stage=\"\"",
+      "for a in \"$@\"; do case \"$a\" in DESTDIR=*) stage=\"${a#DESTDIR=}\";; esac; done",
+      "cp -a '" + c.payloadRoot + "'/. \"$stage\"/",
+      "touch '" + started + "'",
+      "exec sleep 30",
+      "",
+    ].join("\n");
+    fs.writeFileSync(path.join(c.makeDir, "make"), script);
+    fs.chmodSync(path.join(c.makeDir, "make"), 0o755);
+    const controller = new AbortController();
+
+    const running = runInstallPhase(options(c, { signal: controller.signal }));
+    await waitForFile(started);
+    controller.abort();
+    const result = await running;
+
+    expect(result).toEqual({ status: "interrupted" });
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    stageNothingLeft(c);
+  });
+
+  it("a forced abort between strip files gives interrupted, an unchanged prefix and no stage", async () => {
+    const c = makeCase("native");
+    const before = populatePrefix(c);
+    payloadForCancel(c);
+    fakeMake(c);
+    const controller = new AbortController();
+
+    const result = await runInstallPhase(
+      options(c, {
+        release: true,
+        signal: controller.signal,
+        log: (line) => {
+          c.lines.push(line);
+          if (/^Stripping .* done$/.test(line)) {
+            controller.abort();
+          }
+        },
+      })
+    );
+
+    expect(result).toEqual({ status: "interrupted" });
+    expect(strippedFiles(c.stripLog)).toHaveLength(1);
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    stageNothingLeft(c);
+  });
+
+  it("a forced abort between sign files gives interrupted, an unchanged prefix and no stage", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    const before = populatePrefix(c);
+    payloadForCancel(c);
+    fakeMake(c);
+    const controller = new AbortController();
+    let signedLines = 0;
+
+    const result = await runInstallPhase(
+      options(c, {
+        configDir: certDir,
+        signal: controller.signal,
+        log: (line) => {
+          c.lines.push(line);
+          if (line.startsWith("Signed (")) {
+            signedLines++;
+            controller.abort();
+          }
+        },
+      })
+    );
+
+    expect(result).toEqual({ status: "interrupted" });
+    expect(signedLines).toBe(1);
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    stageNothingLeft(c);
+  });
+
+  it("checks the signal once more right before placement", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    const before = populatePrefix(c);
+    payload(c, "bin/tiny", elfHeader(2, "new program"));
+    fakeMake(c);
+    const controller = new AbortController();
+
+    // Only one file is signed, so no between-files check follows the abort
+    const result = await runInstallPhase(
+      options(c, {
+        configDir: certDir,
+        signal: controller.signal,
+        log: (line) => {
+          c.lines.push(line);
+          if (line.startsWith("Signed (")) {
+            controller.abort();
+          }
+        },
+      })
+    );
+
+    expect(result).toEqual({ status: "interrupted" });
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    stageNothingLeft(c);
+  });
+
+  it("does not stop placement when the signal is aborted during it", async () => {
+    const c = makeCase("native");
+    populatePrefix(c);
+    payloadForCancel(c);
+    payload(c, "include/x.h", "int x;\n", 0o644);
+    fakeMake(c);
+    const controller = new AbortController();
+    const realRename = fs.renameSync;
+    let aborted = false;
+    jest.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (!aborted && String(to).startsWith(c.prefix + path.sep)) {
+        aborted = true;
+        controller.abort();
+      }
+      return realRename(from, to);
+    });
+
+    const result = await runInstallPhase(options(c, { signal: controller.signal }));
+
+    expect(aborted).toBe(true);
+    expectCompleted(result);
+    expect(fs.readFileSync(path.join(c.prefix, "bin", "tiny")).equals(elfHeader(2, "new program"))).toBe(true);
+    expect(fs.readFileSync(path.join(c.prefix, "bin", "tiny2")).equals(elfHeader(2, "second new program"))).toBe(true);
+    expect(fs.readFileSync(path.join(c.prefix, "lib", "libx.so.0.0.0")).equals(elfHeader(3, "new library"))).toBe(true);
+    expect(fs.readFileSync(path.join(c.prefix, "include", "x.h"), "utf8")).toBe("int x;\n");
+    stageNothingLeft(c);
+  });
+
+  // The refusals of the install phase: the messages are those of readStage; nothing is placed.
+  it("refuses an install that writes outside the prefix (fake make writing $DESTDIR/etc/tiny.conf)", async () => {
+    const c = makeCase("native");
+    const before = populatePrefix(c);
+    payload(c, "bin/tiny", elfHeader(2, "new program"));
+    writeFile(path.join(c.payloadRoot, "etc", "tiny.conf"), "setting\n", 0o644);
+    fakeMake(c);
+
+    const result = await runInstallPhase(options(c));
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.step).toBe("install");
+      expect(result.message).toContain("the install step writes outside the prefix " + c.prefix);
+      expect(result.message).toContain("/etc/tiny.conf");
+    }
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    stageNothingLeft(c);
+  });
+
+  it("refuses an install that ignores DESTDIR (nothing under the stage)", async () => {
+    const c = makeCase("native");
+    const before = populatePrefix(c);
+    const elsewhere = path.join(c.base, "elsewhere");
+    const script = ["#!/bin/sh", "mkdir -p '" + elsewhere + "'", "echo installed > '" + elsewhere + "/tiny'", ""].join("\n");
+    fs.writeFileSync(path.join(c.makeDir, "make"), script);
+    fs.chmodSync(path.join(c.makeDir, "make"), 0o755);
+
+    const result = await runInstallPhase(options(c));
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.step).toBe("install");
+      // No staged root exists at all, so the message is the one for an install under another prefix
+      expect(result.message).toContain("the install step did not install under " + c.prefix);
+      expect(result.message).toContain("configured for another prefix");
+    }
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    stageNothingLeft(c);
+  });
+
+  it("refuses an incremental build whose install is staged under another prefix", async () => {
+    const c = makeCase("native");
+    const before = populatePrefix(c);
+    writeFile(path.join(c.payloadRoot + c.configPrefix, "aarch64-linux-gnu", "bin", "tiny"), elfHeader(2), 0o755);
+    fakeMake(c);
+
+    const result = await runInstallPhase(options(c, { target: undefined }));
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.step).toBe("install");
+      expect(result.message).toContain("configured for another prefix");
+    }
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    stageNothingLeft(c);
+  });
+
+  it("a failing install step leaves the prefix as it was and no stage", async () => {
+    const c = makeCase("native");
+    const before = populatePrefix(c);
+    payload(c, "bin/tiny", elfHeader(2, "new program"));
+    fakeMake(c, "no rule to make install");
+
+    const result = await runInstallPhase(options(c));
+
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.step).toBe("install");
+    }
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    stageNothingLeft(c);
   });
 });
 

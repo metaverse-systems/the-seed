@@ -440,6 +440,53 @@ describe("test Build", () => {
       }
     );
 
+    it("a first cancellation during an install phase that completes gives cancelled with installed", async () => {
+      const cancel = new AbortController();
+      const force = new AbortController();
+      mockedPhase.mockImplementation(async () => {
+        // Ctrl+C once while the install phase runs; the phase is not told to stop and completes
+        cancel.abort();
+        return completedPhase();
+      });
+
+      const result = await build.buildProject(buildOptions({ signal: cancel.signal, forceSignal: force.signal }));
+
+      expect(result).toEqual({ status: "cancelled", installed: true });
+      expect(force.signal.aborted).toBe(false);
+    });
+
+    it("an install phase that completes with no cancellation has no installed marker", async () => {
+      const cancel = new AbortController();
+
+      const result = await build.buildProject(buildOptions({ signal: cancel.signal }));
+
+      expect(result).toEqual({ status: "completed" });
+    });
+
+    it("an install phase interrupted after a first cancellation gives plain cancelled, not installed", async () => {
+      const cancel = new AbortController();
+      mockedPhase.mockImplementation(async () => {
+        cancel.abort();
+        return { status: "interrupted" };
+      });
+
+      const result = await build.buildProject(buildOptions({ signal: cancel.signal }));
+
+      expect(result).toEqual({ status: "cancelled" });
+    });
+
+    it("a failed install phase after a first cancellation is still a failure", async () => {
+      const cancel = new AbortController();
+      mockedPhase.mockImplementation(async () => {
+        cancel.abort();
+        return { status: "failed", step: "place", message: "cannot place /p/x: denied" };
+      });
+
+      const result = await build.buildProject(buildOptions({ signal: cancel.signal }));
+
+      expect(result).toEqual({ status: "failed", step: "place", message: "cannot place /p/x: denied" });
+    });
+
     it("a completed install phase gives completed", async () => {
       const result = await build.buildProject(buildOptions({ release: true }));
       expect(result).toEqual({ status: "completed" });

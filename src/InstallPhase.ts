@@ -423,6 +423,40 @@ function linkEntry(existing: string, dest: string): void {
 }
 
 /**
+ * Refuses a placement that could not complete, before anything is moved: an
+ * existing destination directory that cannot be written, a directory where
+ * the stage has a file or link, and a file where the stage has a directory.
+ */
+function checkPlacement(tree: StagedTree, prefixPath: (relPath: string) => string): void {
+  const checkDirectory = (dest: string): void => {
+    const existing = lstatOrNull(dest);
+    if (existing === null) {
+      return;
+    }
+    if (!existing.isDirectory() && !(existing.isSymbolicLink() && isDirectory(dest))) {
+      throw placeError(dest, "it exists and is not a directory");
+    }
+    try {
+      fs.accessSync(dest, fs.constants.W_OK | fs.constants.X_OK);
+    } catch (err) {
+      throw placeError(dest, err);
+    }
+  };
+  checkDirectory(tree.prefix);
+  for (const entry of tree.entries) {
+    const dest = prefixPath(entry.relPath);
+    if (entry.type === "dir") {
+      checkDirectory(dest);
+      continue;
+    }
+    const existing = lstatOrNull(dest);
+    if (existing !== null && existing.isDirectory()) {
+      throw placeError(dest, "it exists and is a directory");
+    }
+  }
+}
+
+/**
  * Places the staged tree into the prefix: directories are created with their
  * staged mode when missing, files and links are moved over what is there,
  * hard-link groups stay hard links, and the signature files written into the
@@ -447,6 +481,7 @@ export function placeStaged(tree: StagedTree, groups: OutputGroup[], outcome: Si
   const stagedPaths = new Set(tree.entries.map((entry) => entry.relPath));
   let placed = 0;
 
+  checkPlacement(tree, prefixPath);
   const rootStat = fs.lstatSync(tree.root);
   ensureDirectory(tree.prefix, rootStat.mode);
 
@@ -907,6 +942,10 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
       }
     }
 
+    // Last chance to stop: once placement starts it always completes
+    if (options.signal?.aborted) {
+      return { status: "interrupted" };
+    }
     let installed: number;
     try {
       installed = placeStaged(tree, groups, signingResult);

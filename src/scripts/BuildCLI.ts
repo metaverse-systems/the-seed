@@ -34,7 +34,7 @@ const printHelp = () => {
   console.log("With --recursive and --parallel above 1, the compile jobs of the projects building at once");
   console.log("never add up to more than --jobs, or the processor count when --jobs is not given.");
   console.log("\nPress Ctrl+C once to stop the running builds; an install in progress finishes first.");
-  console.log("Press it again to stop at once.");
+  console.log("Press it again to stop at once; an install that has not reached the prefix is discarded.");
   console.log("\nThe bare word \"recursive\" after the target is deprecated; it still works for now");
   console.log("but prints a warning. Use --recursive instead.");
 };
@@ -119,7 +119,7 @@ const runProjectBuild = (build: Build, configDir: string, target: "native" | "wi
       console.error(`Build failed at ${result.step}: ${result.message}.`);
       process.exitCode = 1;
     } else if (result.status === "cancelled") {
-      console.error("Build cancelled.");
+      console.error(result.installed ? "Build cancelled after installing." : "Build cancelled.");
     }
     return result.status === "cancelled";
   });

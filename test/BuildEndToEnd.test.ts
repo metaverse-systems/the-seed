@@ -54,6 +54,39 @@ class TailSink {
   }
 }
 
+/** A sink that calls `onLine` once, when the output first contains `marker`. */
+class TriggerSink extends TailSink {
+  private seen = "";
+  private fired = false;
+
+  constructor(private readonly marker: string, private readonly onLine: () => void) {
+    super();
+    // stdout and stderr are instance properties of the base class, so they are wrapped, not overridden
+    const keepOut = this.stdout;
+    const keepErr = this.stderr;
+    this.stdout = (chunk: Buffer): void => {
+      keepOut(chunk);
+      this.watch(chunk);
+    };
+    this.stderr = (chunk: Buffer): void => {
+      keepErr(chunk);
+      this.watch(chunk);
+    };
+  }
+
+  private watch(chunk: Buffer): void {
+    if (this.fired) {
+      return;
+    }
+    // A marker may be split between two chunks
+    this.seen = (this.seen + chunk.toString()).slice(-4096);
+    if (this.seen.includes(this.marker)) {
+      this.fired = true;
+      this.onLine();
+    }
+  }
+}
+
 describe("BuildEndToEnd", () => {
   let root: string;
   let projectDir: string;
@@ -906,6 +939,93 @@ describe("BuildEndToEnd", () => {
         expect(await treatment(prefix, "tinyb")).toEqual(expectedB);
       }
     }, GROUP_TIMEOUT * 6);
+
+    /**
+     * A native release build whose output sink calls `onInstallWrites` when `make install` first prints a
+     * `libtool: install:` line, that is while it is writing into the stage; `extraEnv` reaches the build's steps.
+     * The `==> install:` line goes to `log` before the phase starts, so aborting there would test only the
+     * pre-install check, which is why the sink is used.
+     */
+    function installBuild(options: { sink?: TailSink; extraEnv?: Record<string, string>; signal?: AbortSignal; forceSignal?: AbortSignal }) {
+      useProcessEnv({ HOME: home });
+      return new Build(new Config(configDir)).buildProject({
+        projectDir,
+        target: "native",
+        release: true,
+        jobs: JOBS,
+        configDir,
+        env: caseEnv(options.extraEnv ?? {}),
+        output: options.sink ?? new TailSink(),
+        log: () => undefined,
+        signal: options.signal,
+        forceSignal: options.forceSignal,
+      });
+    }
+
+    it("a failing install step leaves the prefix unchanged", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      // A first build populates the prefix; the next one fails at the end of its install step, after
+      // make has written the programs and libraries into the stage
+      expect(await installBuild({})).toEqual({ status: "completed" });
+      const before = prefixSnapshot(prefix);
+      expect(before.length).toBeGreaterThan(0);
+
+      const result = await installBuild({ extraEnv: { SEED_TEST_INSTALL_FAIL: "1" } });
+
+      expect(result.status).toBe("failed");
+      expect((result as { step: string }).step).toBe("install");
+      expect(prefixSnapshot(prefix)).toEqual(before);
+      expect(fs.existsSync(path.join(prefix, ".the-seed-staging"))).toBe(false);
+    }, GROUP_TIMEOUT * 2);
+
+    it("a forced cancellation during the install phase leaves the prefix unchanged", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      expect(await installBuild({})).toEqual({ status: "completed" });
+      const before = prefixSnapshot(prefix);
+      expect(before.length).toBeGreaterThan(0);
+      const cancel = new AbortController();
+      const force = new AbortController();
+      let triggered = false;
+      const sink = new TriggerSink("libtool: install:", () => {
+        triggered = true;
+        cancel.abort();
+        force.abort();
+      });
+
+      const result = await installBuild({ sink, signal: cancel.signal, forceSignal: force.signal });
+
+      expect(triggered).toBe(true);
+      expect(result).toEqual({ status: "cancelled" });
+      expect(prefixSnapshot(prefix)).toEqual(before);
+      expect(fs.existsSync(path.join(prefix, ".the-seed-staging"))).toBe(false);
+    }, GROUP_TIMEOUT * 2);
+
+    it("one cancellation during the install phase installs and reports it", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      const cancel = new AbortController();
+      const force = new AbortController();
+      let triggered = false;
+      // Only the first signal: the phase is not told to stop
+      const sink = new TriggerSink("libtool: install:", () => {
+        triggered = true;
+        cancel.abort();
+      });
+
+      const result = await installBuild({ sink, signal: cancel.signal, forceSignal: force.signal });
+
+      expect(triggered).toBe(true);
+      expect(result).toEqual({ status: "cancelled", installed: true });
+      expect(force.signal.aborted).toBe(false);
+      for (const file of [installedTiny(), ...nativeLibraries()]) {
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+      expect(fs.existsSync(path.join(prefix, ".the-seed-staging"))).toBe(false);
+      expect(runInstalledTiny()).toContain("tiny library ok");
+    }, GROUP_TIMEOUT);
 
     /** Same as fullBuild, but the lines the build logs are kept. */
     function loggedBuild(lines: string[]) {
