@@ -58,6 +58,7 @@ interface NativeAddon {
 }
 
 function loadNativeAddon(): NativeAddon {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations and is loaded on first use
   return require("../native/build/Release/dependency_lister.node") as NativeAddon;
 }
 
@@ -1377,7 +1378,7 @@ class Signing {
         return {
           filePath: resolvedPath,
           status: "INVALID",
-          reason: `Embedded signature invalid: digest mismatch — file may have been modified after signing`,
+          reason: "Embedded signature invalid: digest mismatch — file may have been modified after signing",
           signer,
           signatureType: "embedded",
         };
@@ -1520,7 +1521,7 @@ class Signing {
         return {
           filePath: resolvedPath,
           status: "INVALID",
-          reason: `Embedded MSI signature invalid: digest mismatch — file may have been modified after signing`,
+          reason: "Embedded MSI signature invalid: digest mismatch — file may have been modified after signing",
           signer,
           signatureType: "embedded",
         };

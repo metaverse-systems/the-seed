@@ -508,6 +508,7 @@ describe("signFileMachO on genuine samples", () => {
 
   describe("removed addon exports", () => {
     // The real addon is loaded directly; there is no mock.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
     const addon = require("../native/build/Release/dependency_lister.node") as Record<
       string,
       (...args: unknown[]) => unknown

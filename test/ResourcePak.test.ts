@@ -25,7 +25,7 @@ describe("ResourcePak", () => {
         }
       }
     };
-    fs.writeFileSync(path.join(tempDir, 'config.json'), JSON.stringify(defaultConfig));
+    fs.writeFileSync(path.join(tempDir, "config.json"), JSON.stringify(defaultConfig));
     config = new Config(tempDir);
     rp = new ResourcePak(config);
   });

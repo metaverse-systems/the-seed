@@ -182,7 +182,7 @@ describe("test Dependencies", () => {
           return Buffer.from(versions[library] + "\n");
         }
         return Buffer.from("-l" + library + " -I/prefix/include/" + library);
-      }) as any);
+      }) as unknown as typeof execSync);
     };
 
     let errorSpy: jest.SpyInstance;
@@ -283,7 +283,7 @@ describe("test Dependencies", () => {
           throw new Error("not possible to fast-forward");
         }
         return Buffer.from("ok");
-      }) as any);
+      }) as unknown as typeof execSync);
       expect(installLib(config, "https://github.com/test/repo.git", "test-dir", "native")).toBe(false);
       expect(errorSpy.mock.calls.map((call) => call.join(" ")).join("\n")).toContain("test-dir");
       expect(commandsRun().some((command) => command.includes("./configure"))).toBe(false);
@@ -296,7 +296,7 @@ describe("test Dependencies", () => {
           return Buffer.from("-lecs-cpp");
         }
         throw new Error("No package found");
-      }) as any);
+      }) as unknown as typeof execSync);
       const steps = getInstallSteps(config, "native").map((step) => step.command);
       const pull = steps.findIndex((command) => command.includes("git -C libthe-seed pull --ff-only"));
       const compile = steps.findIndex((command) => /\bmake$/.test(command));

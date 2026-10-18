@@ -143,7 +143,7 @@ export interface DirectorySignResult {
   skipped: string[];      // list of skipped (non-binary) files
 }
 
-export type VerifyStatus = 'VALID' | 'INVALID' | 'NOT_FOUND';
+export type VerifyStatus = "VALID" | "INVALID" | "NOT_FOUND";
 
 export interface VerifyResult {
   filePath: string;
@@ -165,8 +165,8 @@ export interface DirectoryVerifyResult {
 /** Structure of a .sig file (JSON) */
 export interface SigFileFormat {
   version: 1;
-  algorithm: 'SHA256';
-  curve: 'P-256';
+  algorithm: "SHA256";
+  curve: "P-256";
   signature: string;       // base64-encoded ECDSA signature
   certificate: string;     // PEM-encoded X.509 certificate
 }
@@ -183,7 +183,7 @@ export interface SigningManifestFormat {
 export interface SigningManifestEntry {
   path: string;                     // relative path to signed file
   signatureFile: string | null;     // relative path to .sig file, null when embedded
-  algorithm: 'SHA256';
+  algorithm: "SHA256";
   signature: string;                // base64-encoded signature
   signatureType: SignatureType;     // "embedded" or "detached"
 }
