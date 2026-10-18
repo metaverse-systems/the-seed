@@ -3,6 +3,7 @@ import path from "path";
 import os from "os";
 import Config from "../src/Config";
 import { BuildStep } from "../src/types";
+import { formatCommand } from "../src/ProcessRunner";
 import {
   checkLib,
   checkLibEcs,
@@ -19,8 +20,15 @@ jest.mock("child_process", () => ({
   execSync: jest.fn(() => Buffer.from(""))
 }));
 
+jest.mock("../src/StepRunner", () => ({
+  ...jest.requireActual("../src/StepRunner"),
+  runStep: jest.fn(),
+}));
+
 import { execSync } from "child_process";
+import { runStep } from "../src/StepRunner";
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
+const mockedRunStep = runStep as jest.MockedFunction<typeof runStep>;
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "deps-test-"));
@@ -38,6 +46,8 @@ describe("test Dependencies", () => {
   beforeEach(() => {
     mockedExecSync.mockClear();
     mockedExecSync.mockReturnValue(Buffer.from(""));
+    mockedRunStep.mockReset();
+    mockedRunStep.mockResolvedValue({ status: "completed" });
   });
 
   afterAll(() => {
@@ -90,68 +100,216 @@ describe("test Dependencies", () => {
     });
   });
 
+  // installLib runs its steps through runStep (mocked here). Choices where the contract is open:
+  // the steps are labelled after the install directory (`clone <dir>`, `update <dir>`, `<dir> autogen`,
+  // `<dir> configure`, `<dir> compile`, `<dir> install`), progress goes to console.log and the
+  // `Failed at <label>: <message>` line to console.error, with a failed step's message reading
+  // `<command> exited with status <n>`.
   describe("installLib", () => {
-    it("returns true on success", () => {
-      mockedExecSync.mockReturnValue(Buffer.from("ok"));
-      const result = installLib(config, "https://github.com/test/repo.git", "test-dir", "native");
+    let logSpy: jest.SpyInstance;
+    let errorSpy: jest.SpyInstance;
+    const repo = "https://github.com/test/repo.git";
+
+    beforeEach(() => {
+      logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+      errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    const stepsRun = (): BuildStep[] => mockedRunStep.mock.calls.map((call) => call[0]);
+    const printed = () => logSpy.mock.calls.map((call) => call.join(" "));
+    const errors = () => errorSpy.mock.calls.map((call) => call.join(" "));
+
+    it("returns true on success", async () => {
+      const result = await installLib(config, repo, "test-dir", "native");
       expect(result).toBe(true);
     });
 
-    it("returns false on build failure", () => {
-      // First call (clone) succeeds, second call (build) throws
-      mockedExecSync
-        .mockReturnValueOnce(Buffer.from("cloned"))
-        .mockImplementationOnce(() => {
-          throw new Error("build failed");
-        });
-      const result = installLib(config, "https://github.com/test/repo.git", "test-dir", "native");
+    it("returns false on build failure", async () => {
+      // The clone succeeds, the build step after it fails
+      mockedRunStep.mockImplementation(async (step) =>
+        step.label === "test-dir compile"
+          ? { status: "failed", exitCode: 2, signal: null, output: "" }
+          : { status: "completed" }
+      );
+      const result = await installLib(config, repo, "test-dir", "native");
       expect(result).toBe(false);
     });
 
-    it("native target has no --host flag", () => {
-      mockedExecSync.mockReturnValue(Buffer.from("ok"));
-      installLib(config, "https://github.com/test/repo.git", "test-dir", "native");
+    it("runs the five steps in order from the current directory", async () => {
+      await installLib(config, repo, "test-dir", "native");
 
-      const buildCall = mockedExecSync.mock.calls.find(
-        (call) => String(call[0]).includes("./configure")
-      );
-      expect(buildCall).toBeDefined();
-      expect(String(buildCall![0])).not.toContain("--host");
+      const steps = stepsRun();
+      expect(steps.map((step) => step.label)).toEqual([
+        "clone test-dir", "test-dir autogen", "test-dir configure", "test-dir compile", "test-dir install",
+      ]);
+      expect(steps[0]).toMatchObject({ program: "git", args: ["clone", repo, "test-dir"] });
+      expect(steps[1]).toMatchObject({ program: "./autogen.sh", cwd: "test-dir" });
+      expect(steps[2]).toMatchObject({ program: "./configure", cwd: "test-dir" });
+      expect(steps[3]).toMatchObject({ program: "make", cwd: "test-dir" });
+      expect(steps[4]).toMatchObject({ program: "make", args: ["install"], cwd: "test-dir" });
+      for (const call of mockedRunStep.mock.calls) {
+        expect(call[1]).toEqual(expect.objectContaining({ baseDir: process.cwd() }));
+        expect(call[1].output.mode).toBe("stream");
+      }
     });
 
-    it("windows target includes --host flag", () => {
-      mockedExecSync.mockReturnValue(Buffer.from("ok"));
-      installLib(config, "https://github.com/test/repo.git", "test-dir", "windows");
+    it("precedes each step with '==> <label>: <command>'", async () => {
+      await installLib(config, repo, "test-dir", "native");
 
-      const buildCall = mockedExecSync.mock.calls.find(
-        (call) => String(call[0]).includes("./configure")
+      const expected = stepsRun().map(
+        (step) => `==> ${step.label}: ${formatCommand(step.program, step.args)}`
       );
-      expect(buildCall).toBeDefined();
-      expect(String(buildCall![0])).toContain("--host=x86_64-w64-mingw32");
+      expect(printed().filter((line) => line.startsWith("==> "))).toEqual(expected);
+    });
+
+    it("prints each heading before the step runs", async () => {
+      const order: string[] = [];
+      logSpy.mockImplementation((line: string) => {
+        if (String(line).startsWith("==> ")) order.push("print:" + String(line).split(":")[0].slice(4));
+      });
+      mockedRunStep.mockImplementation(async (step) => {
+        order.push("run:" + step.label);
+        return { status: "completed" };
+      });
+
+      await installLib(config, repo, "test-dir", "native");
+
+      expect(order).toEqual([
+        "print:clone test-dir", "run:clone test-dir",
+        "print:test-dir autogen", "run:test-dir autogen",
+        "print:test-dir configure", "run:test-dir configure",
+        "print:test-dir compile", "run:test-dir compile",
+        "print:test-dir install", "run:test-dir install",
+      ]);
+    });
+
+    it("stops at the first step that does not complete and says which", async () => {
+      mockedRunStep.mockImplementation(async (step) =>
+        step.label === "test-dir configure"
+          ? { status: "failed", exitCode: 1, signal: null, output: "" }
+          : { status: "completed" }
+      );
+
+      const result = await installLib(config, repo, "test-dir", "native");
+
+      expect(result).toBe(false);
+      expect(stepsRun().map((step) => step.label)).toEqual(["clone test-dir", "test-dir autogen", "test-dir configure"]);
+      expect(errors().some((line) => line.startsWith("Failed at test-dir configure: ") && line.includes("exited with status 1"))).toBe(true);
+    });
+
+    it("a failed clone stops everything", async () => {
+      mockedRunStep.mockImplementation(async (step) =>
+        step.label === "clone test-dir"
+          ? { status: "failed", exitCode: 128, signal: null, output: "" }
+          : { status: "completed" }
+      );
+
+      const result = await installLib(config, repo, "test-dir", "native");
+
+      expect(result).toBe(false);
+      expect(stepsRun()).toHaveLength(1);
+      expect(errors().some((line) => line.startsWith("Failed at clone test-dir: "))).toBe(true);
+    });
+
+    it("a program that cannot be started stops the install with its message", async () => {
+      mockedRunStep.mockImplementation(async (step) =>
+        step.label === "test-dir autogen"
+          ? { status: "notFound", message: "./autogen.sh: not found" }
+          : { status: "completed" }
+      );
+
+      const result = await installLib(config, repo, "test-dir", "native");
+
+      expect(result).toBe(false);
+      expect(errors()).toContain("Failed at test-dir autogen: ./autogen.sh: not found");
+      expect(stepsRun()).toHaveLength(2);
+    });
+
+    it("an interrupted step stops the install", async () => {
+      mockedRunStep.mockImplementation(async (step) =>
+        step.label === "test-dir compile" ? { status: "interrupted" } : { status: "completed" }
+      );
+      expect(await installLib(config, repo, "test-dir", "native")).toBe(false);
+      expect(stepsRun().map((step) => step.label)).not.toContain("test-dir install");
+    });
+
+    it("an ignored exit counts as having completed", async () => {
+      mockedRunStep.mockResolvedValue({ status: "ignored", exitCode: 1 });
+      expect(await installLib(config, repo, "test-dir", "native")).toBe(true);
+    });
+
+    it("native target has no --host flag", async () => {
+      await installLib(config, repo, "test-dir", "native");
+
+      const configure = stepsRun().find((step) => step.program === "./configure");
+      expect(configure).toBeDefined();
+      expect(configure!.args.join(" ")).not.toContain("--host");
+      expect(configure!.args).toEqual(["--prefix=" + config.config.prefix + "/x86_64-linux-gnu"]);
+    });
+
+    it("windows target includes --host flag", async () => {
+      await installLib(config, repo, "test-dir", "windows");
+
+      const configure = stepsRun().find((step) => step.program === "./configure");
+      expect(configure).toBeDefined();
+      expect(configure!.args).toContain("--host=x86_64-w64-mingw32");
     });
   });
 
   describe("installLibEcs", () => {
-    it("delegates to installLib with libecs-cpp repo", () => {
-      mockedExecSync.mockReturnValue(Buffer.from("ok"));
-      const result = installLibEcs(config, "native");
+    let errorSpy: jest.SpyInstance;
+    let logSpy: jest.SpyInstance;
+    beforeEach(() => {
+      errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+      logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+    });
+    afterEach(() => {
+      errorSpy.mockRestore();
+      logSpy.mockRestore();
+    });
+
+    it("delegates to installLib with libecs-cpp repo", async () => {
+      const result = await installLibEcs(config, "native");
       expect(result).toBe(true);
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        expect.stringContaining("libecs-cpp"),
-        expect.anything()
-      );
+      const clone = mockedRunStep.mock.calls.map((call) => call[0]).find((step) => step.program === "git")!;
+      expect(clone.args).toEqual(["clone", expect.stringContaining("libecs-cpp"), "libecs-cpp"]);
+    });
+
+    it("reports Failed to build libecs-cpp when the install fails", async () => {
+      mockedRunStep.mockResolvedValue({ status: "failed", exitCode: 1, signal: null, output: "" });
+      expect(await installLibEcs(config, "native")).toBe(false);
+      expect(errorSpy).toHaveBeenCalledWith("Failed to build libecs-cpp");
     });
   });
 
   describe("installLibTheSeed", () => {
-    it("delegates to installLib with libthe-seed repo", () => {
-      mockedExecSync.mockReturnValue(Buffer.from("ok"));
-      const result = installLibTheSeed(config, "native");
+    let errorSpy: jest.SpyInstance;
+    let logSpy: jest.SpyInstance;
+    beforeEach(() => {
+      errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+      logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+    });
+    afterEach(() => {
+      errorSpy.mockRestore();
+      logSpy.mockRestore();
+    });
+
+    it("delegates to installLib with libthe-seed repo", async () => {
+      const result = await installLibTheSeed(config, "native");
       expect(result).toBe(true);
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        expect.stringContaining("libthe-seed"),
-        expect.anything()
-      );
+      const clone = mockedRunStep.mock.calls.map((call) => call[0]).find((step) => step.program === "git")!;
+      expect(clone.args).toEqual(["clone", expect.stringContaining("libthe-seed"), "libthe-seed"]);
+    });
+
+    it("reports Failed to build libthe-seed when the install fails", async () => {
+      mockedRunStep.mockResolvedValue({ status: "failed", exitCode: 1, signal: null, output: "" });
+      expect(await installLibTheSeed(config, "native")).toBe(false);
+      expect(errorSpy).toHaveBeenCalledWith("Failed to build libthe-seed");
     });
   });
 
@@ -317,6 +475,7 @@ describe("test Dependencies", () => {
   describe("existing clone directory", () => {
     let existsSpy: jest.SpyInstance;
     let errorSpy: jest.SpyInstance;
+    let logSpy: jest.SpyInstance;
 
     const cloneExists = (directory: string) => {
       existsSpy = jest.spyOn(fs, "existsSync").mockImplementation(
@@ -335,30 +494,34 @@ describe("test Dependencies", () => {
       }
     });
 
-    const commandsRun = () => mockedExecSync.mock.calls.map((call) => String(call[0]));
+    const labelsRun = () => mockedRunStep.mock.calls.map((call) => call[0].label);
 
-    it("installLib updates the directory before building", () => {
+    it("installLib updates the directory before building", async () => {
       cloneExists("test-dir");
-      mockedExecSync.mockReturnValue(Buffer.from("ok"));
-      expect(installLib(config, "https://github.com/test/repo.git", "test-dir", "native")).toBe(true);
-      const commands = commandsRun();
-      const pull = commands.findIndex((command) => command.includes("git -C test-dir pull --ff-only"));
-      const build = commands.findIndex((command) => command.includes("./configure"));
-      expect(pull).toBeGreaterThanOrEqual(0);
+      logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+      try {
+        expect(await installLib(config, "https://github.com/test/repo.git", "test-dir", "native")).toBe(true);
+      } finally {
+        logSpy.mockRestore();
+      }
+      const steps = mockedRunStep.mock.calls.map((call) => call[0]);
+      const pull = steps.findIndex((step) => step.program === "git" && step.args.join(" ") === "-C test-dir pull --ff-only");
+      const build = steps.findIndex((step) => step.program === "./configure");
+      expect(pull).toBe(0);
       expect(build).toBeGreaterThan(pull);
+      expect(steps.some((step) => step.args[0] === "clone")).toBe(false);
     });
 
-    it("installLib fails naming the directory when the update fails", () => {
+    it("installLib fails naming the directory when the update fails", async () => {
       cloneExists("test-dir");
-      mockedExecSync.mockImplementation(((command: string) => {
-        if (String(command).includes("pull --ff-only")) {
-          throw new Error("not possible to fast-forward");
-        }
-        return Buffer.from("ok");
-      }) as unknown as typeof execSync);
-      expect(installLib(config, "https://github.com/test/repo.git", "test-dir", "native")).toBe(false);
+      mockedRunStep.mockImplementation(async (step) =>
+        step.args.includes("pull")
+          ? { status: "failed", exitCode: 128, signal: null, output: "" }
+          : { status: "completed" }
+      );
+      expect(await installLib(config, "https://github.com/test/repo.git", "test-dir", "native")).toBe(false);
       expect(errorSpy.mock.calls.map((call) => call.join(" ")).join("\n")).toContain("test-dir");
-      expect(commandsRun().some((command) => command.includes("./configure"))).toBe(false);
+      expect(labelsRun().some((label) => label.includes("configure"))).toBe(false);
     });
 
     it("getInstallSteps updates an existing directory before compiling", () => {

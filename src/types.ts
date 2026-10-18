@@ -327,3 +327,33 @@ export interface BuildRequest {
   /** The deprecated bare word "recursive" was used */
   deprecatedBareWord: boolean;
 }
+
+/** Options for Build.buildProject(), a plain or incremental build of one project. */
+export interface ProjectBuildOptions {
+  /** The project directory every step runs in */
+  projectDir: string;
+  /** Absent for an incremental build (compile and install only) */
+  target?: "native" | "windows";
+  /** Strip the installed binaries (full builds only) */
+  release: boolean;
+  /** Compile job limit */
+  jobs?: number;
+  /** Directory holding the signing certificates */
+  configDir: string;
+  /** Base environment for every step; process.env when omitted */
+  env?: NodeJS.ProcessEnv;
+  /** First cancellation: stops every step except install, strip and sign */
+  signal?: AbortSignal;
+  /** Second cancellation: also stops install, strip and sign */
+  forceSignal?: AbortSignal;
+  /** Receives each step's output as it arrives; the tool's own streams when omitted */
+  output?: { stdout(chunk: Buffer): void; stderr(chunk: Buffer): void };
+  /** Receives each progress line; console.log when omitted */
+  log?: (line: string) => void;
+}
+
+/** How Build.buildProject() ended. */
+export type ProjectBuildResult =
+  | { status: "completed" }
+  | { status: "failed"; step: string; message: string }
+  | { status: "cancelled" };

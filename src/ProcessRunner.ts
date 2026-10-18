@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import { constants as bufferConstants } from "buffer";
 import { spawn, spawnSync } from "child_process";
 
 /** The outcome of one command run by runCommand(). */
@@ -134,6 +135,18 @@ export function formatFailureOutput(command: string, stdout: string, stderr: str
 }
 
 /**
+ * Turns captured chunks into text. Output longer than `limit` bytes (default:
+ * the longest string the runtime can hold) keeps its last `limit` bytes,
+ * preceded by a line saying how many earlier bytes were left out.
+ */
+export function capturedText(chunks: Buffer[], limit: number = bufferConstants.MAX_STRING_LENGTH): string {
+  const all = Buffer.concat(chunks);
+  if (all.length <= limit) return all.toString();
+  const omitted = all.length - limit;
+  return `[${omitted} bytes of earlier output omitted]\n` + all.subarray(omitted).toString();
+}
+
+/**
  * Runs a program with an argument array, without a shell and without
  * blocking the event loop. Nothing in the arguments or environment is
  * interpreted. The output is captured in full, or passed on as it arrives
@@ -216,8 +229,8 @@ export function runCommand(program: string, args: string[], options: RunCommandO
       resolve({
         exitCode: code,
         signal: closeSignal,
-        stdout: Buffer.concat(stdoutChunks).toString(),
-        stderr: Buffer.concat(stderrChunks).toString(),
+        stdout: capturedText(stdoutChunks),
+        stderr: capturedText(stderrChunks),
         killed,
       });
     });

@@ -5,8 +5,23 @@ import Config from "../src/Config";
 import Build, { targets, extractScope, getStripTool, isBinaryByMagic, stripBinaries, findBuiltOutputs } from "../src/Build";
 import { BuildStep } from "../src/types";
 
-jest.mock("child_process", () => ({
-  execSync: jest.fn(() => Buffer.from(""))
+// Signing is replaced so a build's final signing step can be observed; the hooks
+// below decide what it reports.
+const mockSigningHooks = {
+  events: [] as string[],
+  hasCert: (_scope: string): boolean => true,
+};
+jest.mock("../src/Signing", () => ({
+  __esModule: true,
+  default: class {
+    hasCert(scope: string) { return mockSigningHooks.hasCert(scope); }
+    getCertInfo() { return { isExpired: false }; }
+    async isBinaryFile() { return true; }
+    async signFile(filePath: string) {
+      mockSigningHooks.events.push("sign:" + filePath);
+      return { signatureType: "embedded" };
+    }
+  },
 }));
 
 jest.mock("../src/ProcessRunner", () => ({
@@ -16,9 +31,7 @@ jest.mock("../src/ProcessRunner", () => ({
   findOnPath: jest.fn((name: string) => "/mock/bin/" + name),
 }));
 
-import { execSync } from "child_process";
-import { runCommand, findOnPath, formatCommand, CommandResult } from "../src/ProcessRunner";
-const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
+import { runCommand, findOnPath, formatCommand, CommandResult, RunCommandOptions } from "../src/ProcessRunner";
 const mockedFindOnPath = findOnPath as jest.MockedFunction<typeof findOnPath>;
 const mockedRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
 
@@ -42,8 +55,6 @@ describe("test Build", () => {
 
   beforeEach(() => {
     build = new Build(config);
-    mockedExecSync.mockClear();
-    mockedExecSync.mockReturnValue(Buffer.from(""));
   });
 
   afterAll(() => {
@@ -57,90 +68,400 @@ describe("test Build", () => {
     });
   });
 
-  describe("autogen", () => {
-    it("runs autogen.sh", () => {
-      build.autogen();
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        "./autogen.sh",
-        expect.objectContaining({ stdio: "pipe" })
-      );
-    });
+  describe("buildProject", () => {
+    let projectDir: string;
+    let events: string[];
+    let sink: { stdout: string[]; stderr: string[] };
+    let logSpy: jest.SpyInstance;
 
-    it("propagates errors", () => {
-      mockedExecSync.mockImplementation(() => {
-        throw new Error("autogen failed");
+    function buildOptions(extra: Record<string, unknown> = {}) {
+      return {
+        projectDir,
+        target: "native" as "native" | "windows" | undefined,
+        release: false,
+        configDir,
+        log: (line: string) => events.push("log:" + line),
+        output: {
+          stdout: (chunk: Buffer) => sink.stdout.push(chunk.toString()),
+          stderr: (chunk: Buffer) => sink.stderr.push(chunk.toString()),
+        },
+        ...extra,
+      };
+    }
+
+    /** [program, args] of every runCommand call, in order */
+    function programs(): Array<[string, string[]]> {
+      return mockedRunCommand.mock.calls.map((call) => [String(call[0]), call[1] as string[]]);
+    }
+
+    function stepsOf(target: string, full: boolean): Array<[string, string[]]> {
+      return build.getSteps(target, full).map((s) => [s.program, s.args]);
+    }
+
+    function writeElf(name: string): string {
+      const libsDir = path.join(projectDir, "src", ".libs");
+      fs.mkdirSync(libsDir, { recursive: true });
+      const filePath = path.join(libsDir, name);
+      fs.writeFileSync(filePath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x00, 0x00]));
+      return filePath;
+    }
+
+    /** Makes the call of the step whose program and first argument match fail with the given result. */
+    function failStep(label: string, result: Partial<CommandResult>): void {
+      const step = build.getSteps("native", true).find((s) => s.label === label)!;
+      mockedRunCommand.mockImplementation(async (program: string, args: string[]) => {
+        events.push("run:" + program + " " + args.join(" "));
+        return program === step.program && args.join(" ") === step.args.join(" ")
+          ? commandResult(result)
+          : commandResult();
       });
-      expect(() => build.autogen()).toThrow("autogen failed");
+    }
+
+    beforeEach(() => {
+      projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "build-project-test-"));
+      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({ name: "@scope/proj" }));
+      events = [];
+      sink = { stdout: [], stderr: [] };
+      mockSigningHooks.events = [];
+      mockSigningHooks.hasCert = () => true;
+      mockedRunCommand.mockReset();
+      mockedRunCommand.mockImplementation(async (program: string, args: string[]) => {
+        events.push("run:" + program + " " + args.join(" "));
+        return commandResult();
+      });
+      mockedFindOnPath.mockClear();
+      mockedFindOnPath.mockImplementation((name: string) => "/mock/bin/" + name);
+      logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
     });
-  });
 
-  describe("configure", () => {
-    it("runs configure for native target", () => {
-      build.target = "native";
-      build.configure();
+    afterEach(() => {
+      logSpy.mockRestore();
+      fs.rmSync(projectDir, { recursive: true });
+    });
 
-      // First call is make distclean
-      expect(mockedExecSync).toHaveBeenCalledWith(
-        "make distclean",
-        expect.anything()
+    it("runs the steps of a plain build in order, in the project directory", async () => {
+      const result = await build.buildProject(buildOptions());
+
+      expect(result).toEqual({ status: "completed" });
+      expect(programs()).toEqual(stepsOf("native", true));
+      for (const call of mockedRunCommand.mock.calls) {
+        expect(call[2]).toEqual(expect.objectContaining({ cwd: path.resolve(projectDir) }));
+      }
+    });
+
+    it("lays the configure step's environment over the base environment", async () => {
+      await build.buildProject(buildOptions({ env: { SEED_BASE_VALUE: "kept" } }));
+
+      const configure = mockedRunCommand.mock.calls.find((call) => call[0] === "./configure")!;
+      const env = (configure[2] as { env: NodeJS.ProcessEnv }).env;
+      expect(env.SEED_BASE_VALUE).toBe("kept");
+      expect(env.PKG_CONFIG_PATH).toContain(path.join(build.getInstallPrefix("native"), "lib/pkgconfig"));
+    });
+
+    it("precedes each step with '==> <label>: <stepText>' through log", async () => {
+      await build.buildProject(buildOptions());
+
+      const expected: string[] = [];
+      for (const step of build.getSteps("native", true)) {
+        const text = formatCommand(step.program, step.args);
+        expected.push("log:==> " + step.label + ": " + text);
+        expected.push("run:" + step.program + " " + step.args.join(" "));
+      }
+      expect(events).toEqual(expected);
+    });
+
+    it("streams each step's output to the given sink", async () => {
+      mockedRunCommand.mockImplementation(async (program: string, _args: string[], options?: RunCommandOptions) => {
+        options!.output!.stdout(Buffer.from("out:" + program + ";"));
+        options!.output!.stderr(Buffer.from("err:" + program + ";"));
+        return commandResult();
+      });
+
+      await build.buildProject(buildOptions());
+
+      const programNames = build.getSteps("native", true).map((s) => s.program);
+      expect(sink.stdout).toEqual(programNames.map((p) => "out:" + p + ";"));
+      expect(sink.stderr).toEqual(programNames.map((p) => "err:" + p + ";"));
+      // Stream mode: nothing is captured
+      for (const call of mockedRunCommand.mock.calls) {
+        expect((call[2] as RunCommandOptions).output).toBeDefined();
+      }
+    });
+
+    it("logs an ignored distclean failure and continues", async () => {
+      failStep("distclean", { exitCode: 2 });
+
+      const result = await build.buildProject(buildOptions());
+
+      expect(result).toEqual({ status: "completed" });
+      expect(events).toContain("log:distclean exited with status 2; ignored.");
+      expect(programs()).toEqual(stepsOf("native", true));
+    });
+
+    it("a failure stops before install and returns the step and a one-line message", async () => {
+      failStep("compile", { exitCode: 2 });
+
+      const result = await build.buildProject(buildOptions());
+
+      const compile = build.getSteps("native", true).find((s) => s.label === "compile")!;
+      expect(result).toEqual({
+        status: "failed",
+        step: "compile",
+        message: formatCommand(compile.program, compile.args) + " exited with status 2",
+      });
+      expect(programs().map(([, args]) => args[0])).not.toContain("install");
+      expect(programs()).toHaveLength(4);
+    });
+
+    it("a step ended by a signal is a failure of that step (message ends '... was ended by <signal>')", async () => {
+      // Wording for the signal case is not fixed by the contract; this is the form the implementation should use.
+      failStep("configure", { exitCode: null, signal: "SIGSEGV" });
+
+      const result = await build.buildProject(buildOptions());
+
+      expect(result.status).toBe("failed");
+      const failed = result as { status: "failed"; step: string; message: string };
+      expect(failed.step).toBe("configure");
+      expect(failed.message).toMatch(/was ended by SIGSEGV$/);
+      expect(programs()).toHaveLength(3);
+    });
+
+    it("a failure of the first step stops everything after it", async () => {
+      failStep("autogen", { exitCode: 1 });
+      const result = await build.buildProject(buildOptions());
+      expect(result).toEqual({ status: "failed", step: "autogen", message: "./autogen.sh exited with status 1" });
+      expect(programs()).toEqual([["./autogen.sh", []]]);
+    });
+
+    it("a program that cannot be started is a failure of that step", async () => {
+      mockedRunCommand.mockImplementation(async (program: string) => {
+        if (program === "./configure") {
+          throw Object.assign(new Error("spawn ./configure ENOENT"), { code: "ENOENT" });
+        }
+        return commandResult();
+      });
+
+      const result = await build.buildProject(buildOptions());
+
+      expect(result).toEqual({ status: "failed", step: "configure", message: "./configure: not found" });
+      expect(programs().map(([program]) => program)).toEqual(["./autogen.sh", "make", "./configure"]);
+    });
+
+    it("buildProject returns cancelled and starts no further step", async () => {
+      const controller = new AbortController();
+      mockedRunCommand.mockImplementation(async (program: string) => {
+        if (program === "./autogen.sh") {
+          controller.abort();
+          return commandResult({ killed: true, exitCode: null, signal: "SIGTERM" });
+        }
+        return commandResult();
+      });
+
+      const result = await build.buildProject(buildOptions({ signal: controller.signal }));
+
+      expect(result).toEqual({ status: "cancelled" });
+      expect(programs()).toEqual([["./autogen.sh", []]]);
+      expect(mockSigningHooks.events).toEqual([]);
+    });
+
+    it("starts nothing when the signal is already aborted", async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const result = await build.buildProject(buildOptions({ signal: controller.signal }));
+
+      expect(result).toEqual({ status: "cancelled" });
+      expect(mockedRunCommand).not.toHaveBeenCalled();
+    });
+
+    it("runs the install step under the force signal and the others under the first signal", async () => {
+      const cancel = new AbortController();
+      const force = new AbortController();
+
+      await build.buildProject(buildOptions({ signal: cancel.signal, forceSignal: force.signal }));
+
+      const steps = build.getSteps("native", true);
+      mockedRunCommand.mock.calls.forEach((call, index) => {
+        const expected = steps[index].label === "install" ? force.signal : cancel.signal;
+        expect((call[2] as RunCommandOptions).signal).toBe(expected);
+      });
+    });
+
+    it("a force signal ending the install step gives cancelled", async () => {
+      const cancel = new AbortController();
+      const force = new AbortController();
+      mockedRunCommand.mockImplementation(async (_program: string, args: string[]) => {
+        if (args[0] === "install") {
+          cancel.abort();
+          force.abort();
+          return commandResult({ killed: true, exitCode: null, signal: "SIGTERM" });
+        }
+        return commandResult();
+      });
+
+      const result = await build.buildProject(buildOptions({ signal: cancel.signal, forceSignal: force.signal, release: true }));
+
+      expect(result).toEqual({ status: "cancelled" });
+      expect(mockSigningHooks.events).toEqual([]);
+    });
+
+    it("starts no install after a first cancellation", async () => {
+      const cancel = new AbortController();
+      const force = new AbortController();
+      mockedRunCommand.mockImplementation(async (_program: string, args: string[]) => {
+        // The compile step finishes normally just as Ctrl+C arrives
+        if (args[0] === "-j" || String(args[0]).startsWith("-j")) {
+          cancel.abort();
+        }
+        return commandResult();
+      });
+
+      const result = await build.buildProject(buildOptions({ signal: cancel.signal, forceSignal: force.signal }));
+
+      expect(result).toEqual({ status: "cancelled" });
+      expect(programs().map(([, args]) => args[0])).not.toContain("install");
+      expect(mockSigningHooks.events).toEqual([]);
+    });
+
+    it("strips only with release and a target, between install and sign", async () => {
+      const elf = writeElf("libfoo.so");
+
+      const result = await build.buildProject(buildOptions({ release: true }));
+
+      expect(result).toEqual({ status: "completed" });
+      const calls = programs();
+      expect(calls.slice(0, 5)).toEqual(stepsOf("native", true));
+      expect(calls.slice(5)).toEqual([["/mock/bin/strip", ["--strip-unneeded", elf]]]);
+    });
+
+    it("strips for the windows target with the mingw tool", async () => {
+      const elf = writeElf("libfoo.dll");
+
+      await build.buildProject(buildOptions({ release: true, target: "windows" }));
+
+      expect(mockedFindOnPath).toHaveBeenCalledWith("x86_64-w64-mingw32-strip");
+      expect(programs()).toContainEqual(["/mock/bin/x86_64-w64-mingw32-strip", ["--strip-unneeded", elf]]);
+    });
+
+    it("does not strip without release", async () => {
+      writeElf("libfoo.so");
+      await build.buildProject(buildOptions({ release: false }));
+      expect(programs()).toEqual(stepsOf("native", true));
+      expect(mockedFindOnPath).not.toHaveBeenCalled();
+    });
+
+    it("does not strip an incremental build even with release", async () => {
+      writeElf("libfoo.so");
+      await build.buildProject(buildOptions({ release: true, target: undefined }));
+      expect(programs()).toEqual(stepsOf("native", false));
+      expect(mockedFindOnPath).not.toHaveBeenCalled();
+    });
+
+    it("strips under the force signal", async () => {
+      writeElf("libfoo.so");
+      const cancel = new AbortController();
+      const force = new AbortController();
+
+      await build.buildProject(buildOptions({ release: true, signal: cancel.signal, forceSignal: force.signal }));
+
+      const stripCall = mockedRunCommand.mock.calls.find((call) => call[0] === "/mock/bin/strip")!;
+      expect((stripCall[2] as RunCommandOptions).signal).toBe(force.signal);
+    });
+
+    it("a strip failure is a failure at strip and signs nothing", async () => {
+      writeElf("libfoo.so");
+      mockedRunCommand.mockImplementation(async (program: string) =>
+        program === "/mock/bin/strip" ? commandResult({ exitCode: 1, stderr: "bad file\n" }) : commandResult()
       );
 
-      // Second call is configure
-      const configureCalls = mockedExecSync.mock.calls.filter(
-        (call) => String(call[0]).includes("./configure")
+      const result = await build.buildProject(buildOptions({ release: true }));
+
+      expect(result.status).toBe("failed");
+      const failed = result as { status: "failed"; step: string; message: string };
+      expect(failed.step).toBe("strip");
+      expect(failed.message).toContain("strip failed on src/.libs/libfoo.so");
+      expect(mockSigningHooks.events).toEqual([]);
+    });
+
+    it("a missing strip tool is a failure at strip", async () => {
+      writeElf("libfoo.so");
+      mockedFindOnPath.mockReturnValue(null);
+
+      const result = await build.buildProject(buildOptions({ release: true }));
+
+      expect(result.status).toBe("failed");
+      const failed = result as { status: "failed"; step: string; message: string };
+      expect(failed.step).toBe("strip");
+      expect(failed.message).toContain("Strip tool 'strip' not found on this system");
+      expect(mockSigningHooks.events).toEqual([]);
+    });
+
+    it("a force signal during stripping gives cancelled", async () => {
+      writeElf("liba.so");
+      writeElf("libb.so");
+      const force = new AbortController();
+      mockedRunCommand.mockImplementation(async (program: string) => {
+        if (program === "/mock/bin/strip") {
+          force.abort();
+          return commandResult({ killed: true, exitCode: null, signal: "SIGTERM" });
+        }
+        return commandResult();
+      });
+
+      const result = await build.buildProject(buildOptions({ release: true, forceSignal: force.signal }));
+
+      expect(result).toEqual({ status: "cancelled" });
+      expect(mockSigningHooks.events).toEqual([]);
+    });
+
+    it("signs after stripping, last of all", async () => {
+      const elf = writeElf("libfoo.so");
+      mockedRunCommand.mockImplementation(async (program: string, args: string[]) => {
+        events.push(program === "/mock/bin/strip" ? "strip" : "run:" + program + " " + args.join(" "));
+        return commandResult();
+      });
+      mockSigningHooks.hasCert = () => {
+        events.push("sign-lookup");
+        return true;
+      };
+
+      await build.buildProject(buildOptions({ release: true }));
+
+      expect(mockSigningHooks.events).toEqual(["sign:" + elf]);
+      const strip = events.indexOf("strip");
+      const sign = events.indexOf("sign-lookup");
+      expect(strip).toBeGreaterThan(events.findIndex((e) => e.startsWith("run:make install")));
+      expect(sign).toBeGreaterThan(strip);
+    });
+
+    it("a signing error is a failure at sign", async () => {
+      mockSigningHooks.hasCert = () => {
+        throw new Error("certificate store unreadable");
+      };
+
+      const result = await build.buildProject(buildOptions());
+
+      expect(result.status).toBe("failed");
+      const failed = result as { status: "failed"; step: string; message: string };
+      expect(failed.step).toBe("sign");
+      expect(failed.message).toContain("certificate store unreadable");
+    });
+
+    it("incremental build (no target) runs compile and install only", async () => {
+      const result = await build.buildProject(buildOptions({ target: undefined }));
+
+      expect(result).toEqual({ status: "completed" });
+      expect(programs()).toEqual(stepsOf("native", false));
+      expect(programs().map(([program]) => program)).toEqual(["make", "make"]);
+      expect(events.filter((e) => e.startsWith("log:"))).toEqual(
+        build.getSteps("native", false).map((s) => "log:==> " + s.label + ": " + formatCommand(s.program, s.args))
       );
-      expect(configureCalls.length).toBe(1);
-      const configureCmd = String(configureCalls[0][0]);
-      expect(configureCmd).toContain("--prefix=" + config.config.prefix + "/x86_64-linux-gnu");
-      expect(configureCmd).not.toContain("--host");
     });
 
-    it("runs configure for windows target", () => {
-      build.target = "windows";
-      build.configure();
-
-      const configureCalls = mockedExecSync.mock.calls.filter(
-        (call) => String(call[0]).includes("./configure")
-      );
-      expect(configureCalls.length).toBe(1);
-      const configureCmd = String(configureCalls[0][0]);
-      expect(configureCmd).toContain("--host=x86_64-w64-mingw32");
-    });
-
-    it("runs distclean before configure", () => {
-      build.target = "native";
-      build.configure();
-
-      const calls = mockedExecSync.mock.calls.map((c) => String(c[0]));
-      const distcleanIndex = calls.findIndex((c) => c.includes("make distclean"));
-      const configureIndex = calls.findIndex((c) => c.includes("./configure"));
-      expect(distcleanIndex).toBeLessThan(configureIndex);
-    });
-  });
-
-  describe("reconfigure", () => {
-    it("chains autogen and configure", () => {
-      build.reconfigure("native");
-
-      const calls = mockedExecSync.mock.calls.map((c) => String(c[0]));
-      const autogenIndex = calls.findIndex((c) => c.includes("./autogen.sh"));
-      const configureIndex = calls.findIndex((c) => c.includes("./configure"));
-      expect(autogenIndex).toBeGreaterThanOrEqual(0);
-      expect(configureIndex).toBeGreaterThan(autogenIndex);
-    });
-  });
-
-  describe("compile", () => {
-    it("runs make -j", () => {
-      build.compile();
-      expect(mockedExecSync).toHaveBeenCalledWith("make -j");
-    });
-  });
-
-  describe("install", () => {
-    it("runs make install", () => {
-      build.install();
-      expect(mockedExecSync).toHaveBeenCalledWith("make install");
+    it("signs after an incremental build", async () => {
+      const elf = writeElf("libfoo.so");
+      await build.buildProject(buildOptions({ target: undefined }));
+      expect(mockSigningHooks.events).toEqual(["sign:" + elf]);
     });
   });
 
@@ -273,8 +594,7 @@ describe("test Build", () => {
   });
 
   describe("getInstallPrefix", () => {
-    it("returns correct prefix for native target", () => {
-      build.target = "native";
+    it("defaults to the native prefix", () => {
       const prefix = build.getInstallPrefix();
       expect(prefix).toBe(config.config.prefix + "/x86_64-linux-gnu");
     });
@@ -284,10 +604,9 @@ describe("test Build", () => {
       expect(prefix).toBe(config.config.prefix + "/x86_64-w64-mingw32");
     });
 
-    it("uses explicit target over instance target", () => {
-      build.target = "native";
-      const prefix = build.getInstallPrefix("windows");
-      expect(prefix).toBe(config.config.prefix + "/x86_64-w64-mingw32");
+    it("uses the given target", () => {
+      expect(build.getInstallPrefix("native")).toBe(config.config.prefix + "/x86_64-linux-gnu");
+      expect(build.getInstallPrefix("windows")).toBe(config.config.prefix + "/x86_64-w64-mingw32");
     });
   });
 });
@@ -378,7 +697,6 @@ describe("stripBinaries", () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "strip-test-"));
-    mockedExecSync.mockClear();
     mockedRunCommand.mockReset();
     mockedRunCommand.mockResolvedValue(commandResult());
     mockedFindOnPath.mockClear();
@@ -418,7 +736,6 @@ describe("stripBinaries", () => {
     await stripBinaries(tmpDir, "native");
     expect(mockedFindOnPath).toHaveBeenCalledWith("strip");
     expect(runCommandCalls()).toEqual([]);
-    expect(mockedExecSync).not.toHaveBeenCalled();
   });
 
   it("returns empty result when no binary files found", async () => {
@@ -441,7 +758,6 @@ describe("stripBinaries", () => {
 
     // Verify strip --strip-unneeded was called
     expect(runCommandCalls()).toEqual([["/mock/bin/strip", ["--strip-unneeded", elfFile]]]);
-    expect(mockedExecSync).not.toHaveBeenCalled();
   });
 
   it("strips PE binaries with windows target using mingw strip", async () => {

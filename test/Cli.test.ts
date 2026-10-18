@@ -80,6 +80,23 @@ describe("runCli on first use", () => {
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
+  it("build native outside a project on an empty home fails at autogen without a stack trace", async () => {
+    const emptyProject = fs.mkdtempSync(path.join(os.tmpdir(), "cli-test-project-"));
+    const originalCwd = process.cwd();
+    process.chdir(emptyProject);
+    try {
+      await expect(runCli(argv("build", "native"), configDir, binName)).resolves.toBeUndefined();
+    } finally {
+      process.chdir(originalCwd);
+      fs.rmSync(emptyProject, { recursive: true, force: true });
+    }
+    expect(fs.existsSync(path.join(configDir, "config.json"))).toBe(true);
+    expect(process.exitCode).toBe(1);
+    const messages = errorSpy.mock.calls.map((call) => call.map(String).join(" ")).join("\n");
+    expect(messages).toContain("autogen");
+    expect(messages).not.toMatch(/\bat .*\(.*:\d+:\d+\)/);
+  });
+
   it("an unwritable home exits 1 with the message and no stack trace", async () => {
     if (!optionalExternalCheck("unwritable-home", process.getuid?.() !== 0, "running as root, permissions are not enforced")) {
       return;

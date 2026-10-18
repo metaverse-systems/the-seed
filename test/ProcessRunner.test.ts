@@ -8,6 +8,7 @@ import {
   findOnPath,
   liveProcessGroups,
   killRegisteredGroups,
+  capturedText,
 } from "../src/ProcessRunner";
 
 const describePosix = process.platform === "win32" ? describe.skip : describe;
@@ -360,4 +361,57 @@ describePosix("ProcessRunner exit hook", () => {
     }
     expect(gone).toBe(true);
   }, 10000);
+});
+
+// Choice where the contract leaves the helper open: capturedText(chunks: Buffer[], limit?: number): string
+// turns the captured chunks into text; the limit defaults to buffer.constants.MAX_STRING_LENGTH and
+// tests lower it. Over the limit it keeps the tail of the output and starts with
+// "[<n> bytes of earlier output omitted]\n"; the kept tail is at most `limit` bytes long.
+describe("capture guard", () => {
+  const noticePattern = /^\[(\d+) bytes of earlier output omitted\]\n/;
+
+  it("drops nothing under the limit", () => {
+    const chunks = [Buffer.from("hello "), Buffer.from("world\n")];
+    expect(capturedText(chunks, 1000)).toBe("hello world\n");
+  });
+
+  it("drops nothing at exactly the limit", () => {
+    const text = "x".repeat(64);
+    expect(capturedText([Buffer.from(text)], 64)).toBe(text);
+  });
+
+  it("returns an empty string for no output", () => {
+    expect(capturedText([], 10)).toBe("");
+  });
+
+  it("keeps the tail and starts with the omitted-bytes line when over the limit", () => {
+    const text = Array.from({ length: 200 }, (_, i) => "line " + i + "\n").join("");
+    const chunks = [Buffer.from(text.slice(0, 700)), Buffer.from(text.slice(700, 1100)), Buffer.from(text.slice(1100))];
+
+    const result = capturedText(chunks, 256);
+
+    const match = noticePattern.exec(result);
+    expect(match).not.toBeNull();
+    const omitted = Number(match![1]);
+    const kept = result.slice(match![0].length);
+    expect(kept.length).toBeGreaterThan(0);
+    expect(kept.length).toBeLessThanOrEqual(256);
+    expect(text.endsWith(kept)).toBe(true);
+    expect(omitted + kept.length).toBe(text.length);
+    expect(result.endsWith("line 199\n")).toBe(true);
+  });
+
+  it("handles one chunk much longer than the limit", () => {
+    const text = "a".repeat(10_000) + "THE END";
+    const result = capturedText([Buffer.from(text)], 100);
+    const match = noticePattern.exec(result)!;
+    expect(match).not.toBeNull();
+    expect(result.endsWith("THE END")).toBe(true);
+    expect(Number(match[1]) + (result.length - match[0].length)).toBe(text.length);
+  });
+
+  it("applies to a stream by itself: the default limit leaves ordinary output alone", () => {
+    const text = "ordinary output\n".repeat(1000);
+    expect(capturedText([Buffer.from(text)])).toBe(text);
+  });
 });

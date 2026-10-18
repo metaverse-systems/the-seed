@@ -1,9 +1,9 @@
 import fs from "fs";
 import path from "path";
 import Config from "./Config";
-import { execSync } from "child_process";
-import { BuildStep, StripResult } from "./types";
+import { BuildStep, ProjectBuildOptions, ProjectBuildResult, StripResult } from "./types";
 import Signing from "./Signing";
+import { runStep, stepText } from "./StepRunner";
 import { runCommand, commandFailedMessage, findOnPath, formatCommand } from "./ProcessRunner";
 
 export const targets: {
@@ -13,85 +13,92 @@ export const targets: {
   windows: "x86_64-w64-mingw32",
 };
 
-const execOptions = { stdio: "pipe" as const };
+/** The tool's own output streams, used when a build is given no sink. */
+const ownOutput = {
+  stdout: (chunk: Buffer) => {
+    process.stdout.write(chunk);
+  },
+  stderr: (chunk: Buffer) => {
+    process.stderr.write(chunk);
+  },
+};
 
 class Build {
   config: Config;
-  target = "linux";
 
   constructor(config: Config) {
     this.config = config;
   }
 
-  autogen = () => {
-    const autogen_command = "./autogen.sh";
-    try {
-      const result = execSync(autogen_command, execOptions).toString();
-    } catch (e) {
-      console.error(e);
-      throw e;
+  /**
+   * Builds the project in `options.projectDir`: a full build (autogen,
+   * distclean, configure, compile, install) when a target is given, otherwise
+   * an incremental one (compile and install). A release build then strips the
+   * installed binaries, and the built binaries are signed when a certificate
+   * exists.
+   *
+   * Each step's output is passed on as it arrives, never kept, so a build can
+   * write any amount. The first cancellation stops the running step and
+   * starts no other; install, strip and sign run under the force signal so a
+   * single Ctrl+C lets an install in progress finish.
+   */
+  buildProject = async (options: ProjectBuildOptions): Promise<ProjectBuildResult> => {
+    const log = options.log ?? ((line: string) => console.log(line));
+    const output = options.output ?? ownOutput;
+    const fullReconfigure = options.target !== undefined;
+    const target = options.target ?? "native";
+
+    for (const step of this.getSteps(target, fullReconfigure, options.jobs)) {
+      const isInstall = step.label === "install";
+      if (isInstall && (options.signal?.aborted || options.forceSignal?.aborted)) {
+        return { status: "cancelled" };
+      }
+
+      const text = stepText(step);
+      log(`==> ${step.label}: ${text}`);
+
+      const outcome = await runStep(step, {
+        baseDir: options.projectDir,
+        baseEnv: options.env,
+        signal: isInstall ? options.forceSignal : options.signal,
+        output: { mode: "stream", output },
+      });
+
+      switch (outcome.status) {
+        case "interrupted":
+          return { status: "cancelled" };
+        case "notFound":
+          return { status: "failed", step: step.label, message: outcome.message };
+        case "failed":
+          return {
+            status: "failed",
+            step: step.label,
+            message: outcome.exitCode === null ? `${text} was ended by ${outcome.signal}` : `${text} exited with status ${outcome.exitCode}`,
+          };
+        case "ignored":
+          log(`${step.label} exited with status ${outcome.exitCode}; ignored.`);
+          break;
+        case "completed":
+          break;
+      }
     }
 
-    console.log("Completed " + autogen_command);
-  };
-
-  configure = () => {
-    const newTarget = targets[this.target];
-    const distclean_command = "make distclean";
-    try {
-      const result = execSync(distclean_command, execOptions).toString();
-    } catch (e) {
-      // A failing "make distclean" on a tree that was never configured is expected and ignored.
+    if (options.release && options.target !== undefined) {
+      try {
+        await stripBinaries(options.projectDir, options.target, options.forceSignal, options.log);
+      } catch (e: unknown) {
+        if (options.forceSignal?.aborted) return { status: "cancelled" };
+        return { status: "failed", step: "strip", message: (e as Error).message ?? String(e) };
+      }
     }
 
-    const prefix = this.config.config.prefix + "/" + newTarget;
-
-    const configure_command =
-      "PKG_CONFIG_PATH=" +
-      prefix +
-      "/lib/pkgconfig/ " +
-      "./configure --prefix=" +
-      prefix +
-      (this.target === "windows" ? " --host=" + targets["windows"] : "");
-
     try {
-      const result = execSync(configure_command, execOptions).toString();
-    } catch (e) {
-      console.error(e);
-      throw e;
+      await autoSignIfCertExists(options.configDir, options.projectDir, options.log);
+    } catch (e: unknown) {
+      return { status: "failed", step: "sign", message: (e as Error).message ?? String(e) };
     }
 
-    console.log("Configure complete");
-  };
-
-  reconfigure = (target: string) => {
-    this.target = target;
-    this.autogen();
-    this.configure();
-  };
-
-  compile = () => {
-    const make_command = "make -j";
-
-    try {
-      const result = execSync(make_command).toString();
-      console.log(result);
-    } catch (e) {
-      console.error(e);
-      throw e;
-    }
-  };
-
-  install = () => {
-    const install_command = "make install";
-
-    try {
-      const result = execSync(install_command).toString();
-      console.log(result);
-    } catch (e) {
-      console.error(e);
-      throw e;
-    }
+    return { status: "completed" };
   };
 
   /**
@@ -130,12 +137,10 @@ class Build {
   };
 
   /**
-   * Get the install prefix directory for the current or specified target.
+   * Get the install prefix directory for the given target (native by default).
    */
-  getInstallPrefix = (target?: string): string => {
-    const t = target || this.target;
-    const newTarget = targets[t];
-    return this.config.config.prefix + "/" + newTarget;
+  getInstallPrefix = (target = "native"): string => {
+    return this.config.config.prefix + "/" + targets[target];
   };
 }
 
