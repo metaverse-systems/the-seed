@@ -542,3 +542,96 @@ describe("scratch area and real-home checks", () => {
     });
   });
 });
+
+// Expected shape of the external-tool helper, as exercised here:
+//   optionalExternalCheck(name, available, reason) -> boolean
+//   available: returns true and prints nothing.
+//   unavailable, THE_SEED_REQUIRE_TOOLS not "1": returns false and prints "SKIPPED CHECK: <name>: <reason>"
+//     once per loaded module (one test file) through console.log, console.warn or console.error.
+//   unavailable, THE_SEED_REQUIRE_TOOLS === "1": throws Error("required external tool missing: <name> (<reason>)").
+// The helper is loaded with require inside an isolated module registry so that its once-per-file memory
+// starts empty in every case, and so that a missing module fails only these cases.
+describe("optionalExternalCheck", () => {
+  type OptionalExternalCheck = (name: string, available: boolean, reason: string) => boolean;
+  const savedEnv = process.env;
+  let printed: string[] = [];
+  const spies: jest.SpyInstance[] = [];
+
+  function loadHelper(): OptionalExternalCheck {
+    let loaded: OptionalExternalCheck | undefined;
+    jest.isolateModules(() => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      loaded = require("./helpers/ExternalTools").optionalExternalCheck;
+    });
+    return expectPresent(loaded, "optionalExternalCheck");
+  }
+
+  beforeEach(() => {
+    process.env = { ...savedEnv };
+    delete process.env.THE_SEED_REQUIRE_TOOLS;
+    printed = [];
+    for (const method of ["log", "warn", "error"] as const) {
+      spies.push(
+        jest.spyOn(console, method).mockImplementation((...args: unknown[]) => {
+          printed.push(args.map(String).join(" "));
+        }),
+      );
+    }
+  });
+
+  afterEach(() => {
+    for (const spy of spies.splice(0)) {
+      spy.mockRestore();
+    }
+    process.env = savedEnv;
+  });
+
+  it("returns true and prints nothing when the tool is available", () => {
+    const check = loadHelper();
+    expect(check("python3", true, "not installed")).toBe(true);
+    expect(printed).toEqual([]);
+  });
+
+  it("returns true and prints nothing when available even if tools are required", () => {
+    process.env.THE_SEED_REQUIRE_TOOLS = "1";
+    const check = loadHelper();
+    expect(check("python3", true, "not installed")).toBe(true);
+    expect(printed).toEqual([]);
+  });
+
+  it("returns false and prints a SKIPPED CHECK line when unavailable and not required", () => {
+    const check = loadHelper();
+    expect(check("python3", false, "python3 not found")).toBe(false);
+    expect(printed).toEqual(["SKIPPED CHECK: python3: python3 not found"]);
+  });
+
+  it("prints the skipped line once per file however often it is called", () => {
+    const check = loadHelper();
+    expect(check("python3", false, "python3 not found")).toBe(false);
+    expect(check("python3", false, "python3 not found")).toBe(false);
+    expect(check("python3", false, "python3 not found")).toBe(false);
+    expect(printed).toEqual(["SKIPPED CHECK: python3: python3 not found"]);
+  });
+
+  it("treats any value other than 1 as not required", () => {
+    process.env.THE_SEED_REQUIRE_TOOLS = "0";
+    const check = loadHelper();
+    expect(check("python3", false, "python3 not found")).toBe(false);
+  });
+
+  it("fails with the tool name and reason when unavailable and required", () => {
+    process.env.THE_SEED_REQUIRE_TOOLS = "1";
+    const check = loadHelper();
+    expect(() => check("python3", false, "python3 not found")).toThrow(
+      "required external tool missing: python3 (python3 not found)",
+    );
+    expect(printed).toEqual([]);
+  });
+
+  it("fails every time it is called when required", () => {
+    process.env.THE_SEED_REQUIRE_TOOLS = "1";
+    const check = loadHelper();
+    expect(() => check("a", false, "x")).toThrow("required external tool missing: a (x)");
+    expect(() => check("a", false, "x")).toThrow("required external tool missing: a (x)");
+  });
+});

@@ -6,6 +6,7 @@ import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
 import { checkMachO } from "./helpers/MachOChecker";
 import { CfbPackage, loadReference, parsePackage, storedDigest } from "./helpers/CfbChecker";
+import { optionalExternalCheck } from "./helpers/ExternalTools";
 
 /**
  * Create a temporary directory for test isolation.
@@ -103,12 +104,14 @@ function sha256File(file: string): string {
 }
 
 /**
- * Run the independent Python checker of libthe-seed on a file when the
- * superproject checkout provides it. Returns null when it is not there.
+ * Run the independent Python checker of libthe-seed on a file. Returns null,
+ * after reporting the skipped check, when python3 or the checker is missing
+ * (an error when THE_SEED_REQUIRE_TOOLS=1).
  */
 function runPythonChecker(file: string): { status: number | null; output: string } | null {
   const checker = path.join(__dirname, "..", "..", "libthe-seed", "tests", "fixtures", "check_pages.py");
-  if (!fs.existsSync(checker)) {
+  const hasPython = spawnSync("python3", ["--version"]).status === 0;
+  if (!optionalExternalCheck("libthe-seed check_pages.py", hasPython && fs.existsSync(checker), hasPython ? "libthe-seed/tests/fixtures/check_pages.py not found" : "python3 not found")) {
     return null;
   }
   const run = spawnSync("python3", [checker, file], { encoding: "utf8" });
