@@ -37,6 +37,241 @@ function parseArguments(argv) {
   return { error: null, stages: ordered, jestArgs: rest };
 }
 
+const GAP_TAG = /^(.*) \[known gap: the-seed-1 finding (\d+)\]$/;
+const GENERIC_SIGNATURES = ["error", "expect", "failed", "failure", "exception", "undefined", "assertion"];
+const MIN_SIGNATURE_LENGTH = 12;
+const NO_DOCUMENTS_NOTICE = "Known-gap references not checked against the review: the parent repository is not present.";
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function relativeTestFile(name) {
+  return path.isAbsolute(name) ? path.relative(packageRoot, name) : name;
+}
+
+// Turns Jest's JSON results into the lines printed after the run.
+// Returns { lines, failed }.
+function summariseResults(jest, entries) {
+  const known = Array.isArray(entries) ? entries : [];
+  const groups = Array.isArray(jest && jest.testResults) ? jest.testResults : [];
+  const failedGroups = [];
+  const failedCases = [];
+  const knownGaps = [];
+  let passed = 0;
+  let failedCount = 0;
+  let skipped = 0;
+  let groupsFailed = 0;
+
+  for (const group of groups) {
+    const file = relativeTestFile(group.name || "");
+    const assertions = Array.isArray(group.assertionResults) ? group.assertionResults : [];
+    if (group.status === "failed") {
+      groupsFailed++;
+      if (assertions.length === 0) {
+        const message = String(group.message || group.failureMessage || "").split("\n")[0];
+        failedGroups.push("FAILED GROUP: " + file + ": " + message);
+      }
+    }
+    for (const result of assertions) {
+      const fullName = result.fullName || result.title || "";
+      if (result.status === "failed") {
+        failedCount++;
+        failedCases.push("FAILED: " + file + " › " + fullName);
+      } else if (result.status === "passed") {
+        const tagged = GAP_TAG.exec(fullName);
+        if (tagged) {
+          const name = tagged[1];
+          const finding = Number(tagged[2]);
+          const entry =
+            known.find((candidate) => Array.isArray(candidate.cases) && candidate.cases.indexOf(name) !== -1) ||
+            known.find((candidate) => candidate.finding === finding);
+          const fixedBy = entry && entry.fixedBy ? entry.fixedBy : "unknown";
+          knownGaps.push("KNOWN GAP: " + file + " › " + name + " (the-seed-1 finding " + finding + "; fixed by the-seed-1: " + fixedBy + ")");
+        } else {
+          passed++;
+        }
+      } else if (result.status === "pending" || result.status === "todo" || result.status === "skipped") {
+        skipped++;
+      }
+    }
+  }
+
+  const totals =
+    "Totals: " + passed + " passed, " + failedCount + " failed, " + knownGaps.length + " known gaps, " + skipped +
+    " skipped, " + groups.length + " groups (" + groupsFailed + " failed)";
+
+  return {
+    lines: failedGroups.concat(failedCases, knownGaps, [totals]),
+    failed: !(jest && jest.success === true) || groupsFailed > 0,
+  };
+}
+
+// Checks the known-gap list against the markers in the tests and, when present, the review and roadmap.
+// calls: { id, title }[]; documents: null or { review, roadmap } (file text).
+// Returns { errors, notices }; errors carry only the detail.
+function validateKnownGaps(entries, calls, documents) {
+  const errors = [];
+  const notices = [];
+
+  if (!Array.isArray(entries)) {
+    errors.push("test/known-gaps.json must contain a JSON array");
+    return { errors, notices };
+  }
+
+  const ids = new Set();
+  const caseOwners = new Map();
+
+  entries.forEach((entry, index) => {
+    const label = entry && typeof entry.id === "string" && entry.id !== "" ? '"' + entry.id + '"' : "entry " + index;
+    if (!entry || typeof entry !== "object") {
+      errors.push(label + ": must be an object");
+      return;
+    }
+    if (typeof entry.id !== "string" || !/^[a-z0-9-]+$/.test(entry.id)) {
+      errors.push(label + ": id must be lower-case letters, digits and hyphens");
+    } else if (ids.has(entry.id)) {
+      errors.push(label + ": duplicate id (ids must be unique)");
+    } else {
+      ids.add(entry.id);
+    }
+    if (entry.review !== "the-seed-1") {
+      errors.push(label + ': review must be exactly "the-seed-1"');
+    }
+    if (!Number.isInteger(entry.finding) || entry.finding < 1 || entry.finding > 17) {
+      errors.push(label + ": finding must be an integer from 1 to 17");
+    }
+    if (typeof entry.fixedBy !== "string" || entry.fixedBy.trim() === "") {
+      errors.push(label + ": fixedBy must be a non-empty roadmap task title");
+    }
+    if (typeof entry.reason !== "string" || entry.reason.trim() === "") {
+      errors.push(label + ": reason must be non-empty");
+    }
+    const signature = typeof entry.signature === "string" ? entry.signature.trim() : "";
+    if (signature.length < MIN_SIGNATURE_LENGTH || GENERIC_SIGNATURES.indexOf(signature.toLowerCase()) !== -1) {
+      errors.push(label + ": signature must be specific text of at least " + MIN_SIGNATURE_LENGTH + " characters, not a generic word");
+    }
+    if (!Array.isArray(entry.cases) || entry.cases.length === 0 || entry.cases.some((name) => typeof name !== "string" || name === "")) {
+      errors.push(label + ": cases must be a non-empty list of case names");
+    } else {
+      for (const name of entry.cases) {
+        if (caseOwners.has(name)) {
+          errors.push(label + ': case "' + name + '" is listed more than once (also in ' + caseOwners.get(name) + ")");
+        } else {
+          caseOwners.set(name, label);
+        }
+      }
+    }
+  });
+
+  const callList = Array.isArray(calls) ? calls : [];
+  for (const call of callList) {
+    if (!ids.has(call.id)) {
+      errors.push('itKnownGap call "' + call.title + '" uses id "' + call.id + '" which is not in test/known-gaps.json');
+    }
+  }
+
+  for (const entry of entries) {
+    if (!entry || typeof entry.id !== "string" || !Array.isArray(entry.cases) || entry.cases.length === 0) continue;
+    const own = callList.filter((call) => call.id === entry.id);
+    if (own.length === 0) {
+      errors.push('"' + entry.id + '": no itKnownGap call uses this id');
+      continue;
+    }
+    const unmatched = entry.cases.slice();
+    for (const call of own) {
+      const at = unmatched.findIndex((name) => name === call.title || name.endsWith(" " + call.title));
+      if (at === -1) {
+        errors.push('"' + entry.id + '": itKnownGap call "' + call.title + '" has no matching entry in cases');
+      } else {
+        unmatched.splice(at, 1);
+      }
+    }
+    for (const name of unmatched) {
+      errors.push('"' + entry.id + '": case "' + name + '" has no itKnownGap call');
+    }
+  }
+
+  if (documents === null || documents === undefined) {
+    notices.push(NO_DOCUMENTS_NOTICE);
+    return { errors, notices };
+  }
+
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const label = '"' + entry.id + '"';
+    if (Number.isInteger(entry.finding) && !new RegExp("^### " + entry.finding + "\\. ", "m").test(documents.review)) {
+      errors.push(label + ": the review has no heading '### " + entry.finding + ". ' (finding " + entry.finding + ")");
+    }
+    if (typeof entry.fixedBy === "string" && entry.fixedBy.trim() !== "") {
+      const title = escapeRegExp(entry.fixedBy);
+      if (!new RegExp("\\*\\*Task \\d+ — " + title + "\\*\\*").test(documents.roadmap)) {
+        errors.push(label + ': the roadmap has no task "' + entry.fixedBy + '"');
+      } else if (Number.isInteger(entry.finding)) {
+        const row = new RegExp("^\\|\\s*\\d+\\.\\s*" + title + "\\s*\\|([^|]*)\\|", "m").exec(documents.roadmap);
+        const listed = row ? row[1].split(",").map((item) => item.trim()) : [];
+        if (!row || listed.indexOf(String(entry.finding)) === -1) {
+          errors.push(label + ': the roadmap order table row for "' + entry.fixedBy + '" does not list finding ' + entry.finding);
+        }
+      }
+    }
+  }
+
+  return { errors, notices };
+}
+
+function readKnownGapList(root) {
+  const file = path.join(root, "test", "known-gaps.json");
+  if (!fs.existsSync(file)) {
+    return { error: "test/known-gaps.json is missing", entries: null };
+  }
+  try {
+    return { error: null, entries: JSON.parse(fs.readFileSync(file, "utf8")) };
+  } catch (error) {
+    return { error: "test/known-gaps.json is not valid JSON: " + (error && error.message ? error.message : String(error)), entries: null };
+  }
+}
+
+function findKnownGapCalls(root) {
+  const directory = path.join(root, "test");
+  const calls = [];
+  if (!fs.existsSync(directory)) return calls;
+  for (const name of fs.readdirSync(directory).sort()) {
+    // The infrastructure tests quote itKnownGap calls as samples.
+    if (!name.endsWith(".ts") || name === "TestInfrastructure.test.ts") continue;
+    const text = fs.readFileSync(path.join(directory, name), "utf8");
+    const pattern = /itKnownGap\(\s*(["'])([^"']+)\1\s*,\s*(["'])((?:(?!\3).)*)\3/g;
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      calls.push({ id: match[2], title: match[4] });
+    }
+  }
+  return calls;
+}
+
+// Reads the list, the itKnownGap calls and the parent documents from disk and validates them.
+function validateKnownGapFiles(root) {
+  const list = readKnownGapList(root);
+  if (list.error) {
+    return { errors: [list.error], notices: [] };
+  }
+  const reviewFile = path.join(root, "..", "docs", "reviews", "the-seed-1.md");
+  const roadmapFile = path.join(root, "..", "docs", "roadmaps", "the-seed-1.md");
+  const documents =
+    fs.existsSync(reviewFile) && fs.existsSync(roadmapFile)
+      ? { review: fs.readFileSync(reviewFile, "utf8"), roadmap: fs.readFileSync(roadmapFile, "utf8") }
+      : null;
+  return validateKnownGaps(list.entries, findKnownGapCalls(root), documents);
+}
+
+function printSummary(resultsFile) {
+  const results = JSON.parse(fs.readFileSync(resultsFile, "utf8"));
+  const list = readKnownGapList(packageRoot);
+  const summary = summariseResults(results, Array.isArray(list.entries) ? list.entries : []);
+  summary.lines.forEach((line) => console.log(line));
+  return summary;
+}
+
 function typecheckStage() {
   return runNode([localBin("typescript", "bin", "tsc"), "-p", "tsconfig.test.json"]);
 }
@@ -51,8 +286,16 @@ function unitStage(jestArgs) {
     return false;
   }
 
+  const validation = validateKnownGapFiles(packageRoot);
+  validation.notices.forEach((notice) => console.log(notice));
+  if (validation.errors.length > 0) {
+    validation.errors.forEach((detail) => console.error("MALFORMED KNOWN GAP: " + detail));
+    return false;
+  }
+
   const resultsFile = path.join(packageRoot, RESULTS_PATH);
   fs.rmSync(resultsFile, { force: true });
+  fs.mkdirSync(path.dirname(resultsFile), { recursive: true });
 
   const jestOk = runNode([localBin("jest", "bin", "jest.js"), "--ci", "--json", "--outputFile=" + RESULTS_PATH].concat(jestArgs));
 
@@ -64,7 +307,10 @@ function unitStage(jestArgs) {
     return false;
   }
 
-  return jestOk && results.success === true;
+  const summary = summariseResults(results, readKnownGapList(packageRoot).entries || []);
+  summary.lines.forEach((line) => console.log(line));
+
+  return jestOk && !summary.failed;
 }
 
 function runStage(name, jestArgs) {
@@ -83,6 +329,20 @@ function runStage(name, jestArgs) {
 }
 
 function main(argv) {
+  if (argv[0] === "--summary") {
+    if (!argv[1]) {
+      console.error("Usage: run-checks.js --summary <jest.json>");
+      return 2;
+    }
+    try {
+      printSummary(path.resolve(argv[1]));
+    } catch (error) {
+      console.error("Cannot read results: " + (error && error.message ? error.message : String(error)));
+      return 2;
+    }
+    return 0;
+  }
+
   const parsed = parseArguments(argv);
   if (parsed.error) {
     console.error("Unknown stage: " + parsed.error + ". Stages: " + STAGES.join(", "));
@@ -97,7 +357,7 @@ function main(argv) {
   return outcomes.every((o) => o.passed) ? 0 : 1;
 }
 
-module.exports = { parseArguments, STAGES };
+module.exports = { parseArguments, STAGES, summariseResults, validateKnownGaps, validateKnownGapFiles };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));
