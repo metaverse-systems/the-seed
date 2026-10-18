@@ -147,3 +147,6 @@ dist
 
 # Native addon build output
 native/build/
+
+# Check runner output
+test-results/
