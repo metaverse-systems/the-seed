@@ -68,13 +68,7 @@ function summariseResults(jest, entries) {
   for (const group of groups) {
     const file = relativeTestFile(group.name || "");
     const assertions = Array.isArray(group.assertionResults) ? group.assertionResults : [];
-    if (group.status === "failed") {
-      groupsFailed++;
-      if (assertions.length === 0) {
-        const message = String(group.message || group.failureMessage || "").split("\n")[0];
-        failedGroups.push("FAILED GROUP: " + file + ": " + message);
-      }
-    }
+    const casesFailedBefore = failedCount;
     for (const result of assertions) {
       const fullName = result.fullName || result.title || "";
       if (result.status === "failed") {
@@ -95,6 +89,14 @@ function summariseResults(jest, entries) {
         }
       } else if (result.status === "pending" || result.status === "todo" || result.status === "skipped") {
         skipped++;
+      }
+    }
+    // A group that failed without a failed case (it did not compile, threw at load or in a hook) is named too.
+    if (group.status === "failed") {
+      groupsFailed++;
+      if (failedCount === casesFailedBefore) {
+        const message = String(group.message || group.failureMessage || "").split("\n")[0];
+        failedGroups.push("FAILED GROUP: " + file + ": " + message);
       }
     }
   }

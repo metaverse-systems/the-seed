@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { spawnSync } from "child_process";
 import * as runChecks from "../scripts/run-checks";
 import { KnownGapEntry, runKnownGap, itKnownGap, staleMessage } from "./helpers/KnownGap";
 import { expectPresent } from "./helpers/Assert";
@@ -108,6 +109,24 @@ describe("summariseResults", () => {
     expect(result.failed).toBe(true);
   });
 
+  it("names a failed group whose cases all passed (a hook failed) and fails the run", () => {
+    const result = runChecks.summariseResults(
+      jest([group("D.test.ts", "failed", [assertion("D one", "passed")], "afterAll hook failed\nmore")], false),
+      entries,
+    );
+    expect(result.lines).toContain("FAILED GROUP: " + path.join("test", "D.test.ts") + ": afterAll hook failed");
+    expect(result.lines[result.lines.length - 1]).toBe("Totals: 1 passed, 0 failed, 0 known gaps, 0 skipped, 1 groups (1 failed)");
+    expect(result.failed).toBe(true);
+  });
+
+  it("does not name a failed group again when one of its cases is named", () => {
+    const result = runChecks.summariseResults(
+      jest([group("E.test.ts", "failed", [assertion("E one", "failed")], "1 test failed")], false),
+      entries,
+    );
+    expect(result.lines.filter((line) => line.startsWith("FAILED GROUP:"))).toEqual([]);
+  });
+
   it("reports a known gap without its tag and with the fixing task looked up from the entries", () => {
     const result = runChecks.summariseResults(
       jest([group("B.test.ts", "passed", [assertion("ResourcePak should create a new package" + TAG(5), "passed")])]),
@@ -150,6 +169,27 @@ describe("summariseResults", () => {
       entries,
     );
     expect(result.failed).toBe(true);
+  });
+});
+
+describe("parseArguments", () => {
+  it("runs all three stages in order when no stage is named", () => {
+    expect(runChecks.parseArguments([])).toEqual({ error: null, stages: ["typecheck", "lint", "unit"], jestArgs: [] });
+  });
+
+  it("orders the named stages and passes the rest to Jest", () => {
+    const parsed = runChecks.parseArguments(["unit", "lint", "-t", "ResourcePak"]);
+    expect(parsed.stages).toEqual(["lint", "unit"]);
+    expect(parsed.jestArgs).toEqual(["-t", "ResourcePak"]);
+  });
+
+  it("treats a leading word that is neither a stage nor a path as an unknown stage", () => {
+    expect(runChecks.parseArguments(["bogus"]).error).toBe("bogus");
+  });
+
+  it("passes options and existing paths on to Jest when no stage is named", () => {
+    expect(runChecks.parseArguments(["--bail"]).jestArgs).toEqual(["--bail"]);
+    expect(runChecks.parseArguments(["test"]).error).toBeNull();
   });
 });
 
@@ -560,7 +600,7 @@ describe("optionalExternalCheck", () => {
   function loadHelper(): OptionalExternalCheck {
     let loaded: OptionalExternalCheck | undefined;
     jest.isolateModules(() => {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the module is loaded again after jest.isolateModules resets the registry
       loaded = require("./helpers/ExternalTools").optionalExternalCheck;
     });
     return expectPresent(loaded, "optionalExternalCheck");
@@ -633,5 +673,42 @@ describe("optionalExternalCheck", () => {
     const check = loadHelper();
     expect(() => check("a", false, "x")).toThrow("required external tool missing: a (x)");
     expect(() => check("a", false, "x")).toThrow("required external tool missing: a (x)");
+  });
+});
+
+describe("command line", () => {
+  const script = rel("scripts", "run-checks.js");
+  let directory: string;
+
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), "run-checks-cli-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("exits 2 and lists the stages for an unknown stage name", () => {
+    const run = spawnSync(process.execPath, [script, "bogus"], { encoding: "utf8" });
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("Unknown stage: bogus. Stages: typecheck, lint, unit");
+  });
+
+  it("prints the result lines and totals of an existing results file with --summary and exits 0", () => {
+    const file = path.join(directory, "jest.json");
+    const results = {
+      success: false,
+      testResults: [group("F.test.ts", "failed", [assertion("F one", "failed"), assertion("F two", "passed")])],
+    };
+    fs.writeFileSync(file, JSON.stringify(results));
+    const run = spawnSync(process.execPath, [script, "--summary", file], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain("FAILED: " + path.join("test", "F.test.ts") + " › F one");
+    expect(run.stdout).toContain("Totals: 1 passed, 1 failed, 0 known gaps, 0 skipped, 1 groups (1 failed)");
+  });
+
+  it("exits 2 when --summary names no file or an unreadable one", () => {
+    expect(spawnSync(process.execPath, [script, "--summary"], { encoding: "utf8" }).status).toBe(2);
+    expect(spawnSync(process.execPath, [script, "--summary", path.join(directory, "missing.json")], { encoding: "utf8" }).status).toBe(2);
   });
 });

@@ -780,7 +780,7 @@ console.log(verify.valid, verify.signatureType); // true "embedded"
   ```
 
 - `openssl` (one signing test generates a certificate with it).
-- Optional: `python3`. The independent Mach-O cross-check in `test/Signing.embedded.test.ts` runs `../libthe-seed/tests/fixtures/check_pages.py` when the parent repository is present. Without them it prints a `SKIPPED CHECK:` line and carries on, unless `THE_SEED_REQUIRE_TOOLS=1` is set, in which case a missing tool fails the case.
+- Optional: `python3`. The independent Mach-O cross-check in `test/Signing.embedded.test.ts` runs `../libthe-seed/tests/fixtures/check_pages.py` when the parent repository is present. Without it the case prints a `SKIPPED CHECK:` line and carries on, unless `THE_SEED_REQUIRE_TOOLS=1` is set, in which case a missing tool fails the case.
 
 ### Build and run
 
@@ -800,7 +800,7 @@ npm test -- unit -t "verifyFileAuthenticode"
 npm test -- unit test/Signing.test.ts
 ```
 
-Failures are named as `FAILED: <file> › <case>` or `FAILED GROUP: <file>` (a test file that could not run), and the run ends with a `Totals:` line. Skipped cases are reported and counted.
+Failures are named as `FAILED: <file> › <case>` or `FAILED GROUP: <file>: <message>` (a test file that could not run, or whose hook failed), and the run ends with a `Totals:` line. Skipped cases are reported and counted.
 
 ### Known gaps
 
@@ -816,7 +816,7 @@ Every proposal to `main` and every push to `main` runs the `check` job in `.gith
 
 ### Notes
 
-- The style check disables `@typescript-eslint/no-var-requires` on three lines (`src/Signing.ts`, `test/Package.test.ts`, `test/Signing.embedded.test.ts`), each with a reason: the native addon has no type declarations and a lazy or post-mock `require` is needed. No rule is disabled in the ESLint configuration.
+- The style check disables `@typescript-eslint/no-var-requires` on five lines (`src/Package.ts`, `src/Signing.ts`, `test/Package.test.ts`, `test/Signing.embedded.test.ts`, `test/TestInfrastructure.test.ts`), each with a reason: the native addon has no type declarations, or a module must be loaded again after Jest resets its registry. No rule is disabled in the ESLint configuration.
 - The build tests (`Build`, `BuildCLI`, `RecursiveBuild`) are mock-based. They check which commands would run, not what an installation really produces, so a passing run does not show that a built project installs correctly.
 
 ## License
