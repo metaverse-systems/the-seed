@@ -1,13 +1,9 @@
-import fs from "fs";
-import path from "path";
 import Config from "./Config";
-import { BuildStep, ProjectBuildOptions, ProjectBuildResult, StripResult } from "./types";
-import Signing from "./Signing";
+import { BuildStep, ProjectBuildOptions, ProjectBuildResult } from "./types";
 import { processorCount } from "./BuildScheduler";
 import { librarySearchEnv } from "./LibrarySearch";
 import { runStep, stepText } from "./StepRunner";
 import { runInstallPhase } from "./InstallPhase";
-import { runCommand, commandFailedMessage, findOnPath, formatCommand } from "./ProcessRunner";
 
 export const targets: {
   [key: string]: string;
@@ -182,103 +178,6 @@ export function extractScope(packageName: string): string | undefined {
 }
 
 /**
- * Find built binary outputs in a project's src/ directory.
- * Scans src/ (non-recursively) and src/.libs/ for binary build outputs,
- * skipping intermediate artifacts like .o, .lo, .la files.
- */
-export function findBuiltOutputs(projectDir: string): string[] {
-  const srcDir = path.join(projectDir, "src");
-  if (!fs.existsSync(srcDir)) return [];
-
-  const skipExtensions = new Set([".o", ".lo", ".la", ".lai"]);
-  const results: string[] = [];
-
-  const scanDir = (dir: string) => {
-    if (!fs.existsSync(dir)) return;
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile()) continue;
-      const ext = path.extname(entry.name);
-      if (skipExtensions.has(ext)) continue;
-      results.push(path.join(dir, entry.name));
-    }
-  };
-
-  scanDir(srcDir);
-  scanDir(path.join(srcDir, ".libs"));
-
-  return results;
-}
-
-/**
- * After a successful build+install, check if the project's package.json has a scoped name.
- * If a signing certificate exists for that scope, auto-sign the built binaries in src/.
- *
- * @param configDir - Path to the-seed config directory
- * @param projectDir - Path to the project directory (defaults to process.cwd())
- * @param log - Receives each progress line whole, instead of it being printed
- */
-export async function autoSignIfCertExists(
-  configDir: string,
-  projectDir?: string,
-  log?: (line: string) => void
-): Promise<void> {
-  const dir = projectDir || process.cwd();
-  const pkgPath = path.join(dir, "package.json");
-  if (!fs.existsSync(pkgPath)) return;
-
-  let pkg: { name?: string };
-  try {
-    pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-  } catch {
-    return;
-  }
-
-  if (!pkg.name) return;
-
-  const scope = extractScope(pkg.name);
-  if (!scope) return;
-
-  const signing = new Signing(configDir);
-  if (!signing.hasCert(scope)) return;
-
-  const certInfo = signing.getCertInfo(scope);
-  if (!certInfo || certInfo.isExpired) return;
-
-  const candidates = findBuiltOutputs(dir);
-  let signedCount = 0;
-
-  for (const filePath of candidates) {
-    try {
-      if (await signing.isBinaryFile(filePath)) {
-        const result = await signing.signFile(filePath, { scope });
-        const rel = path.relative(dir, filePath);
-        const line = result.signatureType === "embedded"
-          ? `Signed (embedded): ${rel}`
-          : `Signed (detached): ${rel} → ${path.basename(result.signaturePath!)}`;
-        if (log) {
-          log(line);
-        } else {
-          console.log(`  ${line}`);
-        }
-        signedCount++;
-      }
-    } catch {
-      // Skip files that can't be signed
-    }
-  }
-
-  if (signedCount > 0) {
-    const line = `Auto-signed ${signedCount} file(s) using scope '${scope}'`;
-    if (log) {
-      log(line);
-    } else {
-      console.log(`\n${line}`);
-    }
-  }
-}
-
-/**
  * Returns the appropriate strip tool name for the given build target.
  * @internal Exported for unit testing
  */
@@ -287,101 +186,6 @@ export function getStripTool(target: string): string {
     return "strip";
   }
   return targets[target] + "-strip";
-}
-
-/**
- * Checks if a file is an ELF or PE binary by reading the first 4 bytes.
- * Returns true if the file starts with ELF magic (\x7fELF) or PE magic (MZ).
- * @internal Exported for unit testing
- */
-export function isBinaryByMagic(filePath: string): boolean {
-  const fd = fs.openSync(filePath, "r");
-  try {
-    const buf = Buffer.alloc(4);
-    const bytesRead = fs.readSync(fd, buf, 0, 4, 0);
-    if (bytesRead < 4) return false;
-
-    // ELF magic: 0x7f 'E' 'L' 'F'
-    if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) {
-      return true;
-    }
-    // PE magic: 'M' 'Z'
-    if (buf[0] === 0x4d && buf[1] === 0x5a) {
-      return true;
-    }
-
-    return false;
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-
-/**
- * Strips debug symbols from all binary outputs in a project.
- * Verifies the strip tool exists, finds binary outputs, filters by magic bytes,
- * and runs `strip --strip-unneeded` on each binary.
- *
- * Aborting `signal` stops the strip command that is running and strips no
- * further files; the promise then rejects.
- *
- * When `log` is given it receives each progress line whole and nothing is
- * printed, so a caller building several projects at once can attribute the
- * lines without another project's output landing mid-line.
- */
-export async function stripBinaries(
-  projectDir: string,
-  target: string,
-  signal?: AbortSignal,
-  log?: (line: string) => void
-): Promise<StripResult> {
-  const stripTool = getStripTool(target);
-
-  const toolPath = findOnPath(stripTool);
-  if (toolPath === null) {
-    const hint = target === "windows"
-      ? "\nInstall the MinGW binutils package (e.g., binutils-mingw-w64-x86-64) and try again."
-      : "\nInstall binutils (for example the binutils package) and try again.";
-    throw new Error(`Strip tool '${stripTool}' not found on this system.${hint}`);
-  }
-
-  const report = (line: string) => (log ? log(line) : console.log(`[strip] ${line}`));
-
-  report(`Using strip tool: ${stripTool}`);
-
-  const candidates = findBuiltOutputs(projectDir);
-  const strippedFiles: string[] = [];
-
-  for (const filePath of candidates) {
-    if (!isBinaryByMagic(filePath)) continue;
-
-    if (signal?.aborted) {
-      throw new Error("Strip cancelled");
-    }
-
-    const rel = path.relative(projectDir, filePath);
-    if (!log) {
-      process.stdout.write(`[strip] Stripping ${rel}... `);
-    }
-    // Completes the line begun above, or reports it whole to the logger.
-    const finishLine = (status: string) => (log ? log(`Stripping ${rel}... ${status}`) : console.log(status));
-
-    const stripArgs = ["--strip-unneeded", filePath];
-    const result = await runCommand(toolPath, stripArgs, { signal });
-    if (result.killed) {
-      finishLine("cancelled");
-      throw new Error("Strip cancelled");
-    }
-    if (result.exitCode !== 0) {
-      finishLine("FAILED");
-      throw new Error(`strip failed on ${rel}: ${commandFailedMessage(formatCommand(toolPath, stripArgs), result.stderr)}`);
-    }
-    finishLine("done");
-    strippedFiles.push(filePath);
-  }
-
-  report(`Stripped ${strippedFiles.length} file(s)`);
-
-  return { strippedFiles, stripTool };
 }
 
 export default Build;

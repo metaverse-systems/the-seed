@@ -17,8 +17,6 @@ jest.mock("../src/Build", () => {
   return {
     __esModule: true,
     default: MockBuild,
-    autoSignIfCertExists: jest.fn().mockResolvedValue(undefined),
-    stripBinaries: jest.fn().mockResolvedValue({ strippedFiles: [], stripTool: "strip" }),
   };
 });
 

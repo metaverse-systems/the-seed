@@ -52,10 +52,17 @@ jest.mock("../src/Build", () => {
   return {
     __esModule: true,
     default: MockBuild,
-    autoSignIfCertExists: jest.fn().mockResolvedValue(undefined),
-    stripBinaries: jest.fn().mockResolvedValue({ strippedFiles: [], stripTool: "strip" }),
   };
 });
+
+// The install phase is mocked; each case sets what it does. The default
+// behaves like the real one for the parts the recursive build observes: it
+// runs the install step through the (mocked) process runner in the project's
+// directory, reports it installed, and completes.
+jest.mock("../src/InstallPhase", () => ({
+  ...jest.requireActual("../src/InstallPhase"),
+  runInstallPhase: jest.fn(),
+}));
 
 // Mock DependencyWalker
 jest.mock("../src/DependencyWalker", () => ({
@@ -78,11 +85,36 @@ import {
 } from "../src/DependencyWalker";
 import { runCommand, formatCommand, formatFailureOutput, CommandResult } from "../src/ProcessRunner";
 import { buildRecursive, getRecursiveBuildSteps } from "../src/RecursiveBuild";
-import { stripBinaries, autoSignIfCertExists } from "../src/Build";
+import { runInstallPhase } from "../src/InstallPhase";
+import type { InstallPhaseOptions, InstallPhaseResult, InstallReport } from "../src/types";
 
 const mockedRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
-const mockedStripBinaries = stripBinaries as jest.MockedFunction<typeof stripBinaries>;
-const mockedAutoSign = autoSignIfCertExists as jest.MockedFunction<typeof autoSignIfCertExists>;
+const mockedInstallPhase = runInstallPhase as jest.MockedFunction<typeof runInstallPhase>;
+
+const FAKE_REPORT: InstallReport = {
+  prefix: "/fake/prefix",
+  installed: 1,
+  stripped: [] as string[],
+  signed: [] as { display: string; form: "embedded" | "detached" }[],
+  outcome: { kind: "unsigned", reason: "noCertificate" },
+};
+
+/** The install phase as the recursive build sees it: install step, then completion. */
+async function defaultInstallPhase(options: InstallPhaseOptions): Promise<InstallPhaseResult> {
+  const result = await runCommand(options.installStep.program, options.installStep.args, {
+    cwd: options.projectDir,
+    env: options.env,
+    signal: options.signal,
+  });
+  if (result.killed) return { status: "interrupted" };
+  options.onInstalled?.();
+  return { status: "completed", report: FAKE_REPORT };
+}
+
+/** The option objects the install phase was called with, in call order. */
+function phaseCalls(): InstallPhaseOptions[] {
+  return mockedInstallPhase.mock.calls.map((call) => call[0]);
+}
 const mockedWalkDependencies = walkDependencies as jest.MockedFunction<
   typeof walkDependencies
 >;
@@ -152,8 +184,8 @@ describe("RecursiveBuild", () => {
     mockedRunCommand.mockReset();
     mockedRunCommand.mockResolvedValue(commandResult());
     mockProcessorCount.mockReturnValue(4);
-    mockedStripBinaries.mockResolvedValue({ strippedFiles: [], stripTool: "strip" });
-    mockedAutoSign.mockResolvedValue(undefined);
+    mockedInstallPhase.mockReset();
+    mockedInstallPhase.mockImplementation(defaultInstallPhase);
     logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
 
     // Default mock: simple 3-project chain
@@ -547,7 +579,7 @@ describe("RecursiveBuild", () => {
   });
 
   describe("buildRecursive with release=true", () => {
-    it("calls stripBinaries after install for each project when release=true", async () => {
+    it("runs the install phase once per project with release as given", async () => {
       await buildRecursive({
         target: "native",
         fullReconfigure: true,
@@ -555,17 +587,19 @@ describe("RecursiveBuild", () => {
         release: true,
       });
 
-      // stripBinaries should be called once per project (3 projects)
-      expect(mockedStripBinaries).toHaveBeenCalledTimes(3);
-      const stripped = mockedStripBinaries.mock.calls.map((call) => [call[0], call[1]]);
-      expect(stripped).toEqual([
-        [comp.path, "native"],
-        [sys.path, "native"],
-        [prog.path, "native"],
-      ]);
+      const calls = phaseCalls();
+      expect(calls.map((c) => c.projectDir)).toEqual([comp.path, sys.path, prog.path]);
+      for (const call of calls) {
+        expect(call.release).toBe(true);
+        expect(call.target).toBe("native");
+        expect(call.installStep).toEqual({ label: "install", program: "make", args: ["install"] });
+        expect(call.configPrefix).toBe("/fake/prefix");
+        expect(call.configDir).toBe("/fake/config");
+        expect(call.output).toEqual({ mode: "capture" });
+      }
     });
 
-    it("does not call stripBinaries when release is false", async () => {
+    it("passes release false when release is false", async () => {
       await buildRecursive({
         target: "native",
         fullReconfigure: true,
@@ -573,34 +607,45 @@ describe("RecursiveBuild", () => {
         release: false,
       });
 
-      expect(mockedStripBinaries).not.toHaveBeenCalled();
+      expect(phaseCalls()).toHaveLength(3);
+      expect(phaseCalls().every((c) => c.release === false)).toBe(true);
     });
 
-    it("does not call stripBinaries when release is omitted", async () => {
+    it("passes release false when release is omitted", async () => {
       await buildRecursive({
         target: "native",
         fullReconfigure: true,
         projectDir: prog.path,
       });
 
-      expect(mockedStripBinaries).not.toHaveBeenCalled();
+      expect(phaseCalls()).toHaveLength(3);
+      expect(phaseCalls().every((c) => c.release === false)).toBe(true);
     });
 
-    it("calls stripBinaries before autoSignIfCertExists in order", async () => {
-      const callOrder: string[] = [];
-      mockedRunCommand.mockImplementation(async (program: string, args: string[]) => {
-        if (isInstall(program, args)) callOrder.push("install");
-        return commandResult();
-      });
-      mockedStripBinaries.mockImplementation(async () => {
-        callOrder.push("strip");
-        return { strippedFiles: [], stripTool: "strip" };
-      });
-      mockedAutoSign.mockImplementation(async () => {
-        callOrder.push("sign");
+    it("gives the target to the install phase when the build is not a full reconfigure", async () => {
+      useGraph([comp]);
+
+      await buildRecursive({
+        target: "windows",
+        fullReconfigure: false,
+        projectDir: comp.path,
+        release: true,
       });
 
-      // Only 1 project to simplify ordering check
+      expect(phaseCalls().map((c) => [c.target, c.release])).toEqual([["windows", true]]);
+    });
+
+    it("runs the install phase after the compile step and nothing else after it", async () => {
+      const callOrder: string[] = [];
+      mockedRunCommand.mockImplementation(async (program: string, args: string[]) => {
+        if (isCompile(program, args)) callOrder.push("compile");
+        return commandResult();
+      });
+      mockedInstallPhase.mockImplementation(async (options) => {
+        callOrder.push("install-phase");
+        options.onInstalled?.();
+        return { status: "completed", report: FAKE_REPORT };
+      });
       useGraph([comp]);
 
       await buildRecursive({
@@ -610,7 +655,69 @@ describe("RecursiveBuild", () => {
         release: true,
       });
 
-      expect(callOrder).toEqual(["install", "strip", "sign"]);
+      expect(callOrder).toEqual(["compile", "install-phase"]);
+    });
+
+    it("passes the install signal and the project's environment to the install phase", async () => {
+      useGraph([comp]);
+
+      await buildRecursive({
+        target: "native",
+        fullReconfigure: true,
+        projectDir: comp.path,
+        release: true,
+      });
+
+      const call = phaseCalls()[0];
+      expect(call.signal).toBeInstanceOf(AbortSignal);
+      expect(call.signal?.aborted).toBe(false);
+      expect(call.env).toBeDefined();
+      expect(call.env?.PATH).toBe(process.env.PATH);
+      expect(typeof call.log).toBe("function");
+    });
+
+    it("prints install... before the phase and install... done and the step callback when it reports installed", async () => {
+      const events: string[] = [];
+      logSpy.mockImplementation((...args: unknown[]) => {
+        events.push(args.map(String).join(" "));
+      });
+      mockedInstallPhase.mockImplementation(async (options) => {
+        events.push("phase-start");
+        options.log("a line from the phase");
+        events.push("phase-installed");
+        options.onInstalled?.();
+        events.push("phase-end");
+        return { status: "completed", report: FAKE_REPORT };
+      });
+      useGraph([comp]);
+
+      const installed: string[] = [];
+      await buildRecursive({
+        target: "native",
+        fullReconfigure: true,
+        projectDir: comp.path,
+        release: true,
+        callbacks: {
+          onStepComplete: (_project, step) => {
+            events.push(`step-complete:${step.label}`);
+            installed.push(step.label);
+          },
+        },
+      });
+
+      const from = events.indexOf("[comp] install...");
+      expect(from).toBeGreaterThanOrEqual(0);
+      expect(events.slice(from, events.indexOf("[comp] completed") + 1)).toEqual([
+        "[comp] install...",
+        "phase-start",
+        "[comp] a line from the phase",
+        "phase-installed",
+        "[comp] install... done",
+        "step-complete:install",
+        "phase-end",
+        "[comp] completed",
+      ]);
+      expect(installed).toContain("install");
     });
   });
 });
@@ -637,8 +744,8 @@ describe("RecursiveBuild in parallel", () => {
       await tick();
       return commandResult();
     });
-    mockedStripBinaries.mockResolvedValue({ strippedFiles: [], stripTool: "strip" });
-    mockedAutoSign.mockResolvedValue(undefined);
+    mockedInstallPhase.mockReset();
+    mockedInstallPhase.mockImplementation(defaultInstallPhase);
     logLines = [];
     logSpy = jest.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
       logLines.push(args.map(String).join(" "));
@@ -773,29 +880,25 @@ describe("RecursiveBuild in parallel", () => {
       expect(env).not.toHaveProperty("MFLAGS");
       expect(env?.PATH).toBe(process.env.PATH);
     }
+    // The install phase gets the same bounded environment.
+    expect(phaseCalls()).toHaveLength(4);
+    for (const call of phaseCalls()) {
+      expect(call.env).toBeDefined();
+      expect(call.env).not.toHaveProperty("MAKEFLAGS");
+      expect(call.env).not.toHaveProperty("MFLAGS");
+    }
   });
 
-  it("keeps each project's install, strip and sign together and apart from every other project's", async () => {
+  it("keeps each project's install phase apart from every other project's", async () => {
     const events: string[] = [];
-    mockedRunCommand.mockImplementation(async (program: string, args: string[], options) => {
-      const name = String(options?.cwd).split("/").pop();
-      if (isInstall(program, args)) events.push(`install-begin:${name}`);
+    mockedInstallPhase.mockImplementation(async (options) => {
+      const name = options.projectDir.split("/").pop();
+      events.push(`phase-begin:${name}`);
       await tick();
-      if (isInstall(program, args)) events.push(`install-end:${name}`);
-      return commandResult();
-    });
-    mockedStripBinaries.mockImplementation(async (projectDir: string) => {
-      const name = projectDir.split("/").pop();
-      events.push(`strip-begin:${name}`);
+      options.onInstalled?.();
       await tick();
-      events.push(`strip-end:${name}`);
-      return { strippedFiles: [], stripTool: "strip" };
-    });
-    mockedAutoSign.mockImplementation(async (_configDir: string, projectDir?: string) => {
-      const name = String(projectDir).split("/").pop();
-      events.push(`sign-begin:${name}`);
-      await tick();
-      events.push(`sign-end:${name}`);
+      events.push(`phase-end:${name}`);
+      return { status: "completed", report: FAKE_REPORT };
     });
 
     const result = await buildRecursive({
@@ -807,19 +910,98 @@ describe("RecursiveBuild in parallel", () => {
     });
 
     expect(result.success).toBe(true);
-    // Every install phase is one uninterrupted block of six events for one project.
-    expect(events).toHaveLength(24);
-    for (let i = 0; i < events.length; i += 6) {
+    // Every install phase is one uninterrupted block of two events for one project.
+    expect(events).toHaveLength(8);
+    for (let i = 0; i < events.length; i += 2) {
       const name = events[i].split(":")[1];
-      expect(events.slice(i, i + 6)).toEqual([
-        `install-begin:${name}`,
-        `install-end:${name}`,
-        `strip-begin:${name}`,
-        `strip-end:${name}`,
-        `sign-begin:${name}`,
-        `sign-end:${name}`,
+      expect(events.slice(i, i + 2)).toEqual([`phase-begin:${name}`, `phase-end:${name}`]);
+    }
+    expect(events.filter((e) => e.startsWith("phase-begin")).sort()).toEqual([
+      "phase-begin:a",
+      "phase-begin:b",
+      "phase-begin:c",
+      "phase-begin:game",
+    ]);
+  });
+
+  it("starts a dependent only after its dependency's install phase returned", async () => {
+    const events: string[] = [];
+    mockedInstallPhase.mockImplementation(async (options) => {
+      const name = options.projectDir.split("/").pop();
+      events.push(`phase-begin:${name}`);
+      await tick();
+      await tick();
+      events.push(`phase-end:${name}`);
+      return { status: "completed", report: FAKE_REPORT };
+    });
+    const callbacks: RecursiveBuildCallbacks = {
+      onProjectStart: (project) => {
+        events.push(`start:${project.name}`);
+      },
+    };
+
+    await buildRecursive({
+      target: "native",
+      fullReconfigure: true,
+      projectDir: game.path,
+      parallel: 3,
+      callbacks,
+    });
+
+    const startOfGame = events.indexOf("start:game");
+    for (const dep of ["a", "b", "c"]) {
+      expect(events.indexOf(`phase-end:${dep}`)).toBeGreaterThanOrEqual(0);
+      expect(events.indexOf(`phase-end:${dep}`)).toBeLessThan(startOfGame);
+    }
+  });
+
+  it.each(["install", "strip", "sign", "place"] as const)(
+    "records a failure of the install phase at %s as that project's failure at that step",
+    async (step) => {
+      mockedInstallPhase.mockResolvedValueOnce({
+        status: "failed",
+        step,
+        message: `message from ${step}`,
+        output: step === "install" ? `captured output of ${step}` : undefined,
+      });
+      useGraph([a]);
+
+      const result = await buildRecursive({
+        target: "native",
+        fullReconfigure: true,
+        projectDir: a.path,
+        parallel: 2,
+        release: true,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.failed).toBe(a);
+      expect(result.failures).toEqual([
+        {
+          project: a,
+          step,
+          output: step === "install" ? "captured output of install" : `message from ${step}`,
+        },
       ]);
     }
+  );
+
+  it("records an interrupted install phase as the project's interruption", async () => {
+    mockedInstallPhase.mockResolvedValueOnce({ status: "interrupted" });
+    useGraph([a]);
+
+    const result = await buildRecursive({
+      target: "native",
+      fullReconfigure: true,
+      projectDir: a.path,
+      parallel: 2,
+      release: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.failures).toEqual([]);
+    expect(result.interrupted).toEqual([a]);
+    expect(result.completed).toEqual([]);
   });
 
   it("never runs more projects than processors", async () => {
@@ -888,25 +1070,6 @@ describe("RecursiveBuild in parallel", () => {
     expect(violations).toEqual([]);
     expect(result.completed).toHaveLength(5);
   });
-
-  it("records a strip failure as a failure of the install phase", async () => {
-    mockedStripBinaries.mockRejectedValueOnce(new Error("Strip tool 'strip' not found on this system."));
-    useGraph([a]);
-
-    const result = await buildRecursive({
-      target: "native",
-      fullReconfigure: true,
-      projectDir: a.path,
-      parallel: 2,
-      release: true,
-    });
-
-    expect(result.success).toBe(false);
-    expect(result.failed).toBe(a);
-    expect(result.failures).toEqual([
-      { project: a, step: "strip", output: "Strip tool 'strip' not found on this system." },
-    ]);
-  });
 });
 
 describe("RecursiveBuild progress and report", () => {
@@ -943,8 +1106,8 @@ describe("RecursiveBuild progress and report", () => {
       await tick();
       return commandResult();
     });
-    mockedStripBinaries.mockResolvedValue({ strippedFiles: [], stripTool: "strip" });
-    mockedAutoSign.mockResolvedValue(undefined);
+    mockedInstallPhase.mockReset();
+    mockedInstallPhase.mockImplementation(defaultInstallPhase);
     logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
     useGraph([a, b, game]);
   });
@@ -993,13 +1156,12 @@ describe("RecursiveBuild progress and report", () => {
     ]);
   });
 
-  it("routes strip and sign output through the project prefix", async () => {
-    mockedStripBinaries.mockImplementation(async (_dir, _target, _signal, log) => {
-      log?.("Using strip tool: strip");
-      return { strippedFiles: [], stripTool: "strip" };
-    });
-    mockedAutoSign.mockImplementation(async (_configDir, _projectDir, log) => {
-      log?.("Auto-signed 1 file(s) using scope '@org'");
+  it("prefixes the install phase's log lines with the project name", async () => {
+    mockedInstallPhase.mockImplementation(async (options) => {
+      options.log("Using strip tool: strip");
+      options.log("Auto-signed 1 file(s) using scope '@org'");
+      options.onInstalled?.();
+      return { status: "completed", report: FAKE_REPORT };
     });
     useGraph([a]);
 
@@ -1008,6 +1170,36 @@ describe("RecursiveBuild progress and report", () => {
     const lines = runLines();
     expect(lines).toContain("[@org/a] Using strip tool: strip");
     expect(lines).toContain("[@org/a] Auto-signed 1 file(s) using scope '@org'");
+  });
+
+  it("prefixes a multi-project phase's lines with the project they came from", async () => {
+    mockedInstallPhase.mockImplementation(async (options) => {
+      const name = options.projectDir.split("/").pop();
+      options.log(`Not signed: notice for ${name}`);
+      options.onInstalled?.();
+      return { status: "completed", report: FAKE_REPORT };
+    });
+
+    await buildRecursive({ target: "native", fullReconfigure: true, projectDir: game.path, release: true });
+
+    const lines = runLines();
+    expect(lines).toContain("[@org/a] Not signed: notice for a");
+    expect(lines).toContain("[@org/b] Not signed: notice for b");
+    expect(lines).toContain("[@org/game] Not signed: notice for game");
+  });
+
+  it("shows a failed install phase's message in the failure block", async () => {
+    mockedInstallPhase.mockResolvedValueOnce({
+      status: "failed",
+      step: "sign",
+      message: "signing failed on lib/libx.so: key unreadable",
+    });
+    useGraph([a]);
+
+    await buildRecursive({ target: "native", fullReconfigure: true, projectDir: a.path, release: true });
+
+    expect(logCalls()).toContain(failureBlock("@org/a", "sign", "signing failed on lib/libx.so: key unreadable"));
+    expect(runLines()).toContain("[@org/a] failed at sign");
   });
 
   it("reports a sequential failure with one block and the outcome lists", async () => {
@@ -1137,8 +1329,8 @@ describe("RecursiveBuild cancellation", () => {
     jest.clearAllMocks();
     mockProcessorCount.mockReturnValue(4);
     mockedRunCommand.mockReset();
-    mockedStripBinaries.mockResolvedValue({ strippedFiles: [], stripTool: "strip" });
-    mockedAutoSign.mockResolvedValue(undefined);
+    mockedInstallPhase.mockReset();
+    mockedInstallPhase.mockImplementation(defaultInstallPhase);
     logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
     useGraph([a, b, c, game]);
   });

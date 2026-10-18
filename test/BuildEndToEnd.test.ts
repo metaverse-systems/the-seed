@@ -742,6 +742,100 @@ describe("BuildEndToEnd", () => {
       }
     }, GROUP_TIMEOUT * 2);
 
+    it("recursive release build gives each project its own scope's treatment, one and two at a time", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      // @a has a certificate and @b (which depends on @a) has none; both install into the same prefix under different names
+      const dirA = path.join(root, "a");
+      const dirB = path.join(root, "b");
+      copyFixture(dirA, { name: "tinya", withLibrary: true, packageName: "@a/tinya" });
+      copyFixture(dirB, { name: "tinyb", withLibrary: true, packageName: "@b/tinyb", dependencies: { "@a/tinya": "file:../a" } });
+      const singlePrefix = path.join(root, "single-prefix");
+      const writeConfig = (installPrefix: string): void => {
+        fs.writeFileSync(
+          path.join(configDir, "config.json"),
+          JSON.stringify({ prefix: installPrefix, scopes: { "@a": { author: { name: "Test User", email: "a@example.invalid", url: "" } } } })
+        );
+      };
+
+      // The state of one project's installed outputs: stripped, signature file present, signature valid
+      const treatment = async (installPrefix: string, name: string) => {
+        const nativeDir = path.join(installPrefix, "x86_64-linux-gnu");
+        const files = [path.join(nativeDir, "bin", name), path.join(nativeDir, "lib", `lib${name}greet.so.0.0.0`), path.join(nativeDir, "lib", `lib${name}relink.so.0.0.0`)];
+        const states: Array<{ stripped: boolean; signatureFile: boolean; valid: boolean }> = [];
+        for (const file of files) {
+          expect([file, fs.existsSync(file)]).toEqual([file, true]);
+          const described = describeFile(file);
+          states.push({
+            stripped: described.includes("stripped") && !described.includes("not stripped"),
+            signatureFile: fs.existsSync(file + ".sig"),
+            valid: (await signing.verifyFile(file)).status === "VALID",
+          });
+        }
+        return states;
+      };
+
+      // What a build of each project alone leaves, in a prefix of its own
+      writeConfig(singlePrefix);
+      await signing.createCert({ validityDays: 365, scope: "@a" });
+      useProcessEnv({ HOME: home });
+      for (const dir of [dirA, dirB]) {
+        const single = await new Build(new Config(configDir)).buildProject({
+          projectDir: dir,
+          target: "native",
+          release: true,
+          jobs: JOBS,
+          configDir,
+          env: caseEnv({}),
+          output: new TailSink(),
+          log: () => undefined,
+        });
+        expect(single).toEqual({ status: "completed" });
+      }
+      const expectedA = await treatment(singlePrefix, "tinya");
+      const expectedB = await treatment(singlePrefix, "tinyb");
+      expect(expectedA).toEqual(Array(3).fill({ stripped: true, signatureFile: true, valid: true }));
+      expect(expectedB).toEqual(Array(3).fill({ stripped: true, signatureFile: false, valid: false }));
+
+      for (const parallel of [1, 2]) {
+        fs.rmSync(prefix, { recursive: true, force: true });
+        writeConfig(prefix);
+        useProcessEnv({ HOME: home });
+        logSpy.mockClear();
+
+        const result = await buildRecursive({
+          target: "native",
+          fullReconfigure: true,
+          projectDir: dirB,
+          release: true,
+          jobs: JOBS,
+          parallel,
+        });
+
+        const lines = logSpy.mock.calls.map((call) => String(call[0]));
+        expect([parallel, result.success, result.completed.map((project) => project.name)]).toEqual([parallel, true, ["@a/tinya", "@b/tinyb"]]);
+        // @a is signed by @a in the prefix and in the build tree
+        const nativeDir = path.join(prefix, "x86_64-linux-gnu");
+        for (const file of [path.join(nativeDir, "bin", "tinya"), path.join(nativeDir, "lib", "libtinyagreet.so.0.0.0"), path.join(dirA, "src", ".libs", "tinya")]) {
+          await expectValid(file, "detached");
+        }
+        // @b is unsigned and said so once
+        expect(lines.filter((line) => /^\[@b\/tinyb\] Not signed:/.test(line))).toHaveLength(1);
+        expect(lines.filter((line) => /^\[@a\/tinya\] (Not signed|Warning: not signed)/.test(line))).toEqual([]);
+        for (const file of [path.join(nativeDir, "bin", "tinyb"), path.join(dirB, "src", ".libs", "tinyb")]) {
+          expect([parallel, file, fs.existsSync(file + ".sig")]).toEqual([parallel, file, false]);
+          expect([parallel, file, (await signing.verifyFile(file)).status === "VALID"]).toEqual([parallel, file, false]);
+        }
+        // @a's install finished before anything of @b began
+        const installedA = lines.indexOf("[@a/tinya] install... done");
+        const firstB = lines.findIndex((line) => line.startsWith("[@b/tinyb] "));
+        expect([parallel, installedA >= 0, firstB > installedA]).toEqual([parallel, true, true]);
+        // Each project's installed outputs are in the state a build of it alone leaves
+        expect(await treatment(prefix, "tinya")).toEqual(expectedA);
+        expect(await treatment(prefix, "tinyb")).toEqual(expectedB);
+      }
+    }, GROUP_TIMEOUT * 6);
+
     /** Same as fullBuild, but the lines the build logs are kept. */
     function loggedBuild(lines: string[]) {
       useProcessEnv({ HOME: home });

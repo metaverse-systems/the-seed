@@ -277,16 +277,6 @@ export interface RecursiveBuildCallbacks {
   onProjectComplete?: (project: BuildableProject, index: number, total: number) => void;
 }
 
-// ── Strip Types ─────────────────────────────────────────
-
-/** Result returned by the stripBinaries() function */
-export interface StripResult {
-  /** Absolute paths of files that were successfully stripped */
-  strippedFiles: string[];
-  /** The strip tool that was used (e.g., 'strip' or 'x86_64-w64-mingw32-strip') */
-  stripTool: string;
-}
-
 /** Configuration options for a recursive build execution. */
 export interface RecursiveBuildOptions {
   /** Build target: 'native' or 'windows' */
