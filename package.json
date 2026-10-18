@@ -4,11 +4,12 @@
   "description": "The Seed",
   "main": "dist/index.js",
   "scripts": {
-    "lint": "./node_modules/eslint/bin/eslint.js src/*",
-    "lint-fix": "./node_modules/eslint/bin/eslint.js src/* --fix",
+    "typecheck": "node scripts/run-checks.js typecheck",
+    "lint": "node scripts/run-checks.js lint",
+    "lint-fix": "node ./node_modules/eslint/bin/eslint.js --ext .ts src test --fix",
     "build": "tsc",
     "build-addon": "node-gyp rebuild --directory=native",
-    "test": "./node_modules/jest/bin/jest.js"
+    "test": "node scripts/run-checks.js"
   },
   "repository": {
     "type": "git",
