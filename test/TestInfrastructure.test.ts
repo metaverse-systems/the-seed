@@ -5,6 +5,8 @@ import { spawnSync } from "child_process";
 import * as runChecks from "../scripts/run-checks";
 import { KnownGapEntry, runKnownGap, itKnownGap, staleMessage } from "./helpers/KnownGap";
 import { expectPresent } from "./helpers/Assert";
+import { makeUniversal } from "./helpers/Universal";
+import { checkMachO } from "./helpers/MachOChecker";
 
 // Expected shapes of the runner's pure functions, as exercised here:
 //   summariseResults(jest, entries) -> { lines: string[], failed: boolean }
@@ -720,5 +722,104 @@ describe("command line", () => {
   it("exits 2 when --summary names no file or an unreadable one", () => {
     expect(spawnSync(process.execPath, [script, "--summary"], { encoding: "utf8" }).status).toBe(2);
     expect(spawnSync(process.execPath, [script, "--summary", path.join(directory, "missing.json")], { encoding: "utf8" }).status).toBe(2);
+  });
+});
+
+describe("makeUniversal", () => {
+  // Choices where the helper's contract is open: the result is a 32-bit table (magic 0xcafebabe)
+  // with one 20-byte entry per slice in the order given (cpu type, cpu subtype, offset, size, align,
+  // all big-endian), the first slice at the first multiple of 2^align after the table, each next
+  // slice at the next multiple after the previous one, and zero bytes between them.
+  const ARM64 = 0x0100000c;
+  const X86_64 = 0x01000007;
+  const binaries = rel("test", "fixtures", "binaries", "genuine");
+  const arm = fs.readFileSync(path.join(binaries, "tiny-macho-arm64"));
+  const x86 = fs.readFileSync(path.join(binaries, "tiny-macho-x86_64"));
+
+  function entryOf(table: Buffer, index: number) {
+    const at = 8 + index * 20;
+    return {
+      cpuType: table.readUInt32BE(at),
+      cpuSubtype: table.readUInt32BE(at + 4),
+      offset: table.readUInt32BE(at + 8),
+      size: table.readUInt32BE(at + 12),
+      align: table.readUInt32BE(at + 16),
+    };
+  }
+
+  it("writes a big-endian table with one entry per slice holding its cpu type and subtype", () => {
+    const universal = makeUniversal([
+      { cpuType: X86_64, cpuSubtype: 3, bytes: x86 },
+      { cpuType: ARM64, cpuSubtype: 0, bytes: arm },
+    ]);
+    expect(universal.readUInt32BE(0)).toBe(0xcafebabe);
+    expect(universal.readUInt32BE(4)).toBe(2);
+    expect(entryOf(universal, 0)).toMatchObject({ cpuType: X86_64, cpuSubtype: 3, size: x86.length });
+    expect(entryOf(universal, 1)).toMatchObject({ cpuType: ARM64, cpuSubtype: 0, size: arm.length });
+  });
+
+  it("starts every slice at a multiple of 2^align, defaulting to 14, with the slice bytes unchanged", () => {
+    const universal = makeUniversal([
+      { cpuType: X86_64, cpuSubtype: 3, bytes: x86 },
+      { cpuType: ARM64, cpuSubtype: 0, bytes: arm },
+    ]);
+    const slices = [x86, arm];
+    let previousEnd = 8 + 2 * 20;
+    for (let index = 0; index < 2; index++) {
+      const entry = entryOf(universal, index);
+      expect(entry.align).toBe(14);
+      expect(entry.offset % 2 ** 14).toBe(0);
+      expect(entry.offset).toBeGreaterThanOrEqual(previousEnd);
+      expect(universal.subarray(entry.offset, entry.offset + entry.size).equals(slices[index])).toBe(true);
+      previousEnd = entry.offset + entry.size;
+    }
+    expect(universal.length).toBeGreaterThanOrEqual(previousEnd);
+  });
+
+  it("uses the given alignment for the boundaries and records it in each entry", () => {
+    const universal = makeUniversal(
+      [
+        { cpuType: X86_64, cpuSubtype: 3, bytes: x86 },
+        { cpuType: ARM64, cpuSubtype: 0, bytes: arm },
+      ],
+      12,
+    );
+    for (let index = 0; index < 2; index++) {
+      const entry = entryOf(universal, index);
+      expect(entry.align).toBe(12);
+      expect(entry.offset % 2 ** 12).toBe(0);
+    }
+  });
+
+  it("assembles programs the independent checker reads with the same per-slice report as the thin files", () => {
+    const universal = makeUniversal([
+      { cpuType: ARM64, cpuSubtype: 0, bytes: arm },
+      { cpuType: X86_64, cpuSubtype: 3, bytes: x86 },
+    ]);
+    const combined = checkMachO(universal);
+    expect(combined.problems).toEqual([]);
+    expect(combined.slices).toHaveLength(2);
+    const strip = (report: ReturnType<typeof checkMachO>["slices"][number]) => ({
+      cputype: report.cputype,
+      size: report.size,
+      signatureCommands: report.signatureCommands,
+      pagesChecked: report.pagesChecked,
+    });
+    const alone = [checkMachO(arm), checkMachO(x86)];
+    for (let index = 0; index < 2; index++) {
+      expect(alone[index].problems).toEqual([]);
+      expect(strip(combined.slices[index])).toEqual(strip(alone[index].slices[0]));
+    }
+  });
+
+  it("imports nothing from the source tree or the checker", () => {
+    const lines = fs
+      .readFileSync(rel("test", "helpers", "Universal.ts"), "utf8")
+      .split("\n")
+      .filter((line) => /^\s*import\b|\brequire\(|^\s*}?\s*from\s/.test(line));
+    for (const line of lines) {
+      expect(line).not.toMatch(/src\/|MachOChecker/);
+      expect(line).toMatch(/["'](fs|path|crypto|os|buffer|node:[a-z]+)["']/);
+    }
   });
 });
