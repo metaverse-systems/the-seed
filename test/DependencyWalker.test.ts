@@ -9,6 +9,10 @@ import {
   walkDependencies,
   resolveBuildOrder,
   CyclicDependencyError,
+  DependencyDiscoveryError,
+  ConflictingProjectError,
+  ProjectManifestError,
+  DiscoveryCancelledError,
 } from "../src/DependencyWalker";
 import type { DependencyGraph, BuildableProject } from "../src/types";
 
@@ -510,6 +514,23 @@ describe("DependencyWalker", () => {
       expect(() => resolveBuildOrder(graph, aPath)).toThrow(
         CyclicDependencyError
       );
+
+      // Defensive form: leftover names in name order, no location lines.
+      let caught: unknown;
+      try {
+        resolveBuildOrder(graph, aPath);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(CyclicDependencyError);
+      expect((caught as Error).message.split("\n")).toEqual([
+        "Dependency cycle: project-a → project-b → project-a",
+        "Each project above declares the next one in its package.json \"dependencies\"; remove the declaration that closes the cycle.",
+      ]);
+      expect((caught as CyclicDependencyError).cycleParticipants).toEqual([
+        "project-a",
+        "project-b",
+      ]);
     });
 
     it("sorts same-tier projects alphabetically for stability", () => {
@@ -597,6 +618,110 @@ describe("DependencyWalker", () => {
       // z-component (Component=0) should come before a-system (System=1)
       expect(order[0].name).toBe("z-component");
       expect(order[1].name).toBe("a-system");
+    });
+  });
+
+  // ── Discovery errors ───────────────────────────────────────
+
+  describe("discovery errors", () => {
+    // Constructor forms chosen here: CyclicDependencyError(participants,
+    // locations?) takes the project names without the repeated first name,
+    // and optionally their real locations in the same order;
+    // ConflictingProjectError(packageName, first, second);
+    // ProjectManifestError(manifestPath, reason) where manifestPath is the
+    // path of the package.json file; DiscoveryCancelledError() takes no
+    // arguments.
+    const cycleMessage = [
+      "Dependency cycle: @t/a → @t/b → @t/a",
+      "  @t/a  /loc/a",
+      "  @t/b  /loc/b",
+      "Each project above declares the next one in its package.json \"dependencies\"; remove the declaration that closes the cycle.",
+    ].join("\n");
+
+    it("CyclicDependencyError describes a two-project cycle", () => {
+      const error = new CyclicDependencyError(
+        ["@t/a", "@t/b"],
+        ["/loc/a", "/loc/b"]
+      );
+      expect(error.cycleParticipants).toEqual(["@t/a", "@t/b"]);
+      expect(error.chain).toEqual(["@t/a", "@t/b", "@t/a"]);
+      expect(error.locations).toEqual(["/loc/a", "/loc/b"]);
+      expect(error.message).toBe(cycleMessage);
+    });
+
+    it("CyclicDependencyError describes a cycle of one", () => {
+      const error = new CyclicDependencyError(["@t/s"], ["/loc/s"]);
+      expect(error.cycleParticipants).toEqual(["@t/s"]);
+      expect(error.chain).toEqual(["@t/s", "@t/s"]);
+      expect(error.message).toBe(
+        [
+          "Dependency cycle: @t/s → @t/s",
+          "  @t/s  /loc/s",
+          "The project declares itself in its package.json \"dependencies\"; remove that declaration.",
+        ].join("\n")
+      );
+    });
+
+    it("ConflictingProjectError names both locations", () => {
+      const error = new ConflictingProjectError("@t/q", "/one/q", "/two/q");
+      expect(error.packageName).toBe("@t/q");
+      expect(error.locations).toEqual(["/one/q", "/two/q"]);
+      expect(error.message).toBe(
+        [
+          "Two different projects are named @t/q:",
+          "  /one/q",
+          "  /two/q",
+          "Make every declaration of @t/q lead to the same directory, or give one of them another name.",
+        ].join("\n")
+      );
+    });
+
+    it("ProjectManifestError names the file and the reason", () => {
+      const error = new ProjectManifestError(
+        "/loc/x/package.json",
+        "Unexpected token"
+      );
+      expect(error.manifestPath).toBe("/loc/x/package.json");
+      expect(error.reason).toBe("Unexpected token");
+      expect(error.message).toBe(
+        "Cannot read /loc/x/package.json: Unexpected token"
+      );
+    });
+
+    it("the three discovery errors share DependencyDiscoveryError", () => {
+      const errors = [
+        new CyclicDependencyError(["@t/a", "@t/b"], ["/loc/a", "/loc/b"]),
+        new ConflictingProjectError("@t/q", "/one/q", "/two/q"),
+        new ProjectManifestError("/loc/x/package.json", "bad"),
+      ];
+      for (const error of errors) {
+        expect(error).toBeInstanceOf(DependencyDiscoveryError);
+        expect(error).toBeInstanceOf(Error);
+      }
+    });
+
+    it("DiscoveryCancelledError is an Error but not a discovery error", () => {
+      const error = new DiscoveryCancelledError();
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(DependencyDiscoveryError);
+    });
+
+    it("each class sets name to its class name", () => {
+      expect(new CyclicDependencyError(["@t/a"], ["/a"]).name).toBe(
+        "CyclicDependencyError"
+      );
+      expect(new ConflictingProjectError("@t/q", "/a", "/b").name).toBe(
+        "ConflictingProjectError"
+      );
+      expect(new ProjectManifestError("/a/package.json", "x").name).toBe(
+        "ProjectManifestError"
+      );
+      expect(new DiscoveryCancelledError().name).toBe(
+        "DiscoveryCancelledError"
+      );
+      expect(new DependencyDiscoveryError("x").name).toBe(
+        "DependencyDiscoveryError"
+      );
     });
   });
 

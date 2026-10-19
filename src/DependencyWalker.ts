@@ -7,18 +7,108 @@ import {
 } from "./types";
 
 /**
- * Error thrown when a cyclic dependency is detected during topological sort.
+ * Base class of the errors that stop dependency discovery because of what
+ * the projects declare or contain.
  */
-export class CyclicDependencyError extends Error {
-  /** Names of projects involved in the cycle */
-  cycleParticipants: string[];
+export class DependencyDiscoveryError extends Error {
+  constructor(message: string) {
+    super(message);
+    Object.setPrototypeOf(this, new.target.prototype);
+    this.name = "DependencyDiscoveryError";
+  }
+}
 
-  constructor(participants: string[]) {
-    super(
-      `Cyclic dependency detected among: ${participants.join(", ")}`
-    );
+/**
+ * Error thrown when projects depend on each other in a cycle, including a
+ * project that declares itself.
+ */
+export class CyclicDependencyError extends DependencyDiscoveryError {
+  /** Names of projects involved in the cycle, starting where the cycle was entered */
+  cycleParticipants: string[];
+  /** The participants followed by the first one again */
+  chain: string[];
+  /** Real locations of the participants, in the same order; empty when unknown */
+  locations: string[];
+
+  /**
+   * @param participants - Project names of the cycle, without the repeated first name
+   * @param locations - Real locations of the participants in the same order; omitted for the defensive check of resolveBuildOrder
+   */
+  constructor(participants: string[], locations?: string[]) {
+    const chain = [...participants, participants[0]];
+    const lines = [`Dependency cycle: ${chain.join(" → ")}`];
+    if (locations && locations.length === participants.length) {
+      participants.forEach((name, index) => {
+        lines.push(`  ${name}  ${locations[index]}`);
+      });
+      lines.push(
+        participants.length === 1
+          ? "The project declares itself in its package.json \"dependencies\"; remove that declaration."
+          : "Each project above declares the next one in its package.json \"dependencies\"; remove the declaration that closes the cycle."
+      );
+    } else {
+      lines.push(
+        "Each project above declares the next one in its package.json \"dependencies\"; remove the declaration that closes the cycle."
+      );
+    }
+    super(lines.join("\n"));
     this.name = "CyclicDependencyError";
     this.cycleParticipants = participants;
+    this.chain = chain;
+    this.locations = locations ?? [];
+  }
+}
+
+/**
+ * Error thrown when two different projects provide the same package name.
+ */
+export class ConflictingProjectError extends DependencyDiscoveryError {
+  /** The package name both projects carry */
+  packageName: string;
+  /** Real locations of the two projects, in the order found */
+  locations: string[];
+
+  constructor(packageName: string, first: string, second: string) {
+    super(
+      [
+        `Two different projects are named ${packageName}:`,
+        `  ${first}`,
+        `  ${second}`,
+        `Make every declaration of ${packageName} lead to the same directory, or give one of them another name.`,
+      ].join("\n")
+    );
+    this.name = "ConflictingProjectError";
+    this.packageName = packageName;
+    this.locations = [first, second];
+  }
+}
+
+/**
+ * Error thrown when a project's package.json cannot be read or parsed.
+ */
+export class ProjectManifestError extends DependencyDiscoveryError {
+  /** Path of the package.json file */
+  manifestPath: string;
+  /** Why it could not be read */
+  reason: string;
+
+  constructor(manifestPath: string, reason: string) {
+    super(`Cannot read ${manifestPath}: ${reason}`);
+    this.name = "ProjectManifestError";
+    this.manifestPath = manifestPath;
+    this.reason = reason;
+  }
+}
+
+/**
+ * Error thrown when a stop request ends dependency discovery. It is not a
+ * discovery failure of the projects.
+ */
+export class DiscoveryCancelledError extends Error {
+  constructor() {
+    super("Dependency discovery cancelled");
+    Object.setPrototypeOf(this, new.target.prototype);
+    this.name = "DiscoveryCancelledError";
   }
 }
 
@@ -320,6 +410,7 @@ export function resolveBuildOrder(
         cycleParticipants.push(project.name);
       }
     }
+    cycleParticipants.sort();
     throw new CyclicDependencyError(cycleParticipants);
   }
 
