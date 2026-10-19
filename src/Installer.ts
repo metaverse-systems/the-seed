@@ -135,18 +135,18 @@ class Installer {
   };
 
   /**
-   * Ensure the dist/ directory exists. If missing, auto-runs Package.run('dist', ['.']).
+   * Ensure the dist/ directory of the project exists. If missing, packages the project into it.
    * Returns true if dist/ exists and is non-empty after this call.
    */
-  ensureDist = (projectDir: string): boolean => {
+  ensureDist = async (projectDir: string): Promise<boolean> => {
     const distDir = path.join(projectDir, "dist");
 
     if (!fs.existsSync(distDir)) {
       console.log("dist/ not found, running package step...");
       try {
         const pkg = new Package(this.config);
-        const success = pkg.run("dist", [projectDir]);
-        if (!success) {
+        const result = await pkg.run(distDir, [projectDir]);
+        if (!result.success) {
           console.error("Error: Packaging failed. Ensure the project has been cross-compiled with 'the-seed build windows'.");
           return false;
         }
@@ -260,9 +260,9 @@ ${componentRefs}
 
   /**
    * Full pipeline: validate → ensure dist → generate → compile.
-   * Returns true on success.
+   * Resolves the path of the installer, or null on failure.
    */
-  run = (projectDir: string): string | null => {
+  run = async (projectDir: string): Promise<string | null> => {
     // Step 1: Validate wixl is installed
     if (!this.checkWixl()) {
       console.error("Error: wixl is not installed. Install it with: sudo apt install msitools");
@@ -276,7 +276,7 @@ ${componentRefs}
     }
 
     // Step 3: Ensure dist/ directory
-    if (!this.ensureDist(projectDir)) {
+    if (!(await this.ensureDist(projectDir))) {
       return null;
     }
 

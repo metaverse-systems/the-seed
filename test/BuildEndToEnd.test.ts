@@ -868,7 +868,7 @@ describe("BuildEndToEnd", () => {
       const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
       let packaged: boolean;
       try {
-        packaged = new Package(new Config(configDir)).run(outputDir, [projectDir]);
+        packaged = (await new Package(new Config(configDir)).run(outputDir, [projectDir])).success;
       } finally {
         errorSpy.mockRestore();
         warnSpy.mockRestore();

@@ -1,9 +1,21 @@
 import fs from "fs-extra";
 import path from "path";
+import crypto from "crypto";
 import { execSync } from "child_process";
 import Config from "./Config";
 import { targets } from "./Build";
-import { DependencyResultType } from "./types";
+import {
+  ConflictingProjectError,
+  DependencyDiscoveryError,
+  isBuildable,
+  walkDependencies,
+} from "./DependencyWalker";
+import {
+  DependencyResultType,
+  PackagePlan,
+  PackageResult,
+  PlannedFile,
+} from "./types";
 
 class Package {
   config: Config;
@@ -93,6 +105,7 @@ class Package {
    * Resolve binary paths from the libtool build output in {projectDir}/src/.libs/.
    * For programs: looks for {name} (native) or {name}.exe (cross-compiled for Windows).
    * For libraries: looks for {name}.so (native) or {name}*.dll (cross-compiled for Windows).
+   * A native library is returned as the real file the development link {name}.so leads to.
    */
   resolveBinaryPaths = (projectDir: string): string[] => {
     const parsed = this.parseMakefileAm(projectDir);
@@ -134,7 +147,11 @@ class Package {
       for (const file of files) {
         // Native shared library (.so)
         if (file === parsed.name + ".so") {
-          binaryPaths.push(path.join(libsDir, file));
+          try {
+            binaryPaths.push(fs.realpathSync(path.join(libsDir, file)));
+          } catch {
+            // a dangling link leads to no file
+          }
         }
         // Cross-compiled Windows DLL
         if (file.startsWith(parsed.name) && file.endsWith(".dll")) {
@@ -144,37 +161,6 @@ class Package {
     }
 
     return binaryPaths;
-  };
-
-  /**
-   * Recursively read package.json from a project directory and resolve dependency
-   * directories via node_modules. Returns an array of absolute paths to all native
-   * dependency project directories (those with src/Makefile.am), including transitive deps.
-   */
-  getPackageDeps = (projectDir: string, visited: Set<string> = new Set()): string[] => {
-    const resolved = path.resolve(projectDir);
-    if (visited.has(resolved)) return [];
-    visited.add(resolved);
-
-    const packageJsonPath = path.join(projectDir, "package.json");
-    if (!fs.existsSync(packageJsonPath)) {
-      return [];
-    }
-
-    const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
-    const deps = packageJson.dependencies || {};
-    const depDirs: string[] = [];
-
-    for (const depName of Object.keys(deps)) {
-      const depDir = path.join(projectDir, "node_modules", depName);
-      if (fs.existsSync(depDir) && fs.existsSync(path.join(depDir, "src", "Makefile.am"))) {
-        depDirs.push(depDir);
-        // Recurse into the dependency's own package.json
-        depDirs.push(...this.getPackageDeps(depDir, visited));
-      }
-    }
-
-    return depDirs;
   };
 
   /**
@@ -188,75 +174,100 @@ class Package {
   };
 
   /**
-   * Main entry point: validate inputs, resolve binary paths from project directories,
-   * resolve dependencies, create directory, copy files.
-   * Returns true on success, false on validation/resolution errors (after printing messages).
+   * Decide what packaging the given project directories would write, without writing anything.
+   * Dependency projects are found with the walker the recursive build uses; a directory that is
+   * not a project contributes itself alone.
    */
-  run = (outputDir: string, projectDirs: string[]): boolean => {
-    // Validate output directory doesn't already exist
-    if (fs.existsSync(outputDir)) {
-      console.error("Error: Output directory already exists: " + outputDir);
-      return false;
+  plan = async (projectDirs: string[]): Promise<PackagePlan> => {
+    const refuse = (message: string): PackagePlan => ({ ok: false, message });
+
+    // Discovery: merge the projects of every given directory by real location
+    const projectNames = new Map<string, string>();
+    const nameLocations = new Map<string, string>();
+    const given = new Set<string>();
+    try {
+      for (const projectDir of projectDirs) {
+        const resolved = path.resolve(projectDir);
+        const location = fs.realpathSync(resolved);
+        given.add(location);
+        const found: { name: string; location: string }[] = [];
+        if (await isBuildable(location)) {
+          const graph = await walkDependencies(location);
+          for (const [projectPath, project] of graph.projects) {
+            found.push({ name: project.name, location: projectPath });
+          }
+        } else {
+          found.push({ name: path.basename(location), location });
+        }
+        for (const { name, location: projectPath } of found) {
+          if (projectNames.has(projectPath)) {
+            continue;
+          }
+          const known = nameLocations.get(name);
+          if (known !== undefined && known !== projectPath) {
+            return refuse(new ConflictingProjectError(name, known, projectPath).message);
+          }
+          nameLocations.set(name, projectPath);
+          projectNames.set(projectPath, name);
+        }
+      }
+    } catch (error) {
+      if (error instanceof DependencyDiscoveryError) {
+        return refuse(error.message);
+      }
+      throw error;
     }
 
-    // Validate all project directories exist and are directories
+    // Build-tree outputs: the given directories must have some, dependency projects may
+    const files: PlannedFile[] = [];
+    const planned = new Map<string, PlannedFile>();
+    const register = (file: PlannedFile): void => {
+      if (!planned.has(file.name)) {
+        planned.set(file.name, file);
+        files.push(file);
+      }
+    };
+    const givenByLocation = new Map<string, string>();
     for (const projectDir of projectDirs) {
-      if (!fs.existsSync(projectDir)) {
-        console.error("Error: Directory not found: " + projectDir);
-        return false;
-      }
-      const stat = fs.statSync(projectDir);
-      if (!stat.isDirectory()) {
-        console.error("Error: Not a directory: " + projectDir);
-        return false;
-      }
+      givenByLocation.set(fs.realpathSync(path.resolve(projectDir)), projectDir);
     }
-
-    // Resolve binary paths from project directories and their package.json dependencies
     const binaryPaths: string[] = [];
-    for (const projectDir of projectDirs) {
-      const paths = this.resolveBinaryPaths(projectDir);
-      if (paths.length === 0) {
-        console.error("Error: No installed binaries found for " + projectDir);
-        return false;
+    for (const [location, name] of projectNames) {
+      const outputs = this.resolveBinaryPaths(location);
+      if (outputs.length === 0) {
+        if (given.has(location)) {
+          return refuse("No installed binaries found for " + (givenByLocation.get(location) ?? location));
+        }
+        continue;
       }
-      binaryPaths.push(...paths);
-
-      // Also resolve binaries from package.json dependencies in node_modules
-      const depDirs = this.getPackageDeps(projectDir);
-      for (const depDir of depDirs) {
-        const depPaths = this.resolveBinaryPaths(depDir);
-        if (depPaths.length > 0) {
-          binaryPaths.push(...depPaths);
+      for (const output of outputs) {
+        const source = fs.realpathSync(output);
+        const before = files.length;
+        register(this.plannedFile(path.basename(output), source, { kind: "project", project: name, location }));
+        if (files.length > before) {
+          binaryPaths.push(source);
         }
       }
     }
 
-    // Resolve dependencies recursively — resolved libraries may have their own dependencies
+    // Libraries: analyse in rounds until no new dependency is found
     const searchPaths = this.getSearchPaths();
-    const filesToCopy = new Set<string>();
-
-    // Add resolved binary paths
-    for (const filePath of binaryPaths) {
-      filesToCopy.add(path.resolve(filePath));
-    }
-
-    // Iteratively resolve until no new dependencies are found
-    let toAnalyze = [...binaryPaths];
     const analyzed = new Set<string>();
     const warnedLibraries = new Set<string>();
+    const planSources = new Set<string>(files.map((file) => file.source));
+    let toAnalyze = binaryPaths;
 
     while (toAnalyze.length > 0) {
       const result = this.resolveDependencies(toAnalyze, searchPaths);
 
-      // Check for errors from DependencyLister
       const errorKeys = Object.keys(result.errors);
       if (errorKeys.length > 0) {
+        const lines: string[] = [];
         for (const binaryPath of errorKeys) {
-          console.error("Error: Failed to analyze binary: " + binaryPath);
-          console.error("  " + result.errors[binaryPath]);
+          lines.push("Failed to analyze binary: " + binaryPath);
+          lines.push("  " + result.errors[binaryPath]);
         }
-        return false;
+        return refuse(lines.join("\n"));
       }
 
       // Libraries that were found but could not be read: warn, keep packaging them
@@ -271,55 +282,121 @@ class Package {
         console.warn("  Needed by: " + libraryErrors[libPath].inputs.join(", "));
       }
 
-      // Mark current batch as analyzed
       for (const p of toAnalyze) {
-        analyzed.add(path.resolve(p));
+        analyzed.add(p);
       }
 
-      // Collect newly discovered resolved dependencies
       const nextBatch: string[] = [];
-      for (const depPath of Object.keys(result.dependencies)) {
-        if (path.isAbsolute(depPath) && fs.existsSync(depPath)) {
-          if (!filesToCopy.has(depPath)) {
-            filesToCopy.add(depPath);
-            // If not yet analyzed, queue for transitive resolution
-            if (!analyzed.has(depPath) && !(depPath in libraryErrors)) {
-              nextBatch.push(depPath);
-            }
-          }
+      for (const depPath of Object.keys(result.dependencies).sort()) {
+        if (!path.isAbsolute(depPath) || !fs.existsSync(depPath)) {
+          continue;
+        }
+        const source = fs.realpathSync(depPath);
+        if (planSources.has(source)) {
+          continue;
+        }
+        planSources.add(source);
+        const directory = searchPaths.find((searchPath) => path.dirname(source) === searchPath) ?? path.dirname(source);
+        register(this.plannedFile(path.basename(depPath), source, { kind: "search-path", directory }));
+        if (!analyzed.has(source) && !(depPath in libraryErrors)) {
+          nextBatch.push(source);
         }
       }
 
       toAnalyze = nextBatch;
     }
 
-    // Create output directory
+    return { ok: true, projects: [...projectNames.keys()], files, notPackaged: [] };
+  };
+
+  /** A file to be written under a name, with its content hash and the signature beside its source. */
+  private plannedFile = (name: string, source: string, origin: PlannedFile["origin"]): PlannedFile => {
+    const signature = source + ".sig";
+    return {
+      name,
+      source,
+      sha256: crypto.createHash("sha256").update(fs.readFileSync(source)).digest("hex"),
+      signature: fs.existsSync(signature) ? signature : null,
+      origin,
+    };
+  };
+
+  /**
+   * Main entry point: validate inputs, decide what to package, create the directory, copy files.
+   * Resolves a result; a refusal or failure is printed once as "Error: <message>" and nothing is left written.
+   */
+  run = async (outputDir: string, projectDirs: string[]): Promise<PackageResult> => {
+    const failed = (message: string): PackageResult => {
+      console.error("Error: " + message);
+      return {
+        success: false,
+        message,
+        outputDir,
+        projects: [],
+        files: [],
+        signatures: 0,
+        fileCount: 0,
+        notPackaged: [],
+      };
+    };
+
+    // Validate output directory doesn't already exist
+    if (fs.existsSync(outputDir)) {
+      return failed("Output directory already exists: " + outputDir);
+    }
+
+    // Validate all project directories exist and are directories
+    for (const projectDir of projectDirs) {
+      if (!fs.existsSync(projectDir)) {
+        return failed("Directory not found: " + projectDir);
+      }
+      if (!fs.statSync(projectDir).isDirectory()) {
+        return failed("Not a directory: " + projectDir);
+      }
+    }
+
+    const plan = await this.plan(projectDirs);
+    if (!plan.ok) {
+      return failed(plan.message);
+    }
+
+    // Create output directory and copy files (and their .sig signature files)
     fs.mkdirSync(outputDir, { recursive: true });
-
-    // Copy files (and their .sig signature files if they exist)
-    let sigCount = 0;
-    for (const filePath of filesToCopy) {
-      const destPath = path.join(outputDir, path.basename(filePath));
-      console.log("Copying " + path.basename(filePath) + "...");
-      fs.copyFileSync(filePath, destPath);
-
-      // Copy accompanying .sig file if it exists
-      const sigPath = filePath + ".sig";
-      if (fs.existsSync(sigPath)) {
-        const sigDestPath = path.join(outputDir, path.basename(sigPath));
-        console.log("Copying " + path.basename(sigPath) + "...");
-        fs.copyFileSync(sigPath, sigDestPath);
-        sigCount++;
+    let signatures = 0;
+    for (const file of plan.files) {
+      try {
+        const from = file.name === path.basename(file.source) ? "" : " (from " + file.source + ")";
+        console.log("Copying " + file.name + from + "...");
+        fs.copyFileSync(file.source, path.join(outputDir, file.name));
+        if (file.signature !== null) {
+          console.log("Copying " + file.name + ".sig...");
+          fs.copyFileSync(file.signature, path.join(outputDir, file.name + ".sig"));
+          signatures++;
+        }
+      } catch (error) {
+        fs.rmSync(outputDir, { recursive: true, force: true });
+        return failed("Copying " + file.name + " failed: " + (error instanceof Error ? error.message : String(error)));
       }
     }
 
     // Report summary
-    let summary = "Packaged " + filesToCopy.size + " files into " + outputDir + "/";
-    if (sigCount > 0) {
-      summary += " (" + sigCount + " signature" + (sigCount > 1 ? "s" : "") + " included)";
+    const fileCount = plan.files.length + signatures;
+    let summary = "Packaged " + fileCount + " files into " + outputDir + "/";
+    if (signatures > 0) {
+      summary += " (" + signatures + " signature" + (signatures > 1 ? "s" : "") + " included)";
     }
     console.log(summary);
-    return true;
+
+    return {
+      success: true,
+      message: null,
+      outputDir,
+      projects: plan.projects,
+      files: plan.files.map((file) => file.name),
+      signatures,
+      fileCount,
+      notPackaged: plan.notPackaged,
+    };
   };
 }
 

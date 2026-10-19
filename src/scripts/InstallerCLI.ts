@@ -74,7 +74,7 @@ const InstallerCLI = async (scriptConfig: ScriptArgsType) => {
     case "windows": {
       const config = new Config(scriptConfig.configDir);
       const installer = new Installer(config);
-      const msiPath = installer.run(process.cwd());
+      const msiPath = await installer.run(process.cwd());
       if (!msiPath) {
         process.exit(1);
       }

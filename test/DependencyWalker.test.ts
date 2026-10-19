@@ -520,6 +520,122 @@ describe("DependencyWalker", () => {
     }, BOUND_TIMEOUT);
   });
 
+  describe("walkDependencies identity and conflicts", () => {
+    // Projects are identified by real location. Cases that hold a link run under the
+    // hard bound of 200 file reads so that a walk that never ends fails fast.
+    const LIB = "lib_LTLIBRARIES = libx.la";
+
+    async function discover(dir: string): Promise<DependencyGraph> {
+      const bound = readBound(200);
+      try {
+        return await walkDependencies(dir);
+      } finally {
+        bound.restore();
+      }
+    }
+
+    it("finds one project, at its real location, for a link and a local path to one directory", async () => {
+      const root = path.join(tempDir, "root");
+      const q = path.join(tempDir, "q");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "@t/q": "file:../q", "@t/q-alias": "^1.0.0" },
+      });
+      writeProject(q, { name: "@t/q", makefileAm: LIB });
+      linkModule(root, "@t/q-alias", "../../../q");
+
+      const graph = await discover(root);
+      expect([...graph.projects.keys()].sort()).toEqual([q, root].sort());
+      expect(graph.projects.get(q)?.path).toBe(q);
+      expect(graph.edges.get(root)).toEqual([q]);
+    }, BOUND_TIMEOUT);
+
+    it("finds one project for a file: path through a link to the project's parent directory", async () => {
+      const root = path.join(tempDir, "root");
+      const parent = path.join(tempDir, "parent");
+      const q = path.join(parent, "q");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "@t/q": "file:../parent/q", "@t/q-via-link": "file:../parentlink/q" },
+      });
+      writeProject(q, { name: "@t/q", makefileAm: LIB });
+      fs.symlinkSync("parent", path.join(tempDir, "parentlink"));
+
+      const graph = await discover(root);
+      expect([...graph.projects.keys()].sort()).toEqual([q, root].sort());
+      expect(graph.edges.get(root)).toEqual([q]);
+    }, BOUND_TIMEOUT);
+
+    it("lists dependencies as package names, once each, in declaration order, when two keys reach one directory", async () => {
+      const root = path.join(tempDir, "root");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "@t/q": "file:../q", "@t/r": "file:../r", "@t/q-again": "file:../q" },
+      });
+      writeProject(path.join(tempDir, "q"), { name: "@t/q", makefileAm: LIB });
+      writeProject(path.join(tempDir, "r"), { name: "@t/r", makefileAm: LIB });
+
+      const graph = await discover(root);
+      expect(graph.projects.get(root)?.dependencies).toEqual(["@t/q", "@t/r"]);
+      expect(graph.edges.get(root)).toEqual([path.join(tempDir, "q"), path.join(tempDir, "r")]);
+    }, BOUND_TIMEOUT);
+
+    it("reports a local-path project and a separate copy under one name, with both real locations in the order found", async () => {
+      const root = path.join(tempDir, "root");
+      const local = path.join(tempDir, "q");
+      const copy = path.join(root, "node_modules", "@t", "q");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "q-local": "file:../q", "@t/q": "^1.0.0" },
+      });
+      writeProject(local, { name: "@t/q", makefileAm: LIB });
+      writeProject(copy, { name: "@t/q", makefileAm: LIB });
+
+      let thrown: unknown;
+      try {
+        await discover(root);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(ConflictingProjectError);
+      const error = thrown as ConflictingProjectError;
+      expect(error.packageName).toBe("@t/q");
+      expect(error.locations).toEqual([local, copy]);
+      expect(error.message).toContain(local);
+      expect(error.message).toContain(copy);
+    }, BOUND_TIMEOUT);
+
+    it("skips a dangling node_modules link and a missing file: directory (guard)", async () => {
+      const root = path.join(tempDir, "root");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "@t/dangling": "^1.0.0", "@t/missing": "file:../missing" },
+      });
+      linkModule(root, "@t/dangling", "../../../nowhere");
+
+      const graph = await discover(root);
+      expect([...graph.projects.keys()]).toEqual([root]);
+      expect(graph.projects.get(root)?.dependencies).toEqual([]);
+    }, BOUND_TIMEOUT);
+
+    it("discovers a project directory named with spaces and shell characters at its exact path (guard)", async () => {
+      const root = path.join(tempDir, "root");
+      const oddName = "a b$'\"";
+      const odd = path.join(tempDir, oddName);
+      writeProject(root, { name: "@t/root", makefileAm: LIB, dependencies: { "@t/odd": "file:../" + oddName } });
+      writeProject(odd, { name: "@t/odd", makefileAm: LIB });
+
+      const graph = await discover(root);
+      expect(graph.projects.get(odd)?.path).toBe(odd);
+      expect(graph.edges.get(root)).toEqual([odd]);
+    }, BOUND_TIMEOUT);
+  });
+
   // ── resolveBuildOrder ──────────────────────────────────────
 
   describe("resolveBuildOrder", () => {

@@ -299,19 +299,19 @@ export enum ProjectType {
 
 /** A discovered project that can be built with the autotools pipeline. */
 export interface BuildableProject {
-  /** Package name from package.json (e.g., "@org/physics-system") */
+  /** Package name from package.json (e.g., "@org/physics-system"), or the directory name when it has none */
   name: string;
-  /** Absolute filesystem path to the project root directory */
+  /** Real location (symbolic links resolved) of the project root directory */
   path: string;
   /** Tier classification derived from src/Makefile.am + configure.ac */
   type: ProjectType;
-  /** Package names of buildable dependencies */
+  /** Package names of the dependency projects, each once, in declaration order */
   dependencies: string[];
 }
 
 /** A directed acyclic graph of BuildableProject nodes. */
 export interface DependencyGraph {
-  /** All discovered projects, keyed by absolute path (deduplicates diamond deps) */
+  /** All discovered projects, keyed by real location (a project reached several ways is one project) */
   projects: Map<string, BuildableProject>;
   /** Adjacency list: project path → paths of its buildable dependencies */
   edges: Map<string, string[]>;

@@ -2,7 +2,7 @@ import Config from "../Config";
 import Package from "../Package";
 import { ScriptArgsType } from "../types";
 
-const PackageCLI = (scriptConfig: ScriptArgsType) => {
+const PackageCLI = async (scriptConfig: ScriptArgsType) => {
   const command = scriptConfig.args[3];
 
   // No arguments or help subcommand
@@ -32,9 +32,9 @@ const PackageCLI = (scriptConfig: ScriptArgsType) => {
 
   const config = new Config(scriptConfig.configDir);
   const pkg = new Package(config);
-  const success = pkg.run(outputDir, projectDirs);
+  const result = await pkg.run(outputDir, projectDirs);
 
-  if (!success) {
+  if (!result.success) {
     process.exit(1);
   }
 };

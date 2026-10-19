@@ -35,6 +35,8 @@ jest.mock("../native/build/Release/dependency_lister.node", () => ({
 }), { virtual: true });
 
 const mockedExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>;
+// eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
+const mockedListDependencies = require("../native/build/Release/dependency_lister.node").listDependencies as jest.Mock;
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "installer-test-"));
@@ -234,7 +236,7 @@ describe("Installer", () => {
       expect(result!.manufacturer).toBe("Unknown");
     });
 
-    it("should return null when package.json is missing", () => {
+    it("should return null when package.json is missing", async () => {
       const emptyDir = path.join(tempDir, "empty");
       fs.mkdirSync(emptyDir, { recursive: true });
 
@@ -368,21 +370,46 @@ describe("Installer", () => {
   // ── ensureDist() ──────────────────────────────────────────
 
   describe("ensureDist", () => {
-    it("should return true when dist/ exists with files", () => {
+    it("should return true when dist/ exists with files", async () => {
       const projectDir = path.join(tempDir, "has-dist");
       fs.mkdirSync(projectDir, { recursive: true });
       createDistDir(projectDir, ["app.exe"]);
 
-      expect(installer.ensureDist(projectDir)).toBe(true);
+      expect(await installer.ensureDist(projectDir)).toBe(true);
     });
 
-    it("should return false when dist/ is empty", () => {
+    it("should return false when dist/ is empty", async () => {
       const projectDir = path.join(tempDir, "empty-dist");
       fs.mkdirSync(path.join(projectDir, "dist"), { recursive: true });
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      expect(installer.ensureDist(projectDir)).toBe(false);
+      expect(await installer.ensureDist(projectDir)).toBe(false);
       consoleSpy.mockRestore();
+    });
+
+    it("should package into the project's own dist/ when it is missing, leaving the working directory's dist untouched", async () => {
+      const projectDir = createProjectDir(tempDir, { name: "app-project", version: "1.0.0", author: "Dev" });
+      fs.mkdirSync(path.join(projectDir, "src", ".libs"), { recursive: true });
+      fs.writeFileSync(path.join(projectDir, "src", "Makefile.am"), "bin_PROGRAMS = app\napp_SOURCES = app.cpp\n");
+      fs.writeFileSync(path.join(projectDir, "src", ".libs", "app"), "program-content");
+      mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
+      // The working directory is left as it is: its own dist/ is only observed
+      const cwdDist = path.join(process.cwd(), "dist");
+      const before = fs.existsSync(cwdDist) ? fs.statSync(cwdDist).mtimeMs : null;
+
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const errorSpy = jest.spyOn(console, "error").mockImplementation();
+      let result: boolean;
+      try {
+        result = await installer.ensureDist(projectDir);
+      } finally {
+        logSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+
+      expect(result).toBe(true);
+      expect(fs.readFileSync(path.join(projectDir, "dist", "app"), "utf-8")).toBe("program-content");
+      expect(fs.existsSync(cwdDist) ? fs.statSync(cwdDist).mtimeMs : null).toBe(before);
     });
   });
 
@@ -423,7 +450,7 @@ describe("Installer", () => {
   // ── run() ─────────────────────────────────────────────────
 
   describe("run", () => {
-    it("should return null when wixl is not installed", () => {
+    it("should return null when wixl is not installed", async () => {
       mockedExecFileSync.mockImplementation((command: string, args?: readonly string[]) => {
         if (command === "which" && args && args[0] === "wixl") {
           throw new Error("not found");
@@ -438,7 +465,7 @@ describe("Installer", () => {
         author: "Dev"
       });
 
-      const result = installer.run(projectDir);
+      const result = await installer.run(projectDir);
       expect(result).toBeNull();
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("wixl is not installed")
@@ -446,17 +473,17 @@ describe("Installer", () => {
       consoleSpy.mockRestore();
     });
 
-    it("should return null when package.json is missing", () => {
+    it("should return null when package.json is missing", async () => {
       const emptyDir = path.join(tempDir, "no-pkg");
       fs.mkdirSync(emptyDir, { recursive: true });
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const result = installer.run(emptyDir);
+      const result = await installer.run(emptyDir);
       expect(result).toBeNull();
       consoleSpy.mockRestore();
     });
 
-    it("should orchestrate full pipeline and return MSI path on success", () => {
+    it("should orchestrate full pipeline and return MSI path on success", async () => {
       const projectDir = createProjectDir(tempDir, {
         name: "my-game",
         version: "1.0.0",
@@ -465,7 +492,7 @@ describe("Installer", () => {
       createDistDir(projectDir, ["game.exe", "libengine.dll"]);
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = installer.run(projectDir);
+      const result = await installer.run(projectDir);
 
       expect(result).toBe(path.join(projectDir, "my-game-1.0.0.0.msi"));
 

@@ -44,13 +44,13 @@ jest.mock("../src/InstallPhase", () => ({
   runInstallPhase: jest.fn(),
 }));
 
-import { CyclicDependencyError } from "../src/DependencyWalker";
+import { ConflictingProjectError, CyclicDependencyError } from "../src/DependencyWalker";
 import { runCommand } from "../src/ProcessRunner";
 import { runInstallPhase } from "../src/InstallPhase";
 import { buildRecursive } from "../src/RecursiveBuild";
 import { runCli } from "../src/scripts/Cli";
 import type { BuildableProject, RecursiveBuildResult } from "../src/types";
-import { writeProject, readBound, onRead } from "./helpers/ScratchProjects";
+import { writeProject, linkModule, readBound, onRead } from "./helpers/ScratchProjects";
 import type { Hook } from "./helpers/ScratchProjects";
 
 const mockedRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
@@ -89,6 +89,55 @@ describe("recursive discovery", () => {
     writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
     writeProject(b, { name: "@t/b", makefileAm: LIB });
     return { a, b };
+  }
+
+  /**
+   * Program p declaring library q by local path, by a node_modules link and by an alias key
+   * through node_modules, all reaching one directory.
+   */
+  function writeLinkedTree(): { p: string; q: string } {
+    const p = path.join(tempDir, "p");
+    const q = path.join(tempDir, "q");
+    writeProject(q, { name: "@t/q", makefileAm: LIB });
+    writeProject(p, {
+      name: "@t/p",
+      makefileAm: "bin_PROGRAMS = p",
+      dependencies: { "@t/q": "file:../q", "@t/q-link": "^1.0.0", "@t/q-alias": "^0.0.1" },
+    });
+    linkModule(p, "@t/q-link", "../../../q");
+    linkModule(p, "@t/q-alias", "../../../q");
+    return { p, q };
+  }
+
+  /** Program p declaring a local-path q and, under another key, a separate copy named @t/q. */
+  function writeConflict(): { p: string; local: string; copy: string } {
+    const p = path.join(tempDir, "p");
+    const local = path.join(tempDir, "q");
+    const copy = path.join(p, "node_modules", "@t", "q");
+    writeProject(local, { name: "@t/q", makefileAm: LIB });
+    writeProject(p, {
+      name: "@t/p",
+      makefileAm: "bin_PROGRAMS = p",
+      dependencies: { "q-local": "file:../q", "@t/q": "^1.0.0" },
+    });
+    writeProject(copy, { name: "@t/q", makefileAm: LIB });
+    return { p, local, copy };
+  }
+
+  /** The mocked install phase completes without installing anything. */
+  function installPhaseCompletes(): void {
+    mockedInstallPhase.mockImplementation(async (options) => {
+      options.onInstalled?.();
+      return {
+        status: "completed",
+        report: { prefix: "/fake/prefix", installed: 0, stripped: [], signed: [], outcome: { kind: "unsigned", reason: "noScope" } },
+      };
+    });
+  }
+
+  /** Directories the mocked process runner was asked to run steps in. */
+  function stepDirectories(): string[] {
+    return mockedRunCommand.mock.calls.map((call) => String(call[2]?.cwd));
   }
 
   /** Runs `body` with the hard bound of 200 file reads and the given hooks installed, then restores them. */
@@ -220,6 +269,38 @@ describe("recursive discovery", () => {
       expect(started).toEqual([]);
       expectNothingBuilt();
     }, BOUND_TIMEOUT);
+
+    it("lists a dependency reached by a link, a local path and an alias key once, and builds it once", async () => {
+      const { p, q } = writeLinkedTree();
+      mockedRunCommand.mockResolvedValue({ exitCode: 0, signal: null, stdout: "", stderr: "", killed: false });
+      installPhaseCompletes();
+
+      const result = await bounded(() => recursiveBuild(p));
+
+      expect(result.success).toBe(true);
+      expect(result.completed.map((project) => project.name)).toEqual(["@t/q", "@t/p"]);
+      expect(logged().filter((line) => /^ +\d+\. @t\/q /.test(line))).toEqual(["  1. @t/q (Component)"]);
+      expect(logged()).toContain("Discovered 2 buildable projects");
+      const directories = stepDirectories();
+      const forQ = directories.filter((dir) => dir === q).length;
+      expect(forQ).toBeGreaterThan(0);
+      expect(forQ).toBe(directories.filter((dir) => dir === p).length);
+      expect(directories.every((dir) => dir === p || dir === q)).toBe(true);
+    }, BOUND_TIMEOUT);
+
+    it("places a root reached through a linked directory last in the build order", async () => {
+      const { p } = writeLinkedTree();
+      const through = path.join(tempDir, "through");
+      fs.symlinkSync(p, through);
+      mockedRunCommand.mockResolvedValue({ exitCode: 0, signal: null, stdout: "", stderr: "", killed: false });
+      installPhaseCompletes();
+
+      const result = await bounded(() => recursiveBuild(through));
+
+      expect(result.success).toBe(true);
+      expect(result.completed.map((project) => project.name)).toEqual(["@t/q", "@t/p"]);
+      expect(logged()).toContain("  2. @t/p (Program)");
+    }, BOUND_TIMEOUT);
   });
 
   describe("the build command", () => {
@@ -253,6 +334,21 @@ describe("recursive discovery", () => {
       expect(output).toHaveLength(1);
       expect(output[0].startsWith(`Cannot read ${path.join(b, "package.json")}: `)).toBe(true);
       expect(output[0]).not.toMatch(/\n\s+at /);
+      expectNothingBuilt();
+    }, BOUND_TIMEOUT);
+
+    it("exits 1 with exactly the conflicting-locations message, and builds nothing, for two directories named alike", async () => {
+      const { p, local, copy } = writeConflict();
+      inProject(p);
+
+      await bounded(() => runCli(argv, configDir, "the-seed"));
+
+      const expected = new ConflictingProjectError("@t/q", local, copy).message;
+      expect(process.exitCode).toBe(1);
+      expect(errored()).toEqual([expected]);
+      expect(errored()[0]).toContain(local);
+      expect(errored()[0]).toContain(copy);
+      expect(errored()[0]).not.toMatch(/\n\s+at /);
       expectNothingBuilt();
     }, BOUND_TIMEOUT);
 

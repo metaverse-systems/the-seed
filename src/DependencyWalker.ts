@@ -225,6 +225,10 @@ export async function classifyProject(
  *    d. Already visited → record the edge only
  *    e. Otherwise read its package.json and walk it
  *
+ * Edges are recorded once per dependency project and `dependencies` lists the
+ * dependency projects' package names in declaration order. A package name found
+ * at two different real locations is a ConflictingProjectError.
+ *
  * Projects appear in the graph in the order they were entered (root first).
  * A stop request is looked for before each package.json is read and once
  * more when the walk ends.
@@ -233,6 +237,7 @@ export async function classifyProject(
  * @param options - `signal` ends discovery with DiscoveryCancelledError when aborted
  * @returns The complete dependency graph, keyed by real location
  * @throws CyclicDependencyError if projects depend on each other, including a project on itself
+ * @throws ConflictingProjectError if two different projects carry one package name
  * @throws ProjectManifestError if a package.json (the root's included) cannot be read or parsed
  * @throws DiscoveryCancelledError if the signal is aborted during discovery
  */
@@ -247,6 +252,7 @@ export async function walkDependencies(
   const walk: WalkState = {
     graph,
     stack: [],
+    byName: new Map(),
     signal: options?.signal,
   };
 
@@ -260,6 +266,8 @@ interface WalkState {
   graph: DependencyGraph;
   /** Projects being walked, root first */
   stack: BuildableProject[];
+  /** Real location of the first project found under each package name */
+  byName: Map<string, string>;
   signal?: AbortSignal;
 }
 
@@ -296,8 +304,15 @@ async function walkProject(projectDir: string, walk: WalkState): Promise<void> {
   const manifest = await readManifest(projectDir);
   const projectType = await classifyProject(projectDir);
 
+  const name = manifest.name || path.basename(projectDir);
+  const known = walk.byName.get(name);
+  if (known !== undefined && known !== projectDir) {
+    throw new ConflictingProjectError(name, known, projectDir);
+  }
+  walk.byName.set(name, projectDir);
+
   const project: BuildableProject = {
-    name: manifest.name || path.basename(projectDir),
+    name,
     path: projectDir,
     type: projectType,
     dependencies: [],
@@ -328,10 +343,12 @@ async function walkProject(projectDir: string, walk: WalkState): Promise<void> {
       );
     }
 
-    project.dependencies.push(depName);
-    edgePaths.push(depDir);
     if (!walk.graph.projects.has(depDir)) {
       await walkProject(depDir, walk);
+    }
+    if (!edgePaths.includes(depDir)) {
+      edgePaths.push(depDir);
+      project.dependencies.push(walk.graph.projects.get(depDir)!.name);
     }
   }
 

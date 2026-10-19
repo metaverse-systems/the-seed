@@ -4,8 +4,9 @@ import os from "os";
 import Config from "../src/Config";
 import Package from "../src/Package";
 import { targets } from "../src/Build";
-import { DependencyResultType, ScriptArgsType } from "../src/types";
+import { DependencyResultType, PackagePlan, ScriptArgsType } from "../src/types";
 import PackageCLI from "../src/scripts/PackageCLI";
+import fse from "fs-extra";
 
 // Mock the native addon
 jest.mock("../native/build/Release/dependency_lister.node", () => ({
@@ -54,6 +55,8 @@ function createNodeModuleDep(projectDir: string, depName: string, makefileAmCont
   const depDir = path.join(projectDir, "node_modules", depName);
   fs.mkdirSync(path.join(depDir, "src"), { recursive: true });
   fs.writeFileSync(path.join(depDir, "src", "Makefile.am"), makefileAmContent);
+  // The shared walker follows only directories that hold both package.json and src/Makefile.am.
+  fs.writeFileSync(path.join(depDir, "package.json"), JSON.stringify({ name: depName, version: "1.0.0" }));
   return depDir;
 }
 
@@ -167,6 +170,15 @@ describe("test Package", () => {
         path.join(projectDir, "src", ".libs", "libfoo.so"));
     });
 
+    it("returns the real file of the development link for a native library", () => {
+      const projectDir = createProjectDir(tempDir, "libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      const real = installBuildOutput(projectDir, "libfoo.so.0.0.0", "library");
+      fs.symlinkSync("libfoo.so.0.0.0", path.join(projectDir, "src", ".libs", "libfoo.so"));
+      const result = pkg.resolveBinaryPaths(projectDir);
+      expect(result.map(file => fs.realpathSync(file))).toEqual([fs.realpathSync(real)]);
+    });
+
     it("finds Windows library DLL in src/.libs/", () => {
       const projectDir = createProjectDir(tempDir, "libfoo",
         "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
@@ -193,83 +205,110 @@ describe("test Package", () => {
     });
   });
 
-  // getPackageDeps tests
-  describe("getPackageDeps", () => {
-    it("returns dependency dirs from node_modules that have src/Makefile.am", () => {
-      const projectDir = createProjectDir(tempDir, "myapp",
-        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
-      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
-        dependencies: { "@org/libfoo": "^1.0.0", "@org/libbar": "^2.0.0" }
-      }));
-      createNodeModuleDep(projectDir, "@org/libfoo",
-        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
-      createNodeModuleDep(projectDir, "@org/libbar",
-        "lib_LTLIBRARIES = libbar.la\nlibbar_la_SOURCES = bar.cpp\n");
-      const result = pkg.getPackageDeps(projectDir);
-      expect(result).toHaveLength(2);
-      expect(result).toContain(path.join(projectDir, "node_modules", "@org/libfoo"));
-      expect(result).toContain(path.join(projectDir, "node_modules", "@org/libbar"));
+  // plan tests
+  describe("plan", () => {
+    // Planning analyses the build outputs with the addon, so the mock answers with nothing found.
+    beforeEach(() => {
+      mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
     });
 
-    it("skips dependencies without src/Makefile.am", () => {
-      const projectDir = createProjectDir(tempDir, "myapp",
-        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+    /** The plan as its successful form; a refusal is thrown so its text shows. */
+    async function planOk(projectDirs: string[]): Promise<Extract<PackagePlan, { ok: true }>> {
+      const plan = await pkg.plan(projectDirs);
+      if (!plan.ok) {
+        throw new Error("plan refused: " + plan.message);
+      }
+      return plan;
+    }
+
+    /** A program project with a package.json naming it and the given dependencies, and its build output. */
+    function createProgram(name: string, dependencies: Record<string, string>): string {
+      const projectDir = createProjectDir(tempDir, name,
+        "bin_PROGRAMS = " + name + "\n" + name + "_SOURCES = " + name + ".cpp\n");
       fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
-        dependencies: { "@org/libfoo": "^1.0.0", "some-js-lib": "^3.0.0" }
+        name: "@org/" + name, version: "1.0.0", dependencies
       }));
-      createNodeModuleDep(projectDir, "@org/libfoo",
+      installBuildOutput(projectDir, name, "binary");
+      return projectDir;
+    }
+
+    const real = (dir: string): string => fs.realpathSync(dir);
+
+    it("finds dependency projects from node_modules that have src/Makefile.am", async () => {
+      const projectDir = createProgram("myapp", { "@org/libfoo": "^1.0.0", "@org/libbar": "^2.0.0" });
+      const libfoo = createNodeModuleDep(projectDir, "@org/libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      const libbar = createNodeModuleDep(projectDir, "@org/libbar",
+        "lib_LTLIBRARIES = libbar.la\nlibbar_la_SOURCES = bar.cpp\n");
+
+      const plan = await planOk([projectDir]);
+      expect(plan.projects).toHaveLength(3);
+      expect(plan.projects).toEqual(expect.arrayContaining([real(projectDir), real(libfoo), real(libbar)]));
+      expect(fs.existsSync(path.join(tempDir, "my-release"))).toBe(false);
+    });
+
+    it("finds a dependency project declared by local path", async () => {
+      const libfoo = createProjectDir(tempDir, "libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      fs.writeFileSync(path.join(libfoo, "package.json"), JSON.stringify({ name: "@org/libfoo", version: "1.0.0" }));
+      installBuildOutput(libfoo, "libfoo-0.dll", "dll-content");
+      const projectDir = createProgram("myapp", { "@org/libfoo": "file:../libfoo" });
+
+      const plan = await planOk([projectDir]);
+      expect(plan.projects).toEqual(expect.arrayContaining([real(projectDir), real(libfoo)]));
+      expect(plan.projects).toHaveLength(2);
+      expect(plan.files.map(file => file.name)).toEqual(expect.arrayContaining(["myapp", "libfoo-0.dll"]));
+    });
+
+    it("skips dependencies without src/Makefile.am", async () => {
+      const projectDir = createProgram("myapp", { "@org/libfoo": "^1.0.0", "some-js-lib": "^3.0.0" });
+      const libfoo = createNodeModuleDep(projectDir, "@org/libfoo",
         "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
       // some-js-lib exists in node_modules but has no Makefile.am
       const jsLibDir = path.join(projectDir, "node_modules", "some-js-lib");
       fs.mkdirSync(jsLibDir, { recursive: true });
-      const result = pkg.getPackageDeps(projectDir);
-      expect(result).toHaveLength(1);
-      expect(result).toContain(path.join(projectDir, "node_modules", "@org/libfoo"));
+      fs.writeFileSync(path.join(jsLibDir, "package.json"), JSON.stringify({ name: "some-js-lib", version: "3.0.0" }));
+
+      const plan = await planOk([projectDir]);
+      expect(plan.projects).toHaveLength(2);
+      expect(plan.projects).toEqual(expect.arrayContaining([real(projectDir), real(libfoo)]));
     });
 
-    it("returns empty array when no package.json exists", () => {
+    it("gives the directory alone when it has no package.json", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
-      const result = pkg.getPackageDeps(projectDir);
-      expect(result).toEqual([]);
+      installBuildOutput(projectDir, "myapp", "binary");
+
+      const plan = await planOk([projectDir]);
+      expect(plan.projects).toEqual([real(projectDir)]);
     });
 
-    it("returns empty array when package.json has no dependencies", () => {
-      const projectDir = createProjectDir(tempDir, "myapp",
-        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
-      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
-        name: "myapp", version: "1.0.0"
-      }));
-      const result = pkg.getPackageDeps(projectDir);
-      expect(result).toEqual([]);
+    it("gives the directory alone when package.json has no dependencies", async () => {
+      const projectDir = createProgram("myapp", {});
+
+      const plan = await planOk([projectDir]);
+      expect(plan.projects).toEqual([real(projectDir)]);
     });
 
-    it("recursively collects transitive native dependencies", () => {
-      const projectDir = createProjectDir(tempDir, "myapp",
-        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
-      // myapp depends on @org/libfoo
-      fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
-        dependencies: { "@org/libfoo": "^1.0.0" }
-      }));
+    it("includes transitive dependency projects", async () => {
+      const projectDir = createProgram("myapp", { "@org/libfoo": "^1.0.0" });
       const libfooDir = createNodeModuleDep(projectDir, "@org/libfoo",
         "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
-      // @org/libfoo depends on @org/libbar
       fs.writeFileSync(path.join(libfooDir, "package.json"), JSON.stringify({
-        dependencies: { "@org/libbar": "^1.0.0" }
+        name: "@org/libfoo", version: "1.0.0", dependencies: { "@org/libbar": "^1.0.0" }
       }));
-      createNodeModuleDep(libfooDir, "@org/libbar",
+      const libbarDir = createNodeModuleDep(libfooDir, "@org/libbar",
         "lib_LTLIBRARIES = libbar.la\nlibbar_la_SOURCES = bar.cpp\n");
 
-      const result = pkg.getPackageDeps(projectDir);
-      expect(result).toHaveLength(2);
-      expect(result).toContain(path.join(projectDir, "node_modules", "@org/libfoo"));
-      expect(result).toContain(path.join(libfooDir, "node_modules", "@org/libbar"));
+      const plan = await planOk([projectDir]);
+      expect(plan.projects).toHaveLength(3);
+      expect(plan.projects).toEqual(expect.arrayContaining([real(projectDir), real(libfooDir), real(libbarDir)]));
     });
   });
 
   // T008: Package binary with dependencies creates dir and copies all files
   describe("run - happy path with dependencies", () => {
-    it("creates directory and copies binary plus all resolved dependencies", () => {
+    it("creates directory and copies binary plus all resolved dependencies", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       const binary = installBuildOutput(projectDir, "myapp", "binary-content");
@@ -288,10 +327,10 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(fs.existsSync(outputDir)).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "libfoo.so"))).toBe(true);
@@ -303,14 +342,14 @@ describe("test Package", () => {
 
   // run includes binaries from package.json dependencies in node_modules
   describe("run - includes package.json dependency binaries", () => {
-    it("copies binaries from node_modules dependencies alongside the main binary", () => {
+    it("copies binaries from node_modules dependencies alongside the main binary", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
-      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      installBuildOutput(projectDir, "myapp", "binary-content");
 
       // Add a native dependency via package.json + node_modules
       fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({
-        dependencies: { "@org/libfoo": "^1.0.0" }
+        name: "@org/myapp", version: "1.0.0", dependencies: { "@org/libfoo": "^1.0.0" }
       }));
       const depDir = createNodeModuleDep(projectDir, "@org/libfoo",
         "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
@@ -324,10 +363,10 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "libfoo-0.dll"))).toBe(true);
     });
@@ -335,7 +374,7 @@ describe("test Package", () => {
 
   // T009: Package binary with no non-system dependencies copies only explicit files
   describe("run - no non-system dependencies", () => {
-    it("copies only the resolved binary when no project dependencies found", () => {
+    it("copies only the resolved binary when no project dependencies found", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       const binary = installBuildOutput(projectDir, "myapp", "binary-content");
@@ -350,10 +389,10 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(fs.existsSync(outputDir)).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
       // Only the resolved binary, no system libs
@@ -363,7 +402,7 @@ describe("test Package", () => {
 
   // T010: Two project dirs sharing a dependency copies shared library only once
   describe("run - deduplication", () => {
-    it("copies a shared dependency only once when two binaries share it", () => {
+    it("copies a shared dependency only once when two binaries share it", async () => {
       const projectDir1 = createProjectDir(tempDir, "app1",
         "bin_PROGRAMS = app1\napp1_SOURCES = app1.cpp\n");
       const projectDir2 = createProjectDir(tempDir, "app2",
@@ -381,10 +420,10 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir1, projectDir2]);
+      const result = await pkg.run(outputDir, [projectDir1, projectDir2]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       const outputFiles = fs.readdirSync(outputDir);
       expect(outputFiles).toContain("app1");
       expect(outputFiles).toContain("app2");
@@ -396,7 +435,7 @@ describe("test Package", () => {
 
   // Transitive dependency resolution: resolved libs are themselves analyzed
   describe("run - transitive dependencies", () => {
-    it("resolves dependencies of dependencies recursively", () => {
+    it("resolves dependencies of dependencies recursively", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       const binary = installBuildOutput(projectDir, "myapp", "binary-content");
@@ -422,10 +461,10 @@ describe("test Package", () => {
         });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "libfoo.so"))).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "libbar.so"))).toBe(true);
@@ -437,7 +476,7 @@ describe("test Package", () => {
 
   // T011: Each file printed during copy and summary count displayed
   describe("run - verbose output", () => {
-    it("prints each file during copy and summary count at end", () => {
+    it("prints each file during copy and summary count at end", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       const binary = installBuildOutput(projectDir, "myapp", "binary-content");
@@ -452,12 +491,12 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
 
       const logCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       // Check individual file copy messages
       expect(logCalls.some(msg => msg.includes("Copying myapp..."))).toBe(true);
       expect(logCalls.some(msg => msg.includes("Copying libfoo.so..."))).toBe(true);
@@ -472,24 +511,25 @@ describe("test Package", () => {
 
   // T019: project directory doesn't exist shows error, no output directory created (US3)
   describe("run - project directory not found", () => {
-    it("shows error and does not create directory when project directory does not exist", () => {
+    it("shows error and does not create directory when project directory does not exist", async () => {
       const outputDir = path.join(tempDir, "my-release");
       const nonExistent = path.join(tempDir, "nonexistent");
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const result = pkg.run(outputDir, [nonExistent]);
+      const result = await pkg.run(outputDir, [nonExistent]);
       const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
       expect(fs.existsSync(outputDir)).toBe(false);
       expect(errorCalls.some(msg => msg.includes("Directory not found"))).toBe(true);
+      expect(result.message).toContain("Directory not found");
     });
   });
 
   // T020: output directory already exists shows error (US3)
   describe("run - output directory already exists", () => {
-    it("shows error when output directory already exists", () => {
+    it("shows error when output directory already exists", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       installBuildOutput(projectDir, "myapp", "binary-content");
@@ -497,18 +537,19 @@ describe("test Package", () => {
       fs.mkdirSync(outputDir);
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
       expect(errorCalls.some(msg => msg.includes("Output directory already exists"))).toBe(true);
+      expect(result.message).toContain("Output directory already exists");
     });
   });
 
   // T022: DependencyLister returns errors triggers fatal abort (US3)
   describe("run - dependency resolution errors", () => {
-    it("aborts with error messages when DependencyLister returns errors", () => {
+    it("aborts with error messages when DependencyLister returns errors", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       const binary = installBuildOutput(projectDir, "myapp", "binary-content");
@@ -522,13 +563,14 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
       expect(fs.existsSync(outputDir)).toBe(false);
       expect(errorCalls.some(msg => msg.includes("Failed to analyze binary"))).toBe(true);
+      expect(result.message).toContain("Failed to analyze binary");
     });
   });
 
@@ -544,7 +586,7 @@ describe("test Package", () => {
       return { binary, libGood, libBroken, outputDir, projectDir };
     }
 
-    it("behaves as before when the result has no libraryErrors field", () => {
+    it("behaves as before when the result has no libraryErrors field", async () => {
       const { binary, libGood, outputDir, projectDir } = setupProject();
 
       mockedListDependencies
@@ -553,18 +595,18 @@ describe("test Package", () => {
 
       const warnSpy = jest.spyOn(console, "warn").mockImplementation();
       const logSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const warnCalls = warnSpy.mock.calls.length;
       warnSpy.mockRestore();
       logSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(warnCalls).toBe(0);
       expect(fs.existsSync(path.join(outputDir, "libgood.so"))).toBe(true);
       expect(mockedListDependencies).toHaveBeenCalledTimes(2);
     });
 
-    it("behaves as before when libraryErrors is empty", () => {
+    it("behaves as before when libraryErrors is empty", async () => {
       const { binary, libGood, outputDir, projectDir } = setupProject();
 
       mockedListDependencies
@@ -573,17 +615,17 @@ describe("test Package", () => {
 
       const warnSpy = jest.spyOn(console, "warn").mockImplementation();
       const logSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const warnCalls = warnSpy.mock.calls.length;
       warnSpy.mockRestore();
       logSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(warnCalls).toBe(0);
       expect(fs.existsSync(path.join(outputDir, "libgood.so"))).toBe(true);
     });
 
-    it("warns with path, reason and affected inputs, does not re-queue the library and still packages it", () => {
+    it("warns with path, reason and affected inputs, does not re-queue the library and still packages it", async () => {
       const { binary, libGood, libBroken, outputDir, projectDir } = setupProject();
 
       mockedListDependencies
@@ -599,12 +641,12 @@ describe("test Package", () => {
 
       const warnSpy = jest.spyOn(console, "warn").mockImplementation();
       const logSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const warnings = warnSpy.mock.calls.map(c => c.join(" ")).join("\n");
       warnSpy.mockRestore();
       logSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(warnings).toContain("Warning: Library could not be read: " + libBroken);
       expect(warnings).toContain("Not a recognized library format");
       expect(warnings).toContain(binary);
@@ -622,7 +664,7 @@ describe("test Package", () => {
       expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
     });
 
-    it("warns once per unreadable library", () => {
+    it("warns once per unreadable library", async () => {
       const { binary, libGood, libBroken, outputDir, projectDir } = setupProject();
 
       mockedListDependencies
@@ -637,18 +679,18 @@ describe("test Package", () => {
 
       const warnSpy = jest.spyOn(console, "warn").mockImplementation();
       const logSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const warnings = warnSpy.mock.calls.map(c => c.join(" ")).join("\n");
       warnSpy.mockRestore();
       logSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(warnings.split("Library could not be read: " + libBroken).length - 1).toBe(1);
       expect(warnings).toContain("Truncated file");
       expect(warnings).toContain(libGood);
     });
 
-    it("warns once for a library that later rounds report again", () => {
+    it("warns once for a library that later rounds report again", async () => {
       const { binary, libGood, libBroken, outputDir, projectDir } = setupProject();
       const report = { [libBroken]: { reason: "Truncated file", inputs: [binary] } };
 
@@ -667,16 +709,16 @@ describe("test Package", () => {
 
       const warnSpy = jest.spyOn(console, "warn").mockImplementation();
       const logSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const warnings = warnSpy.mock.calls.map(c => c.join(" ")).join("\n");
       warnSpy.mockRestore();
       logSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(warnings.split("Library could not be read: " + libBroken).length - 1).toBe(1);
     });
 
-    it("still aborts when errors is non-empty, even with libraryErrors present", () => {
+    it("still aborts when errors is non-empty, even with libraryErrors present", async () => {
       const { binary, libBroken, outputDir, projectDir } = setupProject();
 
       mockedListDependencies.mockReturnValue({
@@ -687,56 +729,59 @@ describe("test Package", () => {
 
       const errorSpy = jest.spyOn(console, "error").mockImplementation();
       const warnSpy = jest.spyOn(console, "warn").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const errorCalls = errorSpy.mock.calls.map(c => c[0]);
       errorSpy.mockRestore();
       warnSpy.mockRestore();
 
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
       expect(fs.existsSync(outputDir)).toBe(false);
       expect(errorCalls.some(msg => msg.includes("Failed to analyze binary"))).toBe(true);
+      expect(result.message).toContain("Failed to analyze binary");
     });
   });
 
   // T022a: input path is not a directory shows error (US3)
   describe("run - input is not a directory", () => {
-    it("shows error when input path is a file instead of a directory", () => {
+    it("shows error when input path is a file instead of a directory", async () => {
       const filePath = path.join(tempDir, "notadir");
       fs.writeFileSync(filePath, "content");
       const outputDir = path.join(tempDir, "my-release");
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const result = pkg.run(outputDir, [filePath]);
+      const result = await pkg.run(outputDir, [filePath]);
       const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
       expect(fs.existsSync(outputDir)).toBe(false);
       expect(errorCalls.some(msg => msg.includes("Not a directory"))).toBe(true);
+      expect(result.message).toContain("Not a directory");
     });
   });
 
   // No installed binaries found for a valid project directory
   describe("run - no installed binaries", () => {
-    it("shows error when project has Makefile.am but no installed binaries", () => {
+    it("shows error when project has Makefile.am but no installed binaries", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       const outputDir = path.join(tempDir, "my-release");
 
       const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(false);
+      expect(result.success).toBe(false);
       expect(fs.existsSync(outputDir)).toBe(false);
       expect(errorCalls.some(msg => msg.includes("No installed binaries found"))).toBe(true);
+      expect(result.message).toContain("No installed binaries found");
     });
   });
 
   // .sig file copying
   describe("run - copies .sig files when they exist", () => {
-    it("copies .sig files alongside their binaries", () => {
+    it("copies .sig files alongside their binaries", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       const binary = installBuildOutput(projectDir, "myapp", "binary-content");
@@ -750,19 +795,23 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       const logCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp.sig"))).toBe(true);
       expect(fs.readFileSync(path.join(outputDir, "myapp.sig"), "utf-8")).toBe("signature-data");
       expect(logCalls.some(msg => msg.includes("Copying myapp.sig..."))).toBe(true);
       expect(logCalls.some(msg => msg.includes("signature"))).toBe(true);
+      expect(logCalls).toContain("Packaged 2 files into " + outputDir + "/ (1 signature included)");
+      expect(result.fileCount).toBe(2);
+      expect(result.signatures).toBe(1);
+      expect(fs.readdirSync(outputDir).length).toBe(result.fileCount);
     });
 
-    it("skips .sig files when they do not exist", () => {
+    it("skips .sig files when they do not exist", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       installBuildOutput(projectDir, "myapp", "binary-content");
@@ -774,16 +823,16 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp.sig"))).toBe(false);
       expect(fs.readdirSync(outputDir).length).toBe(1);
     });
 
-    it("copies .sig files for resolved dependencies too", () => {
+    it("copies .sig files for resolved dependencies too", async () => {
       const projectDir = createProjectDir(tempDir, "myapp",
         "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
       const binary = installBuildOutput(projectDir, "myapp", "binary-content");
@@ -800,20 +849,78 @@ describe("test Package", () => {
       });
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      const result = pkg.run(outputDir, [projectDir]);
+      const result = await pkg.run(outputDir, [projectDir]);
+      const logCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
-      expect(result).toBe(true);
+      expect(result.success).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp"))).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "myapp.sig"))).toBe(false);
       expect(fs.existsSync(path.join(outputDir, "libfoo.so"))).toBe(true);
       expect(fs.existsSync(path.join(outputDir, "libfoo.so.sig"))).toBe(true);
+      expect(logCalls).toContain("Packaged 3 files into " + outputDir + "/ (1 signature included)");
+      expect(result.fileCount).toBe(3);
+    });
+  });
+
+  // A library that is not ELF keeps its file name
+  describe("run - native library that is not ELF", () => {
+    it("packages the library under libfoo.so (guard: non-ELF content keeps its name)", async () => {
+      const projectDir = createProjectDir(tempDir, "libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      installBuildOutput(projectDir, "libfoo.so", "plain text");
+      const outputDir = path.join(tempDir, "my-release");
+      mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
+
+      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = await pkg.run(outputDir, [projectDir]);
+      consoleSpy.mockRestore();
+
+      expect(result.success).toBe(true);
+      expect(fs.readdirSync(outputDir)).toEqual(["libfoo.so"]);
+    });
+  });
+
+  describe("run - copy failure", () => {
+    // The choice for the implementation: files are copied with the default export of
+    // fs-extra, through its copyFileSync, so that is the function this case makes fail.
+    it("resolves success false with the failing name and leaves no output directory", async () => {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      const libFoo = installBuildOutput(projectDir, "libfoo.so", "libfoo-content");
+      const outputDir = path.join(tempDir, "my-release");
+      mockedListDependencies.mockReturnValue({ dependencies: { [libFoo]: [binary] }, errors: {} });
+
+      const realCopy = fse.copyFileSync.bind(fse);
+      let copies = 0;
+      const copySpy = jest.spyOn(fse, "copyFileSync").mockImplementation(((from: string, to: string) => {
+        copies++;
+        if (copies === 2) {
+          throw new Error("disk full");
+        }
+        realCopy(from, to);
+      }) as typeof fse.copyFileSync);
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const errorSpy = jest.spyOn(console, "error").mockImplementation();
+      let result;
+      try {
+        result = await pkg.run(outputDir, [projectDir]);
+      } finally {
+        copySpy.mockRestore();
+        logSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+
+      expect(result.success).toBe(false);
+      expect(result.message).toMatch(/^Copying libfoo\.so failed: .*disk full/);
+      expect(fs.existsSync(outputDir)).toBe(false);
     });
   });
 
   // T016: help subcommand prints usage information (US2)
   describe("PackageCLI - help subcommand", () => {
-    it("prints usage information when help subcommand is given", () => {
+    it("prints usage information when help subcommand is given", async () => {
       const scriptConfig: ScriptArgsType = {
         binName: "the-seed",
         args: ["node", "the-seed", "package", "help"],
@@ -821,7 +928,7 @@ describe("test Package", () => {
       };
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      PackageCLI(scriptConfig);
+      await PackageCLI(scriptConfig);
       const logCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
@@ -833,7 +940,7 @@ describe("test Package", () => {
 
   // T017: no arguments prints usage message (US2)
   describe("PackageCLI - no arguments", () => {
-    it("prints usage message when no arguments are given", () => {
+    it("prints usage message when no arguments are given", async () => {
       const scriptConfig: ScriptArgsType = {
         binName: "the-seed",
         args: ["node", "the-seed", "package"],
@@ -841,7 +948,7 @@ describe("test Package", () => {
       };
 
       const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      PackageCLI(scriptConfig);
+      await PackageCLI(scriptConfig);
       const logCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
 
@@ -851,7 +958,7 @@ describe("test Package", () => {
 
   // T021: no project dirs specified shows usage error (US3)
   describe("PackageCLI - no project dirs specified", () => {
-    it("shows usage error when output dir given but no project dirs", () => {
+    it("shows usage error when output dir given but no project dirs", async () => {
       const scriptConfig: ScriptArgsType = {
         binName: "the-seed",
         args: ["node", "the-seed", "package", "my-release"],
@@ -863,7 +970,7 @@ describe("test Package", () => {
         throw new Error("process.exit: " + code);
       });
 
-      expect(() => PackageCLI(scriptConfig)).toThrow("process.exit: 1");
+      await expect(PackageCLI(scriptConfig)).rejects.toThrow("process.exit: 1");
 
       const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
       consoleSpy.mockRestore();
