@@ -5,6 +5,8 @@ import Build from "./Build";
 import Signing, { UnsupportedSigningKey } from "./Signing";
 import type { SignedContent } from "./CmsBuilder";
 import Installer from "./Installer";
+import { readElfNames } from "./ElfNames";
+import type { ElfNames } from "./ElfNames";
 import { InstallerConfig } from "./Installer";
 import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, ScriptArgsType, DependencyResultType, BuildStep, CertSubject, CertOptions, CertInfo, SignResult, DirectorySignResult, VerifyStatus, VerifyResult, DirectoryVerifyResult, SigFileFormat, SigningManifestFormat, SigningManifestEntry, SignatureForm, IntegrityState, IntegrityResult, TrustAnchor, TrustedCertificates, TrustState, UntrustedReason, TrustResult, MachOSliceResult, VerifyOptions, DirectoryFileResult, PlannedFile, UnpackagedLibrary, PackagePlan, PackageResult } from "./types";
 import { DependencyDiscoveryError, CyclicDependencyError, ConflictingProjectError, ProjectManifestError, DiscoveryCancelledError } from "./DependencyWalker";
@@ -18,6 +20,8 @@ export {
   UnsupportedSigningKey,
   SignedContent,
   Installer,
+  readElfNames,
+  ElfNames,
   InstallerConfig,
   AuthorType,
   ConfigType,

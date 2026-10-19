@@ -7,7 +7,7 @@ import Signing from "../src/Signing";
 import { walkDependencies } from "../src/DependencyWalker";
 import type { PackageResult } from "../src/types";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
-import { haveCc, haveMingw, buildLibrary, buildProgram, buildWindows } from "./helpers/NativeTree";
+import { haveCc, haveMingw, buildLibrary, buildProgram, buildWindows, installLibrary, runFrom } from "./helpers/NativeTree";
 import { writeProject, linkModule, readBound } from "./helpers/ScratchProjects";
 
 // Packaging against scratch trees with the real addon. The libraries and programs are
@@ -220,17 +220,23 @@ describe("package layout", () => {
 
   // ── a program and its library ────────────────────────────────────────
 
-  /** The package holds the program and exactly one library file: the content of greet's build. */
-  function expectProgramAndGreetBuild(): void {
-    const all = names(output);
-    expect(all).toHaveLength(2);
-    expect(all).toContain("hello");
-    const library = all.filter((name) => name !== "hello")[0];
-    const built = path.join(greetDir(), "src", ".libs", "libgreet.so.0.0.0");
-    expect(fs.readFileSync(path.join(output, library)).equals(fs.readFileSync(built))).toBe(true);
+  /** After the package is written, the project directories and the prefix are moved away and the program is run from the package. */
+  function expectRunsFromPackage(): void {
+    for (const [directory, moved] of [[greetDir(), "moved-greet"], [helloDir(), "moved-hello"], [prefix, "moved-prefix"]]) {
+      if (fs.existsSync(directory)) {
+        fs.renameSync(directory, path.join(root, moved));
+      }
+    }
+    expect(runFrom(output, "hello")).toEqual({ status: 0, output: GREETING + "\n" });
   }
 
-  it("packages a program with its library declared by local path and not installed, and the package holds both", async () => {
+  /** Installs a cached library in the scratch prefix with the links libtool's install makes. */
+  function installInPrefix(spec: LibrarySpec, links: string[]): string {
+    const real = path.join(builtLibrary(spec), "src", ".libs", `lib${spec.libName}.so.${spec.version}`);
+    return installLibrary(prefixLib, real, links);
+  }
+
+  it("packages a program with its library declared by local path and not installed, and the package runs on its own", async () => {
     if (!ccAvailable()) return;
     writeLibraryProject(greetDir(), "@t/greet", GREET_SPEC);
     writeProgramProject(helloDir(), { "@t/greet": "file:../greet" }, GREET_SPEC);
@@ -238,12 +244,13 @@ describe("package layout", () => {
     const result = await packageRun([helloDir()]);
 
     expect([result.success, result.message]).toEqual([true, null]);
-    expectProgramAndGreetBuild();
+    expect(names(output)).toEqual(["hello", "libgreet.so.0"]);
     expect(result.projects).toEqual(expect.arrayContaining([helloDir(), greetDir()]));
     await expectSameProjects(result, [helloDir()]);
+    expectRunsFromPackage();
   }, BOUND_TIMEOUT);
 
-  it("packages a program with its library declared through a node_modules link, and the package holds both", async () => {
+  it("packages a program with its library declared through a node_modules link, and the package runs on its own", async () => {
     if (!ccAvailable()) return;
     writeLibraryProject(greetDir(), "@t/greet", GREET_SPEC);
     writeProgramProject(helloDir(), { "@t/greet": "^0.0.0" }, GREET_SPEC);
@@ -252,9 +259,10 @@ describe("package layout", () => {
     const result = await packageRun([helloDir()]);
 
     expect([result.success, result.message]).toEqual([true, null]);
-    expectProgramAndGreetBuild();
+    expect(names(output)).toEqual(["hello", "libgreet.so.0"]);
     expect(result.projects).toEqual(expect.arrayContaining([helloDir(), greetDir()]));
     await expectSameProjects(result, [helloDir()]);
+    expectRunsFromPackage();
   }, BOUND_TIMEOUT);
 
   it("packages the library once, and lists the project once, when it is declared both ways to one directory", async () => {
@@ -266,9 +274,10 @@ describe("package layout", () => {
     const result = await packageRun([helloDir()]);
 
     expect([result.success, result.message]).toEqual([true, null]);
-    expectProgramAndGreetBuild();
+    expect(names(output)).toEqual(["hello", "libgreet.so.0"]);
     expect(result.projects.filter((project) => project === greetDir())).toHaveLength(1);
     await expectSameProjects(result, [helloDir()]);
+    expectRunsFromPackage();
   }, BOUND_TIMEOUT);
 
   it("merges given directories by real location: a library declared by the program and also given is listed once", async () => {
@@ -280,9 +289,100 @@ describe("package layout", () => {
 
     expect([result.success, result.message]).toEqual([true, null]);
     expect(result.projects.filter((project) => project === greetDir())).toHaveLength(1);
-    expectProgramAndGreetBuild();
+    expect(names(output)).toEqual(["hello", "libgreet.so.0"]);
     await expectSameProjects(result, [helloDir(), greetDir()]);
   }, BOUND_TIMEOUT);
+
+  it("packages a library project under its soname as a regular file with the library's content", async () => {
+    if (!ccAvailable()) return;
+    const libs = writeLibraryProject(greetDir(), "@t/greet", GREET_SPEC);
+
+    const result = await packageRun([greetDir()]);
+
+    expect(result.success).toBe(true);
+    expect(names(output)).toEqual(["libgreet.so.0"]);
+    const packaged = path.join(output, "libgreet.so.0");
+    expect(fs.lstatSync(packaged).isFile()).toBe(true);
+    expect(fs.readFileSync(packaged).equals(fs.readFileSync(path.join(libs, "libgreet.so.0.0.0")))).toBe(true);
+    expect(result.fileCount).toBe(1);
+    await expectSameProjects(result, [greetDir()]);
+  }, BOUND_TIMEOUT);
+
+  it("packages a library without a soname as libgreet.so (guard: names without a soname are kept)", async () => {
+    if (!ccAvailable()) return;
+    const spec: LibrarySpec = { libName: "greet", version: "0.0.0", text: GREETING };
+    const libs = writeLibraryProject(greetDir(), "@t/greet", spec);
+
+    const result = await packageRun([greetDir()]);
+
+    expect(result.success).toBe(true);
+    expect(names(output)).toEqual(["libgreet.so"]);
+    expect(fs.lstatSync(path.join(output, "libgreet.so")).isFile()).toBe(true);
+    expect(fs.readFileSync(path.join(output, "libgreet.so")).equals(fs.readFileSync(path.join(libs, "libgreet.so.0.0.0")))).toBe(true);
+  }, BOUND_TIMEOUT);
+
+  it("packages a library installed in the prefix under its soname, not its fully versioned name", async () => {
+    if (!ccAvailable()) return;
+    writeProgramProject(helloDir(), undefined, GREET_SPEC);
+    installInPrefix(GREET_SPEC, ["libgreet.so.0", "libgreet.so"]);
+
+    const result = await packageRun([helloDir()]);
+
+    expect([result.success, result.message]).toEqual([true, null]);
+    expect(names(output)).toEqual(["hello", "libgreet.so.0"]);
+    expect(fs.lstatSync(path.join(output, "libgreet.so.0")).isFile()).toBe(true);
+    await expectSameProjects(result, [helloDir()]);
+    expectRunsFromPackage();
+  }, BOUND_TIMEOUT);
+
+  it("packages a program and a library project given together, with the library installed too, once and without a collision", async () => {
+    if (!ccAvailable()) return;
+    writeLibraryProject(greetDir(), "@t/greet", GREET_SPEC);
+    writeProgramProject(helloDir(), undefined, GREET_SPEC);
+    installInPrefix(GREET_SPEC, ["libgreet.so.0", "libgreet.so"]);
+
+    const result = await packageRun([helloDir(), greetDir()]);
+
+    expect([result.success, result.message]).toEqual([true, null]);
+    expect(names(output)).toEqual(["hello", "libgreet.so.0"]);
+    expect(errored()).toEqual([]);
+    await expectSameProjects(result, [helloDir(), greetDir()]);
+    expectRunsFromPackage();
+  }, BOUND_TIMEOUT);
+
+  it("packages only the file the soname resolves to when several version names exist", async () => {
+    if (!ccAvailable()) return;
+    const previousBuild: LibrarySpec = { libName: "greet", soname: "libgreet.so.1", version: "1.0.0", text: "from an earlier build" };
+    const olderInstall: LibrarySpec = { libName: "greet", soname: "libgreet.so.0", version: "0.0.1", text: "older than the current one" };
+    const libs = writeLibraryProject(greetDir(), "@t/greet", GREET_SPEC);
+    // An earlier build's real file, with no link to it
+    fs.copyFileSync(path.join(builtLibrary(previousBuild), "src", ".libs", "libgreet.so.1.0.0"), path.join(libs, "libgreet.so.1.0.0"));
+    writeProgramProject(helloDir(), { "@t/greet": "file:../greet" }, GREET_SPEC);
+    // The prefix: the current library linked from its soname, beside an unlinked older one
+    installInPrefix(GREET_SPEC, ["libgreet.so.0", "libgreet.so"]);
+    installInPrefix(olderInstall, []);
+
+    const result = await packageRun([helloDir()]);
+
+    expect([result.success, result.message]).toEqual([true, null]);
+    expect(names(output)).toEqual(["hello", "libgreet.so.0"]);
+    expect(fs.readFileSync(path.join(output, "libgreet.so.0")).equals(fs.readFileSync(path.join(libs, "libgreet.so.0.0.0")))).toBe(true);
+    await expectSameProjects(result, [helloDir()]);
+    expectRunsFromPackage();
+  }, BOUND_TIMEOUT);
+
+  it("copies a signed library's signature under the loadable name and the copy verifies", async () => {
+    if (!ccAvailable()) return;
+    const libs = writeLibraryProject(greetDir(), "@t/greet", GREET_SPEC);
+    await signLibrary(libs, "libgreet.so.0.0.0", ["libgreet.so.0", "libgreet.so"]);
+
+    const result = await packageRun([greetDir()]);
+
+    expect([result.success, result.message]).toEqual([true, null]);
+    expect(names(output)).toEqual(["libgreet.so.0", "libgreet.so.0.sig"]);
+    expect((await (await signer()).verifyFile(path.join(output, "libgreet.so.0"))).status).toBe("VALID");
+    expect(result.signatures).toBe(1);
+  }, 20000);
 
   // ── the same projects as the recursive build ─────────────────────────
 
@@ -367,8 +467,7 @@ describe("package layout", () => {
     const result = await packageRun([helloDir()]);
 
     expect([result.success, result.message]).toEqual([true, null]);
-    expect(names(output)).toHaveLength(3);
-    expect(names(output)).toContain("hello");
+    expect(names(output)).toEqual(["hello", "libgreet.so.0", "libgreet.so.0.sig"]);
     expect(result.fileCount).toBe(fs.readdirSync(output).length);
     expect(result.fileCount).toBe(3);
     expect(result.signatures).toBe(1);

@@ -7,6 +7,7 @@ import { targets } from "../src/Build";
 import { DependencyResultType, PackagePlan, ScriptArgsType } from "../src/types";
 import PackageCLI from "../src/scripts/PackageCLI";
 import fse from "fs-extra";
+import { elfImage } from "./helpers/ElfImage";
 
 // Mock the native addon
 jest.mock("../native/build/Release/dependency_lister.node", () => ({
@@ -878,6 +879,28 @@ describe("test Package", () => {
 
       expect(result.success).toBe(true);
       expect(fs.readdirSync(outputDir)).toEqual(["libfoo.so"]);
+    });
+  });
+
+  describe("run - malformed library", () => {
+    it("refuses a build-tree library with a corrupt ELF image, naming the file, before the addon is called", async () => {
+      const projectDir = createProjectDir(tempDir, "libfoo",
+        "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
+      const library = installBuildOutput(projectDir, "libfoo.so");
+      fs.writeFileSync(library, elfImage({ bits: 64, endian: "little", type: "dyn", corrupt: "phoff" }));
+      const outputDir = path.join(tempDir, "my-release");
+
+      const errorSpy = jest.spyOn(console, "error").mockImplementation();
+      const result = await pkg.run(outputDir, [projectDir]);
+      const errorCalls = errorSpy.mock.calls.map(c => String(c[0]));
+      errorSpy.mockRestore();
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain(fs.realpathSync(library));
+      expect(result.message).toContain("ELF");
+      expect(errorCalls).toEqual(["Error: " + result.message]);
+      expect(mockedListDependencies).not.toHaveBeenCalled();
+      expect(fs.existsSync(outputDir)).toBe(false);
     });
   });
 

@@ -3,6 +3,7 @@ import path from "path";
 import crypto from "crypto";
 import { execSync } from "child_process";
 import Config from "./Config";
+import { readElfNames } from "./ElfNames";
 import { targets } from "./Build";
 import {
   ConflictingProjectError,
@@ -240,10 +241,33 @@ class Package {
         }
         continue;
       }
+      const isLibrary = this.parseMakefileAm(location)?.type === "library";
+      const libsDir = path.join(location, "src", ".libs");
       for (const output of outputs) {
-        const source = fs.realpathSync(output);
+        let source = fs.realpathSync(output);
+        let packagedName = path.basename(output);
+        let signatureDir = path.dirname(output);
+        if (isLibrary && !output.endsWith(".dll")) {
+          // A native library goes out under the name programs load it by, with the content that name leads to
+          const base = this.parseMakefileAm(location)?.name ?? packagedName;
+          let soname: string | null;
+          try {
+            soname = readElfNames(source)?.soname ?? null;
+          } catch (error) {
+            return refuse(error instanceof Error ? error.message : String(error));
+          }
+          packagedName = base + ".so";
+          if (soname !== null) {
+            packagedName = soname;
+            const named = path.join(libsDir, soname);
+            if (fs.existsSync(named)) {
+              source = fs.realpathSync(named);
+            }
+          }
+          signatureDir = libsDir;
+        }
         const before = files.length;
-        register(this.plannedFile(path.basename(output), source, { kind: "project", project: name, location }));
+        register(this.plannedFile(packagedName, source, { kind: "project", project: name, location }, signatureDir));
         if (files.length > before) {
           binaryPaths.push(source);
         }
@@ -254,6 +278,7 @@ class Package {
     const searchPaths = this.getSearchPaths();
     const analyzed = new Set<string>();
     const warnedLibraries = new Set<string>();
+    const askedNames = new Map<string, string>();
     const planSources = new Set<string>(files.map((file) => file.source));
     let toAnalyze = binaryPaths;
 
@@ -284,6 +309,25 @@ class Package {
 
       for (const p of toAnalyze) {
         analyzed.add(p);
+        // The names the analysed files ask for, and the files they lead to
+        let names: { needed: string[] } | null = null;
+        try {
+          names = readElfNames(p);
+        } catch {
+          // the dependency lister has already judged this file
+        }
+        for (const asked of names?.needed ?? []) {
+          for (const searchPath of searchPaths) {
+            const candidate = path.join(searchPath, asked);
+            if (fs.existsSync(candidate)) {
+              const real = fs.realpathSync(candidate);
+              if (!askedNames.has(real)) {
+                askedNames.set(real, asked);
+              }
+              break;
+            }
+          }
+        }
       }
 
       const nextBatch: string[] = [];
@@ -297,7 +341,16 @@ class Package {
         }
         planSources.add(source);
         const directory = searchPaths.find((searchPath) => path.dirname(source) === searchPath) ?? path.dirname(source);
-        register(this.plannedFile(path.basename(depPath), source, { kind: "search-path", directory }));
+        let packagedName = path.basename(depPath);
+        if (!(depPath in libraryErrors)) {
+          try {
+            const soname = readElfNames(source)?.soname ?? null;
+            packagedName = soname ?? askedNames.get(source) ?? packagedName;
+          } catch (error) {
+            return refuse(error instanceof Error ? error.message : String(error));
+          }
+        }
+        register(this.plannedFile(packagedName, source, { kind: "search-path", directory }, directory));
         if (!analyzed.has(source) && !(depPath in libraryErrors)) {
           nextBatch.push(source);
         }
@@ -309,14 +362,17 @@ class Package {
     return { ok: true, projects: [...projectNames.keys()], files, notPackaged: [] };
   };
 
-  /** A file to be written under a name, with its content hash and the signature beside its source. */
-  private plannedFile = (name: string, source: string, origin: PlannedFile["origin"]): PlannedFile => {
-    const signature = source + ".sig";
+  /**
+   * A file to be written under a name, with its content hash and its signature: the one named for
+   * the packaged name in the directory the name was resolved in, else the one beside the real file.
+   */
+  private plannedFile = (name: string, source: string, origin: PlannedFile["origin"], directory: string): PlannedFile => {
+    const candidates = [path.join(directory, name + ".sig"), source + ".sig"];
     return {
       name,
       source,
       sha256: crypto.createHash("sha256").update(fs.readFileSync(source)).digest("hex"),
-      signature: fs.existsSync(signature) ? signature : null,
+      signature: candidates.find((candidate) => fs.existsSync(candidate)) ?? null,
       origin,
     };
   };
