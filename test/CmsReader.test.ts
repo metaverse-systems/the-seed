@@ -6,6 +6,7 @@ import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
 import { CmsDamaged, CmsUnsupported, findSignerCertificate, OID, readSignedData, verifySignerSignature } from "../src/CmsReader";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { sliceSignatureBlobs } from "./helpers/MachOChecker";
 
 const created: string[] = [];
 let savedHome: string | undefined;
@@ -130,6 +131,7 @@ function withSignatureAlgorithm(container: Buffer, oidContent: Buffer): Buffer {
 
 interface Sample {
   name: string;
+  kind: "program" | "installer" | "mac";
   der: Buffer;
   /** What the signature covers when there are no signed attributes (the tool's own forms). */
   signedMessage: Buffer;
@@ -166,81 +168,132 @@ async function ownSamples(): Promise<Sample[]> {
   const codeDirectory = slot(superBlob, 0) as Buffer;
 
   return [
-    { name: "Windows program", der: addon.peExtractSignature(exe) as Buffer, signedMessage: (addon.peComputeDigest(exe) as { digest: Buffer }).digest },
-    { name: "installer", der: addon.msiExtractSignature(msi) as Buffer, signedMessage: (addon.msiComputeDigest(msi) as { digest: Buffer }).digest },
+    { name: "Windows program", kind: "program", der: addon.peExtractSignature(exe) as Buffer, signedMessage: (addon.peComputeDigest(exe) as { digest: Buffer }).digest },
+    { name: "installer", kind: "installer", der: addon.msiExtractSignature(msi) as Buffer, signedMessage: (addon.msiComputeDigest(msi) as { digest: Buffer }).digest },
     // A CMS blob is an 8-byte header (magic, length) followed by the DER
-    { name: "Mac program", der: cms.subarray(8), signedMessage: codeDirectory },
+    { name: "Mac program", kind: "mac", der: cms.subarray(8), signedMessage: codeDirectory },
   ];
 }
 
-describe("the tool's own signature containers", () => {
-  let samples: Sample[];
+/** The committed samples signed before the standard form: the Windows program, the installer and each slice of the universal Mac program. */
+function earlierFormSamples(): Sample[] {
+  const dir = binaries("earlier-form");
+  const exe = path.join(dir, "tiny.exe");
+  const msi = path.join(dir, "tiny.msi");
+  const universal = path.join(dir, "tiny-macho-universal");
+  const samples: Sample[] = [
+    { name: "Windows program", kind: "program", der: addon.peExtractSignature(exe) as Buffer, signedMessage: (addon.peComputeDigest(exe) as { digest: Buffer }).digest },
+    { name: "installer", kind: "installer", der: addon.msiExtractSignature(msi) as Buffer, signedMessage: (addon.msiComputeDigest(msi) as { digest: Buffer }).digest },
+  ];
+  for (const blobs of sliceSignatureBlobs(fs.readFileSync(universal))) {
+    samples.push({ name: "Mac program slice " + blobs.cputype.toString(16), kind: "mac", der: blobs.cms as Buffer, signedMessage: blobs.codeDirectory });
+  }
+  return samples;
+}
 
-  beforeAll(async () => {
-    samples = await ownSamples();
+function describeOwnContainers(title: string, load: () => Promise<Sample[]> | Sample[], expectedCertificate: () => Buffer): void {
+  describe(title, () => {
+    let samples: Sample[];
+
+    beforeAll(async () => {
+      samples = await load();
+    });
+
+    it("finds the signing certificate in the certificate list, for each form", () => {
+      for (const sample of samples) {
+        const info = readSignedData(sample.der);
+        expect(info.certificates.length).toBe(1);
+        expect(info.certificates[0].equals(expectedCertificate())).toBe(true);
+        expect(info.signers).toHaveLength(1);
+      }
+    });
+
+    it("matches the signer record to the certificate with findSignerCertificate, for each form", () => {
+      for (const sample of samples) {
+        const info = readSignedData(sample.der);
+        const found = findSignerCertificate(info, info.signers[0]);
+        expect(found).not.toBeNull();
+        expect((found as Buffer).equals(expectedCertificate())).toBe(true);
+      }
+    });
+
+    it("verifies the signature over what each form signs", () => {
+      for (const sample of samples) {
+        const info = readSignedData(sample.der);
+        const certificate = findSignerCertificate(info, info.signers[0]) as Buffer;
+        expect(verifySignerSignature(info.signers[0], certificate, sample.signedMessage)).toBe("verified");
+      }
+    });
+
+    it("does not verify the signature over something else", () => {
+      for (const sample of samples) {
+        const info = readSignedData(sample.der);
+        const certificate = findSignerCertificate(info, info.signers[0]) as Buffer;
+        const other = Buffer.from(sample.signedMessage);
+        other[0] ^= 0xff;
+        expect(verifySignerSignature(info.signers[0], certificate, other)).toBe("failed");
+      }
+    });
+
+    it("reads the content types: Authenticode content for programs and installers, none for the Mac program", () => {
+      expect(samples.some((sample) => sample.kind === "mac")).toBe(true);
+      for (const sample of samples) {
+        const info = readSignedData(sample.der);
+        if (sample.kind === "mac") {
+          expect(info.contentType).toBe(OID.data);
+          expect(info.content).toBeUndefined();
+        } else {
+          expect(info.contentType).toBe(OID.spcIndirectData);
+        }
+      }
+    });
+
+    it("gives the Authenticode content value bytes: they start with the content's first element and hold the stored digest", () => {
+      for (const sample of samples.filter((candidate) => candidate.kind !== "mac")) {
+        const info = readSignedData(sample.der);
+        expect(info.content).toBeDefined();
+        expect((info.content as Buffer).includes(sample.signedMessage)).toBe(true);
+        // contentDer is the element as encoded, so it is the value behind a tag and a length
+        expect((info.contentDer as Buffer).length).toBeGreaterThan((info.content as Buffer).length);
+        expect((info.contentDer as Buffer).subarray(-(info.content as Buffer).length).equals(info.content as Buffer)).toBe(true);
+      }
+    });
+
+    it("ignores bytes after the outer element, such as the zero padding of a PE certificate table", () => {
+      for (const sample of samples) {
+        const plain = readSignedData(sample.der);
+        const padded = readSignedData(Buffer.concat([sample.der, Buffer.alloc(7)]));
+        expect(padded.certificates.map((c: Buffer) => c.toString("hex"))).toEqual(plain.certificates.map((c: Buffer) => c.toString("hex")));
+        expect(padded.signers).toHaveLength(1);
+      }
+    });
   });
+}
 
-  it("finds the signing certificate inside the certificate list wrapper, for each form", () => {
+describeOwnContainers("the tool's own signature containers", ownSamples, () => scopeCertDer);
+
+describeOwnContainers("the tool's own signature containers, earlier form", earlierFormSamples, () => {
+  // The certificate that signed the committed samples, not the scope certificate of this file
+  const pem = fs.readFileSync(binaries("earlier-form", "cert.pem"), "utf-8");
+  return Buffer.from(new crypto.X509Certificate(pem).raw);
+});
+
+describe("the tool's own signature containers, earlier form: the serial number", () => {
+  it("finds the signer certificate although its serial was written without the leading zero", () => {
+    const certificate = Buffer.from(new crypto.X509Certificate(fs.readFileSync(binaries("earlier-form", "cert.pem"), "utf-8")).raw);
+    const samples = earlierFormSamples();
+    expect(samples.length).toBeGreaterThanOrEqual(4);
     for (const sample of samples) {
       const info = readSignedData(sample.der);
-      expect(info.certificates.length).toBe(1);
-      expect(info.certificates[0].equals(scopeCertDer)).toBe(true);
-      expect(info.signers).toHaveLength(1);
-    }
-  });
-
-  it("matches the signer record to the certificate with findSignerCertificate, for each form", () => {
-    for (const sample of samples) {
-      const info = readSignedData(sample.der);
+      const sid = info.signers[0].sid;
+      expect("serial" in sid).toBe(true);
+      const serial = (sid as { serial: Buffer }).serial;
+      // The certificate's serial has its top bit set and so starts with a zero byte; the earlier signer record does not
+      expect(serial.length).toBe(16);
+      expect(serial[0] & 0x80).toBe(0x80);
       const found = findSignerCertificate(info, info.signers[0]);
       expect(found).not.toBeNull();
-      expect((found as Buffer).equals(scopeCertDer)).toBe(true);
-    }
-  });
-
-  it("verifies the signature over what each form signs", () => {
-    for (const sample of samples) {
-      const info = readSignedData(sample.der);
-      const certificate = findSignerCertificate(info, info.signers[0]) as Buffer;
-      expect(verifySignerSignature(info.signers[0], certificate, sample.signedMessage)).toBe("verified");
-    }
-  });
-
-  it("does not verify the signature over something else", () => {
-    for (const sample of samples) {
-      const info = readSignedData(sample.der);
-      const certificate = findSignerCertificate(info, info.signers[0]) as Buffer;
-      const other = Buffer.from(sample.signedMessage);
-      other[0] ^= 0xff;
-      expect(verifySignerSignature(info.signers[0], certificate, other)).toBe("failed");
-    }
-  });
-
-  it("reads the content types: Authenticode content for programs and installers, none for the Mac program", () => {
-    expect(readSignedData(samples[0].der).contentType).toBe(OID.spcIndirectData);
-    expect(readSignedData(samples[1].der).contentType).toBe(OID.spcIndirectData);
-    const mac = readSignedData(samples[2].der);
-    expect(mac.contentType).toBe(OID.data);
-    expect(mac.content).toBeUndefined();
-  });
-
-  it("gives the Authenticode content value bytes: they start with the content's first element and hold the stored digest", () => {
-    for (const sample of samples.slice(0, 2)) {
-      const info = readSignedData(sample.der);
-      expect(info.content).toBeDefined();
-      expect((info.content as Buffer).includes(sample.signedMessage)).toBe(true);
-      // contentDer is the element as encoded, so it is the value behind a tag and a length
-      expect((info.contentDer as Buffer).length).toBeGreaterThan((info.content as Buffer).length);
-      expect((info.contentDer as Buffer).subarray(-(info.content as Buffer).length).equals(info.content as Buffer)).toBe(true);
-    }
-  });
-
-  it("ignores bytes after the outer element, such as the zero padding of a PE certificate table", () => {
-    for (const sample of samples) {
-      const plain = readSignedData(sample.der);
-      const padded = readSignedData(Buffer.concat([sample.der, Buffer.alloc(7)]));
-      expect(padded.certificates.map((c: Buffer) => c.toString("hex"))).toEqual(plain.certificates.map((c: Buffer) => c.toString("hex")));
-      expect(padded.signers).toHaveLength(1);
+      expect((found as Buffer).equals(certificate)).toBe(true);
     }
   });
 });
