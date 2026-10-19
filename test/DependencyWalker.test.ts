@@ -15,6 +15,10 @@ import {
   DiscoveryCancelledError,
 } from "../src/DependencyWalker";
 import type { DependencyGraph, BuildableProject } from "../src/types";
+import { writeProject, linkModule, readBound, onRead } from "./helpers/ScratchProjects";
+
+/** Jest time limit of every case that walks a tree holding a cycle or a link. */
+const BOUND_TIMEOUT = 5000;
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "depwalker-test-"));
@@ -53,7 +57,8 @@ describe("DependencyWalker", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = createTempDir();
+    // The temporary directory may be a link; discovery reports real locations.
+    tempDir = fs.realpathSync(createTempDir());
   });
 
   afterEach(() => {
@@ -321,11 +326,198 @@ describe("DependencyWalker", () => {
       expect(sharedProject!.name).toBe("shared-component");
     });
 
-    it("throws when root project has no package.json", async () => {
+    it("throws ProjectManifestError naming the file when root project has no package.json", async () => {
       const emptyDir = path.join(tempDir, "empty");
       fs.mkdirSync(emptyDir, { recursive: true });
-      await expect(walkDependencies(emptyDir)).rejects.toThrow();
+      const manifest = path.join(emptyDir, "package.json");
+      let caught: unknown;
+      try {
+        await walkDependencies(emptyDir);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ProjectManifestError);
+      expect((caught as ProjectManifestError).manifestPath).toBe(manifest);
+      expect((caught as Error).message.startsWith(`Cannot read ${manifest}: `)).toBe(true);
     });
+  });
+
+  // ── walkDependencies: cycles, bad manifests, cancellation ──
+
+  describe("walkDependencies cycles and cancellation", () => {
+    // Every case here runs under a hard bound of 200 file reads, so a walk that
+    // never ends fails by the bound instead of hanging.
+    const LIB = "lib_LTLIBRARIES = libx.la";
+
+    interface Outcome {
+      graph?: DependencyGraph;
+      error?: unknown;
+      reads: number;
+    }
+
+    /** Runs the walk under the read bound; extra hooks are installed inside it and restored first. */
+    async function discover(
+      dir: string,
+      options?: { signal?: AbortSignal },
+      hooks: Array<{ restore(): void }> = []
+    ): Promise<Outcome> {
+      const bound = readBound(200);
+      try {
+        const graph = await walkDependencies(dir, options);
+        return { graph, reads: bound.count() };
+      } catch (error) {
+        return { error, reads: bound.count() };
+      } finally {
+        for (const hook of [...hooks].reverse()) {
+          hook.restore();
+        }
+        bound.restore();
+      }
+    }
+
+    /** The error of the walk as the given class; any other outcome is thrown so its text shows. */
+    function expectError<T extends Error>(outcome: Outcome, type: new (...args: never[]) => T): T {
+      if (outcome.error === undefined) {
+        throw new Error("the walk finished without an error");
+      }
+      if (!(outcome.error instanceof type)) {
+        throw outcome.error;
+      }
+      return outcome.error;
+    }
+
+    it("reports two projects declaring each other by local path", async () => {
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB, dependencies: { "@t/a": "file:../a" } });
+
+      const outcome = await discover(a);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.cycleParticipants).toEqual(["@t/a", "@t/b"]);
+      expect(error.chain).toEqual(["@t/a", "@t/b", "@t/a"]);
+      expect(error.locations).toEqual([a, b]);
+      expect(error.message.split("\n")[0]).toBe("Dependency cycle: @t/a → @t/b → @t/a");
+      expect(outcome.reads).toBeLessThan(10);
+    }, BOUND_TIMEOUT);
+
+    it("reports a project that declares itself with file:.", async () => {
+      const s = path.join(tempDir, "s");
+      writeProject(s, { name: "@t/s", makefileAm: LIB, dependencies: { "@t/s": "file:." } });
+
+      const outcome = await discover(s);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.cycleParticipants).toEqual(["@t/s"]);
+      expect(error.chain).toEqual(["@t/s", "@t/s"]);
+      expect(error.locations).toEqual([s]);
+      expect(error.message.split("\n")[0]).toBe("Dependency cycle: @t/s → @t/s");
+      expect(outcome.reads).toBeLessThan(10);
+    }, BOUND_TIMEOUT);
+
+    it("reports a project whose node_modules entry links to itself", async () => {
+      const s = path.join(tempDir, "s");
+      writeProject(s, { name: "@t/s", makefileAm: LIB, dependencies: { "@t/s": "^1.0.0" } });
+      linkModule(s, "@t/s", "../..");
+
+      const outcome = await discover(s);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.cycleParticipants).toEqual(["@t/s"]);
+      expect(error.locations).toEqual([s]);
+      expect(outcome.reads).toBeLessThan(10);
+    }, BOUND_TIMEOUT);
+
+    it("reports a three-project cycle that passes through a node_modules link", async () => {
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      const c = path.join(tempDir, "c");
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB, dependencies: { "@t/c": "^1.0.0" } });
+      linkModule(b, "@t/c", "../../../c");
+      writeProject(c, { name: "@t/c", makefileAm: LIB, dependencies: { "@t/a": "file:../a" } });
+
+      const outcome = await discover(a);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.chain).toEqual(["@t/a", "@t/b", "@t/c", "@t/a"]);
+      expect(error.locations).toEqual([a, b, c]);
+      expect(error.message.split("\n")[0]).toBe("Dependency cycle: @t/a → @t/b → @t/c → @t/a");
+      expect(outcome.reads).toBeLessThan(20);
+    }, BOUND_TIMEOUT);
+
+    it("starts the chain of a cycle below the root at the first project of the cycle", async () => {
+      const root = path.join(tempDir, "root");
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      writeProject(root, { name: "@t/root", makefileAm: "bin_PROGRAMS = root", dependencies: { "@t/a": "file:../a" } });
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB, dependencies: { "@t/a": "file:../a" } });
+
+      const outcome = await discover(root);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.chain).toEqual(["@t/a", "@t/b", "@t/a"]);
+      expect(error.locations).toEqual([a, b]);
+      expect(error.message).not.toContain("@t/root");
+    }, BOUND_TIMEOUT);
+
+    it("finds a diamond without error, the shared component once, with an edge from each system", async () => {
+      const root = path.join(tempDir, "root");
+      const s1 = path.join(tempDir, "s1");
+      const s2 = path.join(tempDir, "s2");
+      const comp = path.join(tempDir, "comp");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: "bin_PROGRAMS = root",
+        dependencies: { "@t/s1": "file:../s1", "@t/s2": "file:../s2" },
+      });
+      writeProject(s1, { name: "@t/s1", makefileAm: LIB, dependencies: { "@t/comp": "file:../comp" } });
+      writeProject(s2, { name: "@t/s2", makefileAm: LIB, dependencies: { "@t/comp": "file:../comp" } });
+      writeProject(comp, { name: "@t/comp", makefileAm: LIB });
+
+      const outcome = await discover(root);
+      expect(outcome.error).toBeUndefined();
+      const graph = outcome.graph as DependencyGraph;
+      expect([...graph.projects.keys()].sort()).toEqual([comp, root, s1, s2].sort());
+      expect(graph.edges.get(s1)).toEqual([comp]);
+      expect(graph.edges.get(s2)).toEqual([comp]);
+      expect(graph.edges.get(root)).toEqual([s1, s2]);
+      expect(graph.edges.get(comp)).toEqual([]);
+    }, BOUND_TIMEOUT);
+
+    it("names the package.json of a dependency that holds invalid JSON", async () => {
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB });
+      fs.writeFileSync(path.join(b, "package.json"), "{ not json");
+
+      const outcome = await discover(a);
+      const error = expectError(outcome, ProjectManifestError);
+      expect(error.manifestPath).toBe(path.join(b, "package.json"));
+      expect(error.message.startsWith(`Cannot read ${path.join(b, "package.json")}: `)).toBe(true);
+      expect(error).not.toBeInstanceOf(SyntaxError);
+    }, BOUND_TIMEOUT);
+
+    it("ends with DiscoveryCancelledError when the signal aborts while the last project is read", async () => {
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB });
+      const controller = new AbortController();
+
+      const hook = onRead("b/package.json", () => controller.abort());
+      const outcome = await discover(a, { signal: controller.signal }, [hook]);
+      expectError(outcome, DiscoveryCancelledError);
+    }, BOUND_TIMEOUT);
+
+    it("rejects without reading anything when the signal is aborted before the call", async () => {
+      const a = path.join(tempDir, "a");
+      writeProject(a, { name: "@t/a", makefileAm: LIB });
+      const controller = new AbortController();
+      controller.abort();
+
+      const outcome = await discover(a, { signal: controller.signal });
+      expectError(outcome, DiscoveryCancelledError);
+      expect(outcome.reads).toBe(0);
+    }, BOUND_TIMEOUT);
   });
 
   // ── resolveBuildOrder ──────────────────────────────────────

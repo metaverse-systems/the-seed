@@ -211,88 +211,131 @@ export async function classifyProject(
 /**
  * Build the complete dependency graph for a project.
  *
- * Algorithm:
- * 1. Read package.json at `projectDir`
- * 2. For each key in `dependencies`:
- *    a. Resolve path via resolveDependencyPath()
- *    b. Check isBuildable(); if false, skip (do NOT recurse)
- *    c. If already visited (by absolute path), skip (dedup)
- *    d. Classify and add to graph
- *    e. Recurse into that dependency
- * 3. Add `projectDir` itself as a node
+ * The walk is depth-first. A project is identified by its real location
+ * (symbolic links resolved), so a project reached through different paths is
+ * one project. A project is marked visited on entering, before its
+ * dependencies are walked, and kept on a stack until it is left:
  *
- * @param projectDir - Absolute path to the root project
- * @returns The complete dependency graph
- * @throws If projectDir has no readable package.json
+ * 1. Read package.json at the project's real location
+ * 2. For each key in `dependencies`, in package.json order:
+ *    a. Resolve the path via resolveDependencyPath() and then its real
+ *       location; a path that cannot be resolved is not a project
+ *    b. Skip it unless isBuildable()
+ *    c. On the stack → CyclicDependencyError naming the chain
+ *    d. Already visited → record the edge only
+ *    e. Otherwise read its package.json and walk it
+ *
+ * Projects appear in the graph in the order they were entered (root first).
+ * A stop request is looked for before each package.json is read and once
+ * more when the walk ends.
+ *
+ * @param projectDir - Path of the root project
+ * @param options - `signal` ends discovery with DiscoveryCancelledError when aborted
+ * @returns The complete dependency graph, keyed by real location
+ * @throws CyclicDependencyError if projects depend on each other, including a project on itself
+ * @throws ProjectManifestError if a package.json (the root's included) cannot be read or parsed
+ * @throws DiscoveryCancelledError if the signal is aborted during discovery
  */
 export async function walkDependencies(
-  projectDir: string
+  projectDir: string,
+  options?: { signal?: AbortSignal }
 ): Promise<DependencyGraph> {
   const graph: DependencyGraph = {
     projects: new Map(),
     edges: new Map(),
   };
+  const walk: WalkState = {
+    graph,
+    stack: [],
+    signal: options?.signal,
+  };
 
-  await walkRecursive(projectDir, graph);
+  const rootDir = await realLocation(path.resolve(projectDir));
+  await walkProject(rootDir, walk);
+  throwIfCancelled(walk.signal);
   return graph;
 }
 
-async function walkRecursive(
-  projectDir: string,
-  graph: DependencyGraph
-): Promise<void> {
-  const resolvedDir = path.resolve(projectDir);
+interface WalkState {
+  graph: DependencyGraph;
+  /** Projects being walked, root first */
+  stack: BuildableProject[];
+  signal?: AbortSignal;
+}
 
-  // Already visited — skip (deduplicates diamond dependencies)
-  if (graph.projects.has(resolvedDir)) {
-    return;
+function throwIfCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new DiscoveryCancelledError();
   }
+}
 
-  // Read package.json
-  const pkgPath = path.join(resolvedDir, "package.json");
-  const pkgContent = await fs.promises.readFile(pkgPath, "utf-8");
-  const pkg = JSON.parse(pkgContent);
+async function realLocation(dir: string): Promise<string> {
+  return fs.promises.realpath(dir).catch(() => dir);
+}
 
-  // Classify this project
-  const projectType = await classifyProject(resolvedDir);
-
-  const buildableDeps: string[] = [];
-  const edgePaths: string[] = [];
-  const deps = pkg.dependencies || {};
-
-  for (const [depName, depVersion] of Object.entries(deps)) {
-    const depPath = resolveDependencyPath(
-      resolvedDir,
-      depName,
-      depVersion as string
+async function readManifest(
+  projectDir: string
+): Promise<{ name?: string; dependencies?: Record<string, string> }> {
+  const manifestPath = path.join(projectDir, "package.json");
+  try {
+    const parsed = JSON.parse(await fs.promises.readFile(manifestPath, "utf-8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("not a JSON object");
+    }
+    return parsed;
+  } catch (error) {
+    throw new ProjectManifestError(
+      manifestPath,
+      error instanceof Error ? error.message : String(error)
     );
-    const resolvedDepPath = path.resolve(depPath);
+  }
+}
 
-    // Check if the dependency is buildable
-    const buildable = await isBuildable(resolvedDepPath);
-    if (!buildable) {
+async function walkProject(projectDir: string, walk: WalkState): Promise<void> {
+  throwIfCancelled(walk.signal);
+  const manifest = await readManifest(projectDir);
+  const projectType = await classifyProject(projectDir);
+
+  const project: BuildableProject = {
+    name: manifest.name || path.basename(projectDir),
+    path: projectDir,
+    type: projectType,
+    dependencies: [],
+  };
+  const edgePaths: string[] = [];
+  walk.graph.projects.set(projectDir, project);
+  walk.graph.edges.set(projectDir, edgePaths);
+  walk.stack.push(project);
+
+  for (const [depName, depVersion] of Object.entries(manifest.dependencies || {})) {
+    const declared = resolveDependencyPath(projectDir, depName, depVersion as string);
+    let depDir: string;
+    try {
+      depDir = await fs.promises.realpath(declared);
+    } catch {
+      continue;
+    }
+    if (!(await isBuildable(depDir))) {
       continue;
     }
 
-    buildableDeps.push(depName);
-    edgePaths.push(resolvedDepPath);
+    const onStack = walk.stack.findIndex((entry) => entry.path === depDir);
+    if (onStack >= 0) {
+      const members = walk.stack.slice(onStack);
+      throw new CyclicDependencyError(
+        members.map((entry) => entry.name),
+        members.map((entry) => entry.path)
+      );
+    }
 
-    // Recurse into the dependency (if not already visited)
-    if (!graph.projects.has(resolvedDepPath)) {
-      await walkRecursive(resolvedDepPath, graph);
+    project.dependencies.push(depName);
+    edgePaths.push(depDir);
+    if (!walk.graph.projects.has(depDir)) {
+      await walkProject(depDir, walk);
     }
   }
 
-  // Add this project to the graph
-  const project: BuildableProject = {
-    name: pkg.name || path.basename(resolvedDir),
-    path: resolvedDir,
-    type: projectType,
-    dependencies: buildableDeps,
-  };
-
-  graph.projects.set(resolvedDir, project);
-  graph.edges.set(resolvedDir, edgePaths);
+  walk.stack.pop();
 }
 
 /**
@@ -311,7 +354,12 @@ export function resolveBuildOrder(
   graph: DependencyGraph,
   rootProjectPath: string
 ): BuildableProject[] {
-  const resolvedRoot = path.resolve(rootProjectPath);
+  let resolvedRoot = path.resolve(rootProjectPath);
+  try {
+    resolvedRoot = fs.realpathSync(resolvedRoot);
+  } catch {
+    // keep the resolved path
+  }
 
   // Compute in-degrees
   const inDegree = new Map<string, number>();

@@ -64,18 +64,12 @@ jest.mock("../src/InstallPhase", () => ({
   runInstallPhase: jest.fn(),
 }));
 
-// Mock DependencyWalker
+// Mock DependencyWalker: only the two functions are replaced; the error classes are the
+// real ones, as RecursiveBuild tests against them.
 jest.mock("../src/DependencyWalker", () => ({
+  ...jest.requireActual("../src/DependencyWalker"),
   walkDependencies: jest.fn(),
   resolveBuildOrder: jest.fn(),
-  CyclicDependencyError: class CyclicDependencyError extends Error {
-    cycleParticipants: string[];
-    constructor(participants: string[]) {
-      super(`Cyclic dependency detected among: ${participants.join(", ")}`);
-      this.name = "CyclicDependencyError";
-      this.cycleParticipants = participants;
-    }
-  },
 }));
 
 import {
