@@ -1,5 +1,6 @@
 import Config from "./Config";
-import Build, { autoSignIfCertExists, stripBinaries } from "./Build";
+import Build from "./Build";
+import { runInstallPhase } from "./InstallPhase";
 import { runStep } from "./StepRunner";
 import {
   runSchedule,
@@ -104,8 +105,9 @@ function printReport(result: RecursiveBuildResult, total: number): void {
  * 2. Call resolveBuildOrder(graph, options.projectDir) to get ordered list
  * 3. Build the projects with runSchedule: up to `parallel` at once (default
  *    1, never more than the processors), each only after its dependencies
- *    and every lower tier have finished, with install, strip and sign of one
- *    project never overlapping another's
+ *    and every lower tier have finished, with the install phase of one
+ *    project (staged install, strip, sign, placement) never overlapping
+ *    another's
  * 4. After the first failure or a cancellation nothing new starts; projects
  *    already building run to the end (or are stopped, when cancelled)
  * 5. Return RecursiveBuildResult
@@ -184,7 +186,7 @@ export async function buildRecursive(
     const steps = build.getSteps(target, fullReconfigure, context.jobs);
     const installIndex = steps.findIndex((step) => step.label === "install");
     const buildSteps = installIndex === -1 ? steps : steps.slice(0, installIndex);
-    const installSteps = installIndex === -1 ? [] : steps.slice(installIndex);
+    const installStep = installIndex === -1 ? undefined : steps[installIndex];
 
     // Runs one step; returns null when it succeeded or its failure was ignorable.
     const runProjectStep = async (step: BuildStep, stepSignal: AbortSignal): Promise<ProjectOutcome<StepFailure> | null> => {
@@ -223,37 +225,45 @@ export async function buildRecursive(
         if (outcome) return outcome;
       }
 
-      // Install, strip and sign hold the install lock: every project installs
-      // into the same prefix. Strip and sign run after install because libtool
-      // relinks binaries during "make install", which would invalidate any
-      // earlier embedded signatures.
+      // The install phase holds the install lock: every project installs into
+      // the same prefix.
       if (context.signal.aborted) {
         return { status: "interrupted" };
       }
-      return context.withInstallLock(async (installSignal): Promise<ProjectOutcome<StepFailure>> => {
-        for (const step of installSteps) {
-          const stepOutcome = await runProjectStep(step, installSignal);
-          if (stepOutcome) return stepOutcome;
-        }
-
-        const log = (line: string) => progress(project, line);
-
-        if (release) {
-          try {
-            await stripBinaries(project.path, target, installSignal, log);
-          } catch (e: unknown) {
-            if (installSignal.aborted) return { status: "interrupted" };
-            return { status: "failed", failure: { step: "strip", output: (e as Error).message ?? String(e) } };
-          }
-        }
-
-        try {
-          await autoSignIfCertExists(config.configDir, project.path, log);
-        } catch (e: unknown) {
-          return { status: "failed", failure: { step: "sign", output: (e as Error).message ?? String(e) } };
-        }
-
+      if (installStep === undefined) {
         return { status: "completed" };
+      }
+      return context.withInstallLock(async (installSignal): Promise<ProjectOutcome<StepFailure>> => {
+        if (installSignal.aborted) {
+          return { status: "interrupted" };
+        }
+        progress(project, `${installStep.label}...`);
+
+        const result = await runInstallPhase({
+          projectDir: project.path,
+          installStep,
+          configPrefix: config.config.prefix,
+          configDir: config.configDir,
+          target: target as "native" | "windows",
+          release: release === true,
+          signal: installSignal,
+          output: { mode: "capture" },
+          env,
+          log: (line: string) => progress(project, line),
+          onInstalled: () => {
+            progress(project, `${installStep.label}... done`);
+            callbacks?.onStepComplete?.(project, installStep);
+          },
+        });
+
+        switch (result.status) {
+          case "completed":
+            return { status: "completed" };
+          case "interrupted":
+            return { status: "interrupted" };
+          case "failed":
+            return { status: "failed", failure: { step: result.step, output: result.output ?? result.message } };
+        }
       });
     };
 

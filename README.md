@@ -302,7 +302,7 @@ Options go after the target, in any order:
 | `--recursive` | Build every buildable dependency first, then the current project (see [Recursive Builds](#recursive-builds)) |
 | `--parallel N` | With `--recursive`, build up to `N` independent projects at once. Default 1. Also accepted as `--parallel=N`. `N` must be a positive whole number; values above the processor count are reduced to it |
 | `--jobs N` | Run at most `N` compile jobs at once (`make -j<N>`). Default: the processor count. Also accepted as `--jobs=N`. `N` must be a positive whole number; a value above the processor count is allowed. With `--parallel`, it is the budget the projects building at once share |
-| `--release` | Strip debug symbols from the built binaries after install, before signing |
+| `--release` | Strip the installed programs and shared libraries, and the build-tree copies that `package` reads, before they are signed |
 
 `--parallel=N` and `--jobs=N` are the same as `--parallel N` and `--jobs N`.
 
@@ -332,11 +332,34 @@ Build steps for `native` and `windows`:
 2. `make distclean` (errors ignored)
 3. `./configure --prefix=<prefix>/<target> [--host=x86_64-w64-mingw32]`
 4. `make -j<jobs>` (the processor count unless `--jobs` is given)
-5. `make install`
+5. `make install DESTDIR=<prefix>/.the-seed-staging/<random>`
+
+Then the install phase:
+
+1. Identify the programs and shared libraries the install step wrote: ELF executables and shared objects for `native`, PE programs and DLLs for `windows`. Archives, import libraries, `.la` files, wrappers, scripts, headers, `.pc` files and data are not processed.
+2. Find the matching copies in `src/.libs/` (else `src/`), which `package` reads.
+3. Strip both (with `--release`).
+4. Sign both when the scope has a valid certificate.
+5. Place the staged files into `<prefix>/<target>`.
+6. Remove the staging directory.
 
 **Changed:** earlier versions ran an unbounded `make -j`, which starts one compiler per source file and can exhaust memory. Every build now has a job limit.
 
-Running `the-seed build` without a subcommand performs only steps 4 and 5.
+Running `the-seed build` without a subcommand performs only step 4 and the install phase (step 5 and what follows it).
+
+**Changed:** earlier versions stripped and signed only the copies in the build tree; the files in the prefix were neither stripped nor signed, static archives and the Windows libtool wrapper were signed, and signing errors were ignored.
+
+#### What is installed, stripped and signed
+
+- Detached signatures for Linux outputs are written beside the installed file and beside each of its link names (`libx.so.sig` is a link to `libx.so.0.0.0.sig`); signatures for Windows outputs are embedded in the file.
+- Signing happens on every kind of build. Stripping needs `--release` and a target (an incremental build with no target does not strip).
+- When the project has programs or libraries to sign but cannot sign them (no `package.json`, no scope in the package name, no certificate for the scope, or an expired one), the build prints one line saying why (for example `Not signed: no signing certificate for scope '@t'. Create one with "the-seed signing create-cert".`), installs the files unsigned and removes any signature left beside them by an earlier build. An unreadable certificate or a file that cannot be stripped or signed fails the build.
+- All or nothing: the prefix is changed only after every file has been stripped and signed. A failure at `install`, `strip`, `sign` or `place` leaves the prefix as it was.
+- Cancelling: the first Ctrl+C lets the install phase finish and place its files (`Build cancelled after installing.`); a second Ctrl+C, `SIGTERM` or `SIGHUP` discards an install phase that has not reached placement (`Build cancelled.`). Placement, once started, completes.
+- `<prefix>/.the-seed-staging` holds the staging directories while a build runs. It may be deleted when no build is running.
+- A build refuses to install (failing at `install`) when `make install` writes outside the prefix, writes nothing under `DESTDIR` (the message names the project), or the project was configured for another prefix; run a full build (`the-seed build <target>`) in that case. A project whose install rules ignore `DESTDIR` has already written into the prefix by then; the build reports the failure but cannot undo that.
+- Files that an install rule deletes (for example retired headers) are not removed from the prefix, because the install writes into a staging directory.
+- Outputs installed outside `src/` and `src/.libs/` are processed in the prefix, but their build-tree copies are not.
 
 #### Recursive Builds
 
@@ -364,7 +387,7 @@ By default (`--parallel 1`) projects build one at a time in that order, with the
 - A project starts only after each of its dependencies has finished installing.
 - Every component finishes before any system starts, and every system before any program. A project that depends on a higher tier than its own waits with that tier.
 - Among projects that are ready, the one earliest in the build order starts first.
-- Installs never overlap. Each project's `make install`, strip (with `--release`) and signing run as one phase that no other project's install phase can interleave with.
+- Install phases never overlap. Each project's install phase (staged `make install`, strip with `--release`, signing, placement) runs as one unit that no other project's install phase can interleave with; a dependent starts only after its dependency's processed files are in the prefix.
 - When more than one project builds at once, each tier's projects share the processors as `make -j<jobs>`, so the compile jobs running at once never add up to more than `--jobs`, or the processor count when `--jobs` is not given. `MAKEFLAGS` and `MFLAGS` are removed from the build environment so an inherited `-j` cannot override the share.
 
 Every progress line names its project, for example `[@org/physics-system] compile... done`. Build output is captured, not streamed; when the build ends, a report lists the projects that completed, failed, were interrupted or never started, and each failure's full output appears as one block between `===== <project> failed at <step> =====` and `===== end of <project> output =====`.
@@ -373,8 +396,8 @@ The build stops starting new projects at the first failure; projects already bui
 
 Cancelling:
 
-- The first Ctrl+C stops every running autogen, distclean, configure and compile step, and starts nothing new. An install phase already in progress finishes, so the prefix is never left half-written.
-- A second Ctrl+C also stops the install phase in progress; that project is reported as interrupted.
+- The first Ctrl+C stops every running autogen, distclean, configure and compile step, and starts nothing new. An install phase already in progress finishes and places its files, so the prefix is never left half-written.
+- A second Ctrl+C also stops an install phase that has not reached placement and discards it; that project is reported as interrupted. Placement, once started, completes.
 - `SIGTERM` and `SIGHUP` act like two presses.
 - A cancelled build exits with 130 after Ctrl+C, 143 after `SIGTERM` and 129 after `SIGHUP`.
 
@@ -418,7 +441,7 @@ Behavior:
 
 1. Validates that all directories exist
 2. Parses `src/Makefile.am` for binary type (`bin_PROGRAMS` or `lib_LTLIBRARIES`)
-3. Resolves compiled binaries from `src/.libs/`
+3. Resolves compiled binaries from `src/.libs/` (the build strips them with `--release` and signs them when the scope has a certificate)
 4. Resolves transitive project dependencies from `package.json` and `node_modules`
 5. Analyzes shared library dependencies using the native DependencyLister addon
 6. Copies all resolved files to the output directory
@@ -493,6 +516,8 @@ the-seed signing sign --detached myapp.exe
 # Detached (default for non-binary files)
 the-seed signing sign config.json
 ```
+
+**Builds sign automatically.** `the-seed build` signs the programs and libraries it installs with the project's scope certificate; see [What is installed, stripped and signed](#what-is-installed-stripped-and-signed). `verify` works on installed files and on any of a library's link names.
 
 **Verification** auto-detects the signature type. Embedded signatures are checked first; if none is found, the verifier falls back to looking for a detached `.sig` file.
 
@@ -861,7 +886,7 @@ Every proposal to `main` and every push to `main` runs the `check` job in `.gith
 ### Notes
 
 - The style check disables `@typescript-eslint/no-var-requires` on five lines (`src/Package.ts`, `src/Signing.ts`, `test/Package.test.ts`, `test/Signing.embedded.test.ts`, `test/TestInfrastructure.test.ts`), each with a reason: the native addon has no type declarations, or a module must be loaded again after Jest resets its registry. No rule is disabled in the ESLint configuration.
-- The build tests (`Build`, `BuildCLI`, `RecursiveBuild`) are mock-based: they check which commands would run. `test/BuildEndToEnd.test.ts` goes further and builds and installs a real autotools project into a temporary prefix; without autotools, `git`, `file` or the mingw-w64 compiler its cases report `SKIPPED CHECK:` and carry on, unless `THE_SEED_REQUIRE_TOOLS=1` is set.
+- The build tests (`Build`, `BuildCLI`, `RecursiveBuild`) are mock-based: they check which commands would run. `test/BuildEndToEnd.test.ts` goes further and builds and installs a real autotools project into a temporary prefix, including the native and Windows strip-and-sign cases (the Windows ones need mingw-w64 and report `SKIPPED CHECK:` when it is absent); without autotools, `git`, `file` or the mingw-w64 compiler its cases report `SKIPPED CHECK:` and carry on, unless `THE_SEED_REQUIRE_TOOLS=1` is set.
 
 ## License
 

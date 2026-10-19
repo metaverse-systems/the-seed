@@ -1080,3 +1080,127 @@ describe("addon calls for installers: strip, check and argument validation (real
     expect(() => loadAddon().msiEmbedSignature(file, "not a buffer", true)).toThrow();
   });
 });
+
+// ── PE signature removal ─────────────────────────────────────
+
+describe("PE signature removal (real addon)", () => {
+  let signing: Signing;
+  let scope: string;
+  let tempDir: string;
+
+  // Offset of the 4-byte CheckSum field of the 1,024-byte tiny.exe fixture:
+  // e_lfanew (0x40) + PE signature and COFF header (24) + 64 into the optional header
+  const checkSumOffset = 0x40 + 24 + 64;
+
+  beforeAll(async () => {
+    const setup = await setupSigning();
+    signing = setup.signing;
+    scope = setup.scope;
+  });
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("the addon exports peStripSignature", () => {
+    expect(typeof loadAddon().peStripSignature).toBe("function");
+  });
+
+  it("peStripSignature returns a signed PE to its unsigned bytes", async () => {
+    const original = fs.readFileSync(fixturePath("tiny.exe"));
+    const peFile = copyFixture("tiny.exe", tempDir);
+    await signing.signFileAuthenticode(peFile, scope);
+    const addon = loadAddon();
+    expect(addon.peHasEmbeddedSignature(peFile)).toBe(true);
+    expect(fs.statSync(peFile).size).toBeGreaterThan(original.length);
+
+    expect(addon.peStripSignature(peFile)).toBeUndefined();
+
+    const after = fs.readFileSync(peFile);
+    expect(after.length).toBe(original.length);
+    // Only the CheckSum field may differ: the library recalculates it
+    const mask = (buf: Buffer) => {
+      const copy = Buffer.from(buf);
+      copy.fill(0, checkSumOffset, checkSumOffset + 4);
+      return copy;
+    };
+    expect(mask(after).equals(mask(original))).toBe(true);
+    expect(addon.peHasEmbeddedSignature(peFile)).toBe(false);
+  });
+
+  it("peStripSignature rejects a missing or non-string path", () => {
+    const addon = loadAddon();
+    expect(thrownName(() => addon.peStripSignature())).toBe("TypeError");
+    expect(thrownName(() => addon.peStripSignature(42))).toBe("TypeError");
+  });
+
+  it("removeEmbeddedSignature removes the signature of a signed PE and returns true", async () => {
+    const peFile = copyFixture("tiny.exe", tempDir);
+    await signing.signFileAuthenticode(peFile, scope);
+    expect(signing.removeEmbeddedSignature(peFile)).toBe(true);
+    expect(loadAddon().peHasEmbeddedSignature(peFile)).toBe(false);
+  });
+
+  it("removeEmbeddedSignature on a read-only signed PE fails and leaves it unchanged", async () => {
+    // The library refuses read-only files, which is why the strip step makes files writable first.
+    // Root can write to any file, so the refusal cannot be observed there.
+    const ranAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
+    if (!optionalExternalCheck("non-root user", !ranAsRoot, "running as root, where read-only files are writable")) {
+      return;
+    }
+    const peFile = copyFixture("tiny.exe", tempDir);
+    await signing.signFileAuthenticode(peFile, scope);
+    const before = fs.readFileSync(peFile);
+    fs.chmodSync(peFile, 0o444);
+
+    expect(() => signing.removeEmbeddedSignature(peFile)).toThrow();
+
+    expect(fs.readFileSync(peFile).equals(before)).toBe(true);
+    expect((fs.statSync(peFile).mode & 0o777)).toBe(0o444);
+  });
+
+  it("removeEmbeddedSignature returns false for an unsigned PE and for an ELF file", () => {
+    const peFile = copyFixture("tiny.exe", tempDir);
+    const peBefore = fs.readFileSync(peFile);
+    expect(signing.removeEmbeddedSignature(peFile)).toBe(false);
+    expect(fs.readFileSync(peFile).equals(peBefore)).toBe(true);
+
+    // A minimal ELF header: the format check must come first because
+    // peHasEmbeddedSignature throws for anything that is not a PE
+    const elfFile = path.join(tempDir, "tiny.elf");
+    const header = Buffer.alloc(64);
+    header.write("\x7fELF", 0, "latin1");
+    header[4] = 2;
+    header[5] = 1;
+    header.writeUInt16LE(2, 16);
+    fs.writeFileSync(elfFile, header);
+    expect(signing.removeEmbeddedSignature(elfFile)).toBe(false);
+    expect(fs.readFileSync(elfFile).equals(header)).toBe(true);
+  });
+
+  it("removeEmbeddedSignature then strip then sign gives one embedded signature", async () => {
+    const strip = spawnSync("x86_64-w64-mingw32-strip", ["--version"]);
+    if (!optionalExternalCheck("x86_64-w64-mingw32-strip", strip.status === 0, "x86_64-w64-mingw32-strip not found")) {
+      return;
+    }
+    const peFile = copyFixture("tiny.exe", tempDir);
+    await signing.signFileAuthenticode(peFile, scope);
+
+    expect(signing.removeEmbeddedSignature(peFile)).toBe(true);
+    const run = spawnSync("x86_64-w64-mingw32-strip", ["--strip-unneeded", peFile], { encoding: "utf8" });
+    expect(run.status).toBe(0);
+    expect(signing.detectBinaryFormat(peFile).format).toBe("pe");
+
+    const result = await signing.signFile(peFile, { scope });
+    expect(result.signatureType).toBe("embedded");
+    expect(result.signaturePath).toBeNull();
+    expect(fs.existsSync(peFile + ".sig")).toBe(false);
+    const verify = await signing.verifyFile(peFile);
+    expect(verify.status).toBe("VALID");
+    expect(loadAddon().peHasEmbeddedSignature(peFile)).toBe(true);
+  });
+});

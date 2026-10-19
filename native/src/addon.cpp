@@ -261,6 +261,25 @@ Napi::Value PeHasEmbeddedSignature(const Napi::CallbackInfo& info) {
   }
 }
 
+Napi::Value PeStripSignature(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Expected (filePath: string)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string filePath = info[0].As<Napi::String>().Utf8Value();
+
+  try {
+    the_seed::PeSigner::StripSignature(filePath);
+    return env.Undefined();
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
 // ── Mach-O Signing Operations ───────────────────────────────
 
 // Reads the prepared-signature object that machoPrepareSignature returned.
@@ -694,6 +713,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("peEmbedSignature", Napi::Function::New(env, PeEmbedSignature));
   exports.Set("peExtractSignature", Napi::Function::New(env, PeExtractSignature));
   exports.Set("peHasEmbeddedSignature", Napi::Function::New(env, PeHasEmbeddedSignature));
+  exports.Set("peStripSignature", Napi::Function::New(env, PeStripSignature));
 
   // Mach-O signing operations
   exports.Set("machoPrepareSignature", Napi::Function::New(env, MachOPrepareSignature));

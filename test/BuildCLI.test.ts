@@ -17,8 +17,6 @@ jest.mock("../src/Build", () => {
   return {
     __esModule: true,
     default: MockBuild,
-    autoSignIfCertExists: jest.fn().mockResolvedValue(undefined),
-    stripBinaries: jest.fn().mockResolvedValue({ strippedFiles: [], stripTool: "strip" }),
   };
 });
 
@@ -163,8 +161,8 @@ describe("BuildCLI dashed --recursive", () => {
     );
   });
 
-  it("still runs compile, install and auto-sign for 'build' with no target", async () => {
-    // An incremental build is a buildProject call without a target (compile and install only; signing is its last step).
+  it("runs an incremental build through buildProject with no target", async () => {
+    // An incremental build is a buildProject call without a target (compile and install; the install phase strips and signs).
     await BuildCLI(makeArgs([]));
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
     const options = lastBuildOptions();
@@ -200,11 +198,44 @@ describe("BuildCLI plain and incremental result handling", () => {
   it.each([
     [["native"], "compile", "make -j exited with status 2"],
     [[], "install", "make install exited with status 1"],
+    [["native", "--release"], "strip", "strip failed on /p/x86_64-linux-gnu/bin/tiny: Command failed: strip --strip-unneeded /stage/bin/tiny"],
+    [["native"], "sign", "signing failed on /p/x86_64-linux-gnu/lib/libtiny.so.0.0.0: key file unreadable"],
   ])("prints the failed step on stderr, sets exit status 1 and repeats no output for %p", async (args, step, message) => {
     mockBuildProject.mockResolvedValue({ status: "failed", step, message });
     await BuildCLI(makeArgs(args));
     expect(process.exitCode).toBe(1);
     expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([`Build failed at ${step}: ${message}.`]);
+  });
+
+  it("prints a signing failure as `Build failed at sign: signing failed on <path>: <message>.` with exit status 1", async () => {
+    mockBuildProject.mockResolvedValue({
+      status: "failed",
+      step: "sign",
+      message: "signing failed on /p/x86_64-linux-gnu/bin/tiny: EACCES: permission denied, open '/c/signing/@t/key.pem'",
+    });
+    await BuildCLI(makeArgs(["native"]));
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
+      "Build failed at sign: signing failed on /p/x86_64-linux-gnu/bin/tiny: EACCES: permission denied, open '/c/signing/@t/key.pem'.",
+    ]);
+  });
+
+  it("prints an unreadable certificate as `Build failed at sign: <cert path>: <reason>.` with exit status 1", async () => {
+    mockBuildProject.mockResolvedValue({ status: "failed", step: "sign", message: "/c/signing/@t/cert.pem: error:0480006C:PEM routines::no start line" });
+    await BuildCLI(makeArgs(["native"]));
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
+      "Build failed at sign: /c/signing/@t/cert.pem: error:0480006C:PEM routines::no start line.",
+    ]);
+  });
+
+  it("prints a missing strip tool with its hint as `Build failed at strip: Strip tool '<tool>' not found on this system.` with exit status 1", async () => {
+    const message = "Strip tool 'strip' not found on this system.\nInstall binutils (for example the binutils package) and try again.";
+    mockBuildProject.mockResolvedValue({ status: "failed", step: "strip", message });
+    await BuildCLI(makeArgs(["native", "--release"]));
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([`Build failed at strip: ${message}.`]);
+    expect(String(errorSpy.mock.calls[0][0])).toContain("Build failed at strip: Strip tool 'strip' not found on this system.");
   });
 
   it("sets exit status 130 and prints Build cancelled. on stderr when the first signal was SIGINT", async () => {
@@ -215,6 +246,40 @@ describe("BuildCLI plain and incremental result handling", () => {
     await BuildCLI(makeArgs(["native"]));
     expect(process.exitCode).toBe(130);
     expect(errorSpy).toHaveBeenCalledWith("Build cancelled.");
+  });
+
+  it("prints Build cancelled after installing. with exit status 130 when the install finished after the first SIGINT", async () => {
+    mockBuildProject.mockImplementation(async () => {
+      process.emit("SIGINT", "SIGINT");
+      return { status: "cancelled", installed: true };
+    });
+    await BuildCLI(makeArgs(["native"]));
+    expect(process.exitCode).toBe(130);
+    expect(errorSpy).toHaveBeenCalledWith("Build cancelled after installing.");
+    expect(errorSpy).not.toHaveBeenCalledWith("Build cancelled.");
+  });
+
+  it("prints Build cancelled after installing. with exit status 143 for SIGTERM", async () => {
+    mockBuildProject.mockImplementation(async () => {
+      process.emit("SIGTERM", "SIGTERM");
+      return { status: "cancelled", installed: true };
+    });
+    await BuildCLI(makeArgs([]));
+    expect(process.exitCode).toBe(143);
+    expect(errorSpy).toHaveBeenCalledWith("Build cancelled after installing.");
+  });
+
+  it("prints a failed placement as `Build failed at place: cannot place <path>: <reason>.` with exit status 1", async () => {
+    mockBuildProject.mockResolvedValue({
+      status: "failed",
+      step: "place",
+      message: "cannot place /p/x86_64-linux-gnu/lib: EACCES: permission denied",
+    });
+    await BuildCLI(makeArgs(["native"]));
+    expect(process.exitCode).toBe(1);
+    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
+      "Build failed at place: cannot place /p/x86_64-linux-gnu/lib: EACCES: permission denied.",
+    ]);
   });
 });
 
@@ -643,6 +708,21 @@ describe("BuildCLI cancellation signals", () => {
 });
 
 describe("BuildCLI help", () => {
+  // Choice: the Ctrl+C help line is the one printed by the build command's usage text (`the-seed build help`).
+  it("explains that a second Ctrl+C discards an install that has not reached the prefix", async () => {
+    jest.clearAllMocks();
+    const logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+    let text: string;
+    try {
+      await BuildCLI(makeArgs(["help"]));
+      text = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
+    } finally {
+      logSpy.mockRestore();
+    }
+
+    expect(text).toContain("Press it again to stop at once; an install that has not reached the prefix is discarded.");
+  });
+
   it("describes the dashed options, defaults, examples and the deprecation", async () => {
     jest.clearAllMocks();
     const logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
@@ -707,6 +787,20 @@ describe("BuildCLI help › lists --jobs with its default", () => {
     expect(text).toContain(
       "With --recursive and --parallel above 1, the compile jobs of the projects building at once never add up to more than --jobs, or the processor count when --jobs is not given."
     );
+  });
+
+  it("describes the install phase", async () => {
+    // Whitespace is collapsed so the sentences may be wrapped over several lines.
+    const text = (await helpText()).replace(/\s+/g, " ");
+    expect(text).toContain(
+      "Strip the installed programs and libraries (and the build-tree copies \"package\" reads) before they are signed"
+    );
+    expect(text).toContain("staging directory");
+    expect(text).toContain("Archives, import libraries, wrappers and other files are not stripped or signed.");
+    expect(text).toContain("A failure leaves the prefix as it was.");
+    expect(text).toContain("Install phases never overlap.");
+    expect(text).not.toContain("Installs (with strip and sign) never overlap.");
+    expect(text).toContain("the-seed build [--jobs N] Rebuild the current project (make, install, sign)");
   });
 
   it("gives an example with --jobs", async () => {

@@ -16,8 +16,8 @@ interface LockWaiter {
 
 /**
  * A first-in, first-out async mutex. All projects of one build install into
- * the same prefix, so their install phases (install, strip, sign) must never
- * overlap.
+ * the same prefix, so their install phases (staged install, strip, sign,
+ * placement) must never overlap.
  */
 export class InstallLock {
   private held = false;

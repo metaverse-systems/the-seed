@@ -1,14 +1,19 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import crypto from "crypto";
 import { spawnSync } from "child_process";
+import * as x509 from "@peculiar/x509";
 import Config from "../src/Config";
 import Build from "../src/Build";
+import Package from "../src/Package";
+import Signing from "../src/Signing";
 import { buildRecursive } from "../src/RecursiveBuild";
 import { findOnPath } from "../src/ProcessRunner";
 import { installLib } from "../src/Dependencies";
 import { WINDOWS_TOOLCHAIN_PKGCONFIG_DIRS } from "../src/LibrarySearch";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { copyFixture } from "./helpers/Fixture";
 import { findSystemOnlyPackage, writePackageDescription } from "./helpers/SystemPackage";
 
 // Real autotools, make and a C compiler build the fixture in test/fixtures/autotools-tiny with 50 MB of
@@ -16,13 +21,15 @@ import { findSystemOnlyPackage, writePackageDescription } from "./helpers/System
 // whose config.json names that prefix; nothing outside the temporary directory is touched. Compile jobs
 // are limited to 4 wherever the build accepts a job limit.
 
-const fixtureDir = path.join(__dirname, "fixtures", "autotools-tiny");
 const NOISE = 52428800;
 const TAIL_BYTES = 65536;
 const JOBS = 4;
 const CASE_TIMEOUT = 120000;
 
-const ENV_KEYS = ["HOME", "PKG_CONFIG", "SEED_TEST_REQUIRES", "SEED_TEST_NOISE", "SEED_TEST_FAIL", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS"];
+const ENV_KEYS = ["HOME", "PKG_CONFIG", "SEED_TEST_REQUIRES", "SEED_TEST_NOISE", "SEED_TEST_FAIL", "SEED_TEST_INSTALL_FAIL", "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS"];
+
+/** Switches the fixture reads; a value inherited from the developer's shell must not reach a build. */
+const FIXTURE_SWITCHES = ["SEED_TEST_NOISE", "SEED_TEST_FAIL", "SEED_TEST_INSTALL_FAIL", "SEED_TEST_REQUIRES"];
 
 const toolsAvailable = ["autoreconf", "make", "cc"].every((tool) => findOnPath(tool) !== null);
 
@@ -47,6 +54,112 @@ class TailSink {
   }
 }
 
+/** A sink that calls `onLine` once, when the output first contains `marker`. */
+class TriggerSink extends TailSink {
+  private seen = "";
+  private fired = false;
+
+  constructor(private readonly marker: string, private readonly onLine: () => void) {
+    super();
+    // stdout and stderr are instance properties of the base class, so they are wrapped, not overridden
+    const keepOut = this.stdout;
+    const keepErr = this.stderr;
+    this.stdout = (chunk: Buffer): void => {
+      keepOut(chunk);
+      this.watch(chunk);
+    };
+    this.stderr = (chunk: Buffer): void => {
+      keepErr(chunk);
+      this.watch(chunk);
+    };
+  }
+
+  private watch(chunk: Buffer): void {
+    if (this.fired) {
+      return;
+    }
+    // The marker may be anywhere in the chunk or split between two chunks: search the
+    // end of the earlier output together with the whole chunk, then keep only the end
+    const text = this.seen + chunk.toString();
+    if (text.includes(this.marker)) {
+      this.fired = true;
+      this.onLine();
+      return;
+    }
+    this.seen = text.slice(-4096);
+  }
+}
+
+/** Every path under `dir` with its type, size, mode, SHA-256 of the contents and link text. */
+function prefixSnapshot(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (current: string): void => {
+    const st = fs.lstatSync(current);
+    const rel = path.relative(dir, current);
+    if (st.isSymbolicLink()) {
+      out.push(`${rel} link ${fs.readlinkSync(current)}`);
+    } else if (st.isDirectory()) {
+      out.push(`${rel} dir ${(st.mode & 0o7777).toString(8)}`);
+      for (const name of fs.readdirSync(current).sort()) {
+        walk(path.join(current, name));
+      }
+    } else {
+      const digest = crypto.createHash("sha256").update(fs.readFileSync(current)).digest("hex");
+      out.push(`${rel} file ${st.size} ${(st.mode & 0o7777).toString(8)} ${digest}`);
+    }
+  };
+  if (fs.existsSync(dir)) {
+    walk(dir);
+  }
+  return out;
+}
+
+describe("TriggerSink", () => {
+  const marker = "libtool: install:";
+
+  it("fires on a marker near the start of a chunk larger than 4096 characters", () => {
+    let fired = 0;
+    const sink = new TriggerSink(marker, () => fired++);
+
+    sink.stdout(Buffer.from(marker + " cp a b\n" + "x".repeat(10000)));
+
+    expect(fired).toBe(1);
+  });
+
+  it("fires on a marker split between two chunks, and only once", () => {
+    let fired = 0;
+    const sink = new TriggerSink(marker, () => fired++);
+
+    sink.stderr(Buffer.from("noise libtool: ins"));
+    expect(fired).toBe(0);
+    sink.stderr(Buffer.from("tall: cp a b\n"));
+    sink.stdout(Buffer.from(marker));
+
+    expect(fired).toBe(1);
+  });
+});
+
+describe("prefixSnapshot", () => {
+  it("tells a file from a same-length, same-mode replacement and records link targets", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-test-"));
+    try {
+      const file = path.join(dir, "tiny");
+      fs.writeFileSync(file, "aaaa", { mode: 0o755 });
+      fs.symlinkSync("tiny", path.join(dir, "link"));
+      const before = prefixSnapshot(dir);
+
+      fs.writeFileSync(file, "bbbb");
+      const after = prefixSnapshot(dir);
+
+      expect(after).not.toEqual(before);
+      expect(prefixSnapshot(dir)).toEqual(after);
+      expect(after.join("\n")).toContain("link tiny");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("BuildEndToEnd", () => {
   let root: string;
   let projectDir: string;
@@ -60,17 +173,25 @@ describe("BuildEndToEnd", () => {
 
   /** The environment passed to builds: PKG_CONFIG_PATH is removed because the hosted job exports its own. */
   function caseEnv(vars: Record<string, string>): NodeJS.ProcessEnv {
-    const env: NodeJS.ProcessEnv = { ...process.env, ...vars };
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    for (const key of FIXTURE_SWITCHES) {
+      delete env[key];
+    }
+    Object.assign(env, vars);
     delete env.PKG_CONFIG_PATH;
     delete env.PKG_CONFIG_LIBDIR;
     delete env.MAKEFLAGS;
     delete env.MFLAGS;
+    // A libtool cross build of a library runs winepath, and wine writes menu files under the
+    // configuration home; both homes are the case's scratch home, never the process's.
+    env.HOME = home;
+    env.XDG_CONFIG_HOME = path.join(home, ".config");
     return env;
   }
 
   /** Recursive builds read the process environment, so the case's values are set there for its duration. */
   function useProcessEnv(vars: Record<string, string>): void {
-    for (const key of ["PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS"]) {
+    for (const key of ["PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "MAKEFLAGS", "MFLAGS", ...FIXTURE_SWITCHES]) {
       delete process.env[key];
     }
     Object.assign(process.env, vars);
@@ -106,7 +227,7 @@ describe("BuildEndToEnd", () => {
     nativePrefix = path.join(prefix, "x86_64-linux-gnu");
     home = path.join(root, "home");
     configDir = path.join(home, "the-seed");
-    fs.cpSync(fixtureDir, projectDir, { recursive: true });
+    copyFixture(projectDir);
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix, scopes: {} }));
     // Properties are set one by one, never the whole object: os.homedir() reads the real environment.
@@ -345,7 +466,7 @@ describe("BuildEndToEnd", () => {
     projectDir = path.join(root, SPECIAL_PROJECT);
     prefix = path.join(root, SPECIAL_PREFIX);
     nativePrefix = path.join(prefix, "x86_64-linux-gnu");
-    fs.cpSync(fixtureDir, projectDir, { recursive: true });
+    copyFixture(projectDir);
     fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix, scopes: {} }));
     const tmp = path.join(root, "tmp");
     fs.mkdirSync(tmp, { recursive: true });
@@ -400,7 +521,7 @@ describe("BuildEndToEnd", () => {
     }
   }, CASE_TIMEOUT);
 
-  it("release build strips the program in that directory", async () => {
+  it("release build strips the installed program in that directory", async () => {
     if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
     const restoreTmp = savedTmpdir();
     try {
@@ -421,11 +542,17 @@ describe("BuildEndToEnd", () => {
       });
 
       expect(result).toEqual({ status: "completed" });
-      // The stripped file is the one built in the project directory (src/tiny).
-      const built = path.join(projectDir, "src", "tiny");
-      const described = spawnSync("file", ["--brief", built], { encoding: "utf-8" }).stdout;
-      expect(described).toContain("stripped");
-      expect(described).not.toContain("not stripped");
+      // The program installed in the prefix, not only the one built in the project directory, is stripped
+      const installedDescription = spawnSync("file", ["--brief", installedTiny()], { encoding: "utf-8" }).stdout;
+      expect(installedTiny()).toBe(path.join(prefix, "x86_64-linux-gnu", "bin", "tiny"));
+      expect(installedDescription).toContain("stripped");
+      expect(installedDescription).not.toContain("not stripped");
+      // ... and so is the copy built in the project directory, which the packaging command reads
+      // (src/.libs/tiny when libtool wrapped the program, otherwise src/tiny)
+      const builtTiny = [path.join(projectDir, "src", ".libs", "tiny"), path.join(projectDir, "src", "tiny")].find((file) => fs.existsSync(file)) as string;
+      const builtDescription = spawnSync("file", ["--brief", builtTiny], { encoding: "utf-8" }).stdout;
+      expect(builtDescription).toContain("stripped");
+      expect(builtDescription).not.toContain("not stripped");
       expect(runInstalledTiny()).toContain("tiny ok");
       expectNothingElse(before, snapshot());
     } finally {
@@ -478,7 +605,7 @@ describe("BuildEndToEnd", () => {
       const { snapshot } = useSpecialPaths();
       // A repository made from the fixture, outside the project and the prefix; no network is used.
       const repository = path.join(root, "tmp", "source repo");
-      fs.cpSync(fixtureDir, repository, { recursive: true });
+      copyFixture(repository);
       const gitIn = (args: string[]) => {
         const run = spawnSync("git", args, { cwd: repository, encoding: "utf-8", env: caseEnv({ GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }) });
         if (run.status !== 0) {
@@ -509,6 +636,575 @@ describe("BuildEndToEnd", () => {
       restoreTmp();
     }
   }, CASE_TIMEOUT);
+
+  describe("strip and sign", () => {
+    const SCOPE = "@t";
+    const windowsPrefix = () => path.join(prefix, "x86_64-w64-mingw32");
+    const mingwAvailable = ["x86_64-w64-mingw32-gcc", "x86_64-w64-mingw32-strip", "x86_64-w64-mingw32-objdump"].every((tool) => findOnPath(tool) !== null);
+    const mingwReason = "x86_64-w64-mingw32-gcc, x86_64-w64-mingw32-strip or x86_64-w64-mingw32-objdump not found";
+    const GROUP_TIMEOUT = CASE_TIMEOUT * 2;
+    let signing: Signing;
+
+    beforeEach(async () => {
+      // A scratch certificate for the scope, in the scratch home; the project belongs to that scope and has the libraries
+      fs.writeFileSync(
+        path.join(configDir, "config.json"),
+        JSON.stringify({ prefix, scopes: { [SCOPE]: { author: { name: "Test User", email: "t@example.invalid", url: "" } } } })
+      );
+      signing = new Signing(configDir);
+      await signing.createCert({ validityDays: 365, scope: SCOPE });
+      fs.rmSync(projectDir, { recursive: true, force: true });
+      copyFixture(projectDir, { withLibrary: true, packageName: "@t/tiny" });
+    });
+
+    function fullBuild(target: "native" | "windows", release: boolean, onStepStart?: (step: { label: string }) => void) {
+      // buildProject gets its environment as an option; the process environment is cleared of the same names as well
+      useProcessEnv({ HOME: home });
+      return new Build(new Config(configDir)).buildProject({
+        projectDir,
+        target,
+        release,
+        jobs: JOBS,
+        configDir,
+        env: caseEnv({}),
+        output: new TailSink(),
+        log: () => undefined,
+        onStepStart,
+      });
+    }
+
+    /** Every file or link under a directory whose name matches, as sorted absolute paths */
+    function findNamed(dir: string, pattern: RegExp): string[] {
+      const found: string[] = [];
+      const walk = (current: string) => {
+        for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+          const child = path.join(current, entry.name);
+          if (entry.isDirectory()) {
+            walk(child);
+          } else if (pattern.test(entry.name)) {
+            found.push(child);
+          }
+        }
+      };
+      walk(dir);
+      return found.sort();
+    }
+
+    /** Static archives and import libraries in the project, with the hash of each, taken when the install step starts */
+    function archiveHashes(): Map<string, string> {
+      const hashes = new Map<string, string>();
+      for (const file of findNamed(projectDir, /\.(a|dll\.a)$/)) {
+        hashes.set(file, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex"));
+      }
+      return hashes;
+    }
+
+    function expectNoArchiveSignatures(): void {
+      // Neither the prefix nor the build tree holds a signature beside an archive, import library or libtool file
+      for (const dir of [prefix, projectDir]) {
+        expect(findNamed(dir, /\.(a|dll\.a|la)\.sig$/)).toEqual([]);
+      }
+    }
+
+    function describeFile(file: string): string {
+      return spawnSync("file", ["--brief", file], { encoding: "utf-8" }).stdout;
+    }
+
+    function expectStripped(file: string): void {
+      const described = describeFile(file);
+      expect([file, described.includes("stripped")]).toEqual([file, true]);
+      expect([file, described.includes("not stripped")]).toEqual([file, false]);
+    }
+
+    function expectNotStripped(file: string): void {
+      expect([file, describeFile(file).includes("not stripped")]).toEqual([file, true]);
+    }
+
+    async function expectValid(file: string, type: "embedded" | "detached"): Promise<void> {
+      const result = await signing.verifyFile(file);
+      expect([file, result.status, result.reason]).toEqual([file, "VALID", undefined]);
+      expect([file, result.signatureType]).toEqual([file, type]);
+    }
+
+    const nativeLibraries = () => ["libtinygreet.so.0.0.0", "libtinyrelink.so.0.0.0"].map((name) => path.join(nativePrefix, "lib", name));
+    const nativeLinkNames = () => ["libtinygreet.so.0", "libtinygreet.so", "libtinyrelink.so.0", "libtinyrelink.so"].map((name) => path.join(nativePrefix, "lib", name));
+    const windowsFiles = () => ["tiny.exe", "libtinygreet-0.dll", "libtinyrelink-0.dll"].map((name) => path.join(windowsPrefix(), "bin", name));
+
+    it("native release build strips and signs the installed program and library", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      let before = new Map<string, string>();
+      const result = await fullBuild("native", true, (step) => {
+        if (step.label === "install") {
+          before = archiveHashes();
+        }
+      });
+
+      expect(result).toEqual({ status: "completed" });
+      // Archives and libtool files get no signature, and the archives in the build tree are untouched
+      expectNoArchiveSignatures();
+      expect(before.size).toBeGreaterThan(0);
+      for (const [file, hash] of before) {
+        expect([file, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")]).toEqual([file, hash]);
+      }
+      const installedArchives = findNamed(prefix, /\.a$/);
+      expect(installedArchives.length).toBeGreaterThan(0);
+      for (const file of installedArchives) {
+        expect([file, fs.readFileSync(file).subarray(0, 8).toString("latin1")]).toEqual([file, "!<arch>\n"]);
+      }
+      const installed = [installedTiny(), ...nativeLibraries()];
+      for (const file of installed) {
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+      // Every name of a library verifies, not only the real file
+      for (const link of nativeLinkNames()) {
+        expect([link, fs.lstatSync(link).isSymbolicLink()]).toEqual([link, true]);
+        await expectValid(link, "detached");
+      }
+      expect(runInstalledTiny()).toContain("tiny library ok");
+    }, GROUP_TIMEOUT);
+
+    it("windows release build strips and signs the installed program and DLL", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && mingwAvailable, mingwReason)) return;
+
+      // The libtool wrapper src/tiny.exe is copied when the install step starts, right after compile
+      const wrapper = path.join(projectDir, "src", "tiny.exe");
+      let wrapperBefore: Buffer | null = null;
+      let before = new Map<string, string>();
+      const result = await fullBuild("windows", true, (step) => {
+        if (step.label === "install") {
+          wrapperBefore = fs.readFileSync(wrapper);
+          before = archiveHashes();
+        }
+      });
+
+      expect(result).toEqual({ status: "completed" });
+      expectNoArchiveSignatures();
+      expect(before.size).toBeGreaterThan(0);
+      for (const [file, hash] of before) {
+        expect([file, crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")]).toEqual([file, hash]);
+      }
+      // The wrapper (the real program is in src/.libs) is not a program output: unchanged and not signed
+      expect(fs.existsSync(path.join(projectDir, "src", ".libs", "tiny.exe"))).toBe(true);
+      expect(wrapperBefore).not.toBeNull();
+      expect(fs.readFileSync(wrapper).equals(wrapperBefore as unknown as Buffer)).toBe(true);
+      expect((await signing.verifyFile(wrapper)).status).toBe("NOT_FOUND");
+      for (const file of windowsFiles()) {
+        const sections = spawnSync("x86_64-w64-mingw32-objdump", ["-h", file], { encoding: "utf-8" }).stdout;
+        expect([file, sections.length > 0, /\.debug_/.test(sections)]).toEqual([file, true, false]);
+        await expectValid(file, "embedded");
+        expect([file, fs.existsSync(file + ".sig")]).toEqual([file, false]);
+      }
+    }, GROUP_TIMEOUT);
+
+    it("native build without release signs the installed files and does not strip them", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      const result = await fullBuild("native", false);
+
+      expect(result).toEqual({ status: "completed" });
+      for (const file of [installedTiny(), ...nativeLibraries()]) {
+        expectNotStripped(file);
+        await expectValid(file, "detached");
+        expect([file, fs.existsSync(file + ".sig")]).toEqual([file, true]);
+      }
+    }, GROUP_TIMEOUT);
+
+    it("detached signatures sit beside the installed file and each of its link names", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      const result = await fullBuild("native", true);
+
+      expect(result).toEqual({ status: "completed" });
+      const lib = path.join(nativePrefix, "lib");
+      expect(fs.lstatSync(path.join(lib, "libtinygreet.so.0.0.0.sig")).isFile()).toBe(true);
+      // Each signature link points where its name's link points, with .sig added (libtool decides the shape of the chain)
+      for (const name of ["libtinygreet.so.0", "libtinygreet.so"]) {
+        const sig = path.join(lib, name + ".sig");
+        expect([sig, fs.lstatSync(sig).isSymbolicLink()]).toEqual([sig, true]);
+        expect([sig, fs.readlinkSync(sig)]).toEqual([sig, fs.readlinkSync(path.join(lib, name)) + ".sig"]);
+      }
+      // ... so the link reaches the real signature through the chain
+      expect(fs.realpathSync(path.join(lib, "libtinygreet.so.sig"))).toBe(fs.realpathSync(path.join(lib, "libtinygreet.so.0.0.0.sig")));
+      expect((await signing.verifyFile(path.join(lib, "libtinygreet.so"))).status).toBe("VALID");
+    }, GROUP_TIMEOUT);
+
+    /** The program built in the project, where the build leaves it */
+    function buildTreeProgram(name: string): string {
+      const inLibs = path.join(projectDir, "src", ".libs", name);
+      return fs.existsSync(inLibs) ? inLibs : path.join(projectDir, "src", name);
+    }
+
+    it("the relinked library's installed and build-tree copies are each signed and each verifies", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      const result = await fullBuild("native", true);
+
+      expect(result).toEqual({ status: "completed" });
+      // libtool relinks libtinyrelink during install (it links libtinygreet), so the two copies are different files
+      const installed = path.join(nativePrefix, "lib", "libtinyrelink.so.0.0.0");
+      const built = path.join(projectDir, "src", ".libs", "libtinyrelink.so.0.0.0");
+      expect(fs.existsSync(built)).toBe(true);
+      expect(fs.readFileSync(installed).equals(fs.readFileSync(built))).toBe(false);
+      for (const file of [installed, built]) {
+        expect([file, fs.lstatSync(file + ".sig").isFile()]).toEqual([file, true]);
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+      // Each signature belongs to its own copy
+      expect(fs.readFileSync(installed + ".sig").equals(fs.readFileSync(built + ".sig"))).toBe(false);
+      // The link names in the build tree verify too
+      await expectValid(path.join(projectDir, "src", ".libs", "libtinyrelink.so.0"), "detached");
+    }, GROUP_TIMEOUT);
+
+    it("package output after a release build is stripped and signed", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      expect(await fullBuild("native", true)).toEqual({ status: "completed" });
+      const outputDir = path.join(root, "dist");
+      // Package reads the configuration of the scratch config directory and prints on the console
+      const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+      const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+      let packaged: boolean;
+      try {
+        packaged = new Package(new Config(configDir)).run(outputDir, [projectDir]);
+      } finally {
+        errorSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+
+      expect(packaged).toBe(true);
+      // The program comes from src/.libs, the libraries it loads from the prefix (copied under their real names)
+      const shipped = ["tiny", "libtinyrelink.so.0.0.0", "libtinygreet.so.0.0.0"].map((name) => path.join(outputDir, name));
+      for (const file of shipped) {
+        expect([file, fs.statSync(file).isFile()]).toEqual([file, true]);
+        expect([file, fs.existsSync(file + ".sig")]).toEqual([file, true]);
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+      expect(fs.readFileSync(path.join(outputDir, "tiny")).equals(fs.readFileSync(path.join(projectDir, "src", ".libs", "tiny")))).toBe(true);
+      expect(fs.readFileSync(path.join(outputDir, "libtinygreet.so.0.0.0")).equals(fs.readFileSync(path.join(nativePrefix, "lib", "libtinygreet.so.0.0.0")))).toBe(true);
+    }, GROUP_TIMEOUT);
+
+    it("building twice leaves one valid signature and the same size (native)", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+      const files = () => [installedTiny(), ...nativeLibraries(), buildTreeProgram("tiny")];
+
+      expect(await fullBuild("native", true)).toEqual({ status: "completed" });
+      const sizes = files().map((file) => fs.statSync(file).size);
+      expect(await fullBuild("native", true)).toEqual({ status: "completed" });
+
+      expect(files().map((file) => fs.statSync(file).size)).toEqual(sizes);
+      for (const file of [installedTiny(), ...nativeLibraries()]) {
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+    }, GROUP_TIMEOUT * 2);
+
+    it("building twice leaves one valid signature and the same size (windows)", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && mingwAvailable, mingwReason)) return;
+      const files = () => [...windowsFiles(), buildTreeProgram("tiny.exe")];
+
+      expect(await fullBuild("windows", true)).toEqual({ status: "completed" });
+      const sizes = files().map((file) => fs.statSync(file).size);
+      expect(await fullBuild("windows", true)).toEqual({ status: "completed" });
+
+      expect(files().map((file) => fs.statSync(file).size)).toEqual(sizes);
+      for (const file of windowsFiles()) {
+        await expectValid(file, "embedded");
+        expect([file, fs.existsSync(file + ".sig")]).toEqual([file, false]);
+      }
+    }, GROUP_TIMEOUT * 2);
+
+    it("recursive release build gives each project its own scope's treatment, one and two at a time", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      // @a has a certificate and @b (which depends on @a) has none; both install into the same prefix under different names
+      const dirA = path.join(root, "a");
+      const dirB = path.join(root, "b");
+      copyFixture(dirA, { name: "tinya", withLibrary: true, packageName: "@a/tinya" });
+      copyFixture(dirB, { name: "tinyb", withLibrary: true, packageName: "@b/tinyb", dependencies: { "@a/tinya": "file:../a" } });
+      const singlePrefix = path.join(root, "single-prefix");
+      const writeConfig = (installPrefix: string): void => {
+        fs.writeFileSync(
+          path.join(configDir, "config.json"),
+          JSON.stringify({ prefix: installPrefix, scopes: { "@a": { author: { name: "Test User", email: "a@example.invalid", url: "" } } } })
+        );
+      };
+
+      // The state of one project's installed outputs: stripped, signature file present, signature valid
+      const treatment = async (installPrefix: string, name: string) => {
+        const nativeDir = path.join(installPrefix, "x86_64-linux-gnu");
+        const files = [path.join(nativeDir, "bin", name), path.join(nativeDir, "lib", `lib${name}greet.so.0.0.0`), path.join(nativeDir, "lib", `lib${name}relink.so.0.0.0`)];
+        const states: Array<{ stripped: boolean; signatureFile: boolean; valid: boolean }> = [];
+        for (const file of files) {
+          expect([file, fs.existsSync(file)]).toEqual([file, true]);
+          const described = describeFile(file);
+          states.push({
+            stripped: described.includes("stripped") && !described.includes("not stripped"),
+            signatureFile: fs.existsSync(file + ".sig"),
+            valid: (await signing.verifyFile(file)).status === "VALID",
+          });
+        }
+        return states;
+      };
+
+      // What a build of each project alone leaves, in a prefix of its own
+      writeConfig(singlePrefix);
+      await signing.createCert({ validityDays: 365, scope: "@a" });
+      useProcessEnv({ HOME: home });
+      for (const dir of [dirA, dirB]) {
+        const single = await new Build(new Config(configDir)).buildProject({
+          projectDir: dir,
+          target: "native",
+          release: true,
+          jobs: JOBS,
+          configDir,
+          env: caseEnv({}),
+          output: new TailSink(),
+          log: () => undefined,
+        });
+        expect(single).toEqual({ status: "completed" });
+      }
+      const expectedA = await treatment(singlePrefix, "tinya");
+      const expectedB = await treatment(singlePrefix, "tinyb");
+      expect(expectedA).toEqual(Array(3).fill({ stripped: true, signatureFile: true, valid: true }));
+      expect(expectedB).toEqual(Array(3).fill({ stripped: true, signatureFile: false, valid: false }));
+
+      for (const parallel of [1, 2]) {
+        fs.rmSync(prefix, { recursive: true, force: true });
+        writeConfig(prefix);
+        useProcessEnv({ HOME: home });
+        logSpy.mockClear();
+
+        const result = await buildRecursive({
+          target: "native",
+          fullReconfigure: true,
+          projectDir: dirB,
+          release: true,
+          jobs: JOBS,
+          parallel,
+        });
+
+        const lines = logSpy.mock.calls.map((call) => String(call[0]));
+        expect([parallel, result.success, result.completed.map((project) => project.name)]).toEqual([parallel, true, ["@a/tinya", "@b/tinyb"]]);
+        // @a is signed by @a in the prefix and in the build tree
+        const nativeDir = path.join(prefix, "x86_64-linux-gnu");
+        for (const file of [path.join(nativeDir, "bin", "tinya"), path.join(nativeDir, "lib", "libtinyagreet.so.0.0.0"), path.join(dirA, "src", ".libs", "tinya")]) {
+          await expectValid(file, "detached");
+        }
+        // @b is unsigned and said so once
+        expect(lines.filter((line) => /^\[@b\/tinyb\] Not signed:/.test(line))).toHaveLength(1);
+        expect(lines.filter((line) => /^\[@a\/tinya\] (Not signed|Warning: not signed)/.test(line))).toEqual([]);
+        for (const file of [path.join(nativeDir, "bin", "tinyb"), path.join(dirB, "src", ".libs", "tinyb")]) {
+          expect([parallel, file, fs.existsSync(file + ".sig")]).toEqual([parallel, file, false]);
+          expect([parallel, file, (await signing.verifyFile(file)).status === "VALID"]).toEqual([parallel, file, false]);
+        }
+        // @a's install finished before anything of @b began
+        const installedA = lines.indexOf("[@a/tinya] install... done");
+        const firstB = lines.findIndex((line) => line.startsWith("[@b/tinyb] "));
+        expect([parallel, installedA >= 0, firstB > installedA]).toEqual([parallel, true, true]);
+        // Each project's installed outputs are in the state a build of it alone leaves
+        expect(await treatment(prefix, "tinya")).toEqual(expectedA);
+        expect(await treatment(prefix, "tinyb")).toEqual(expectedB);
+      }
+    }, GROUP_TIMEOUT * 6);
+
+    /**
+     * A native release build whose output sink calls `onInstallWrites` when `make install` first prints a
+     * `libtool: install:` line, that is while it is writing into the stage; `extraEnv` reaches the build's steps.
+     * The `==> install:` line goes to `log` before the phase starts, so aborting there would test only the
+     * pre-install check, which is why the sink is used.
+     */
+    function installBuild(options: { sink?: TailSink; extraEnv?: Record<string, string>; signal?: AbortSignal; forceSignal?: AbortSignal }) {
+      useProcessEnv({ HOME: home });
+      return new Build(new Config(configDir)).buildProject({
+        projectDir,
+        target: "native",
+        release: true,
+        jobs: JOBS,
+        configDir,
+        env: caseEnv(options.extraEnv ?? {}),
+        output: options.sink ?? new TailSink(),
+        log: () => undefined,
+        signal: options.signal,
+        forceSignal: options.forceSignal,
+      });
+    }
+
+    it("a failing install step leaves the prefix unchanged", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      // A first build populates the prefix; the next one fails at the end of its install step, after
+      // make has written the programs and libraries into the stage
+      expect(await installBuild({})).toEqual({ status: "completed" });
+      const before = prefixSnapshot(prefix);
+      expect(before.length).toBeGreaterThan(0);
+
+      const result = await installBuild({ extraEnv: { SEED_TEST_INSTALL_FAIL: "1" } });
+
+      expect(result.status).toBe("failed");
+      expect((result as { step: string }).step).toBe("install");
+      expect(prefixSnapshot(prefix)).toEqual(before);
+      expect(fs.existsSync(path.join(prefix, ".the-seed-staging"))).toBe(false);
+    }, GROUP_TIMEOUT * 2);
+
+    it("a forced cancellation during the install phase leaves the prefix unchanged", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      expect(await installBuild({})).toEqual({ status: "completed" });
+      const before = prefixSnapshot(prefix);
+      expect(before.length).toBeGreaterThan(0);
+      const cancel = new AbortController();
+      const force = new AbortController();
+      let triggered = false;
+      const sink = new TriggerSink("libtool: install:", () => {
+        triggered = true;
+        cancel.abort();
+        force.abort();
+      });
+
+      const result = await installBuild({ sink, signal: cancel.signal, forceSignal: force.signal });
+
+      expect(triggered).toBe(true);
+      expect(result).toEqual({ status: "cancelled" });
+      expect(prefixSnapshot(prefix)).toEqual(before);
+      expect(fs.existsSync(path.join(prefix, ".the-seed-staging"))).toBe(false);
+    }, GROUP_TIMEOUT * 2);
+
+    it("one cancellation during the install phase installs and reports it", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable && releaseToolsAvailable, "autoreconf, make, cc, strip or file not found")) return;
+
+      const cancel = new AbortController();
+      const force = new AbortController();
+      let triggered = false;
+      // Only the first signal: the phase is not told to stop
+      const sink = new TriggerSink("libtool: install:", () => {
+        triggered = true;
+        cancel.abort();
+      });
+
+      const result = await installBuild({ sink, signal: cancel.signal, forceSignal: force.signal });
+
+      expect(triggered).toBe(true);
+      expect(result).toEqual({ status: "cancelled", installed: true });
+      expect(force.signal.aborted).toBe(false);
+      for (const file of [installedTiny(), ...nativeLibraries()]) {
+        expectStripped(file);
+        await expectValid(file, "detached");
+      }
+      expect(fs.existsSync(path.join(prefix, ".the-seed-staging"))).toBe(false);
+      expect(runInstalledTiny()).toContain("tiny library ok");
+    }, GROUP_TIMEOUT);
+
+    /** Same as fullBuild, but the lines the build logs are kept. */
+    function loggedBuild(lines: string[]) {
+      useProcessEnv({ HOME: home });
+      return new Build(new Config(configDir)).buildProject({
+        projectDir,
+        target: "native",
+        release: false,
+        jobs: JOBS,
+        configDir,
+        env: caseEnv({}),
+        output: new TailSink(),
+        log: (line) => lines.push(line),
+      });
+    }
+
+    it("an unreadable key fails the build at sign and leaves the prefix unchanged", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable, "autoreconf, make or cc not found")) return;
+      if (!optionalExternalCheck("build-end-to-end-unreadable-key", process.getuid?.() !== 0, "running as root, which can read any file")) return;
+
+      // An earlier build installs signed files; the next one cannot read the key
+      expect(await fullBuild("native", false)).toEqual({ status: "completed" });
+      const before = prefixSnapshot(prefix);
+      expect(before.length).toBeGreaterThan(0);
+      const keyPath = signing.scopeKeyPath(SCOPE);
+      fs.chmodSync(keyPath, 0o000);
+      let result;
+      try {
+        result = await fullBuild("native", false);
+      } finally {
+        fs.chmodSync(keyPath, 0o600);
+      }
+
+      expect(result.status).toBe("failed");
+      const failed = result as { status: "failed"; step: string; message: string };
+      expect(failed.step).toBe("sign");
+      expect(failed.message).toContain("signing failed on ");
+      expect(failed.message).toContain(nativePrefix);
+      expect(prefixSnapshot(prefix)).toEqual(before);
+      expect(fs.existsSync(path.join(prefix, ".the-seed-staging"))).toBe(false);
+    }, GROUP_TIMEOUT * 2);
+
+    it("a project with no scope, no certificate or an expired certificate builds with exactly one notice line", async () => {
+      if (!optionalExternalCheck("build-end-to-end", toolsAvailable, "autoreconf, make or cc not found")) return;
+
+      // The first build is signed, so every later build has a stale .sig to remove
+      expect(await fullBuild("native", false)).toEqual({ status: "completed" });
+      const staleSignatures = [installedTiny() + ".sig", ...nativeLibraries().map((file) => file + ".sig")];
+      for (const sig of staleSignatures) {
+        expect([sig, fs.existsSync(sig)]).toEqual([sig, true]);
+      }
+
+      const noticeLines = (lines: string[]) => lines.filter((line) => /^(Not signed:|Warning: not signed:)/.test(line));
+      const expectUnsigned = async (label: string, prefixText: "Not signed:" | "Warning: not signed:") => {
+        const lines: string[] = [];
+        const result = await loggedBuild(lines);
+        expect([label, result]).toEqual([label, { status: "completed" }]);
+        const notices = noticeLines(lines);
+        expect([label, notices.length]).toEqual([label, 1]);
+        expect([label, notices[0].startsWith(prefixText)]).toEqual([label, true]);
+        for (const file of [installedTiny(), ...nativeLibraries()]) {
+          expect([label, file, fs.existsSync(file + ".sig")]).toEqual([label, file, false]);
+          expect([label, file, (await signing.verifyFile(file)).status === "VALID"]).toEqual([label, file, false]);
+        }
+      };
+
+      // No scope
+      setPackageName("tiny");
+      await expectUnsigned("no scope", "Not signed:");
+
+      // A scope without a certificate: the earlier signed files' signatures are restored by a signed build first
+      setPackageName("@t/tiny");
+      expect(await fullBuild("native", false)).toEqual({ status: "completed" });
+      setPackageName("@nocert/tiny");
+      await expectUnsigned("no certificate", "Not signed:");
+
+      // An expired certificate
+      setPackageName("@t/tiny");
+      expect(await fullBuild("native", false)).toEqual({ status: "completed" });
+      await writeExpiredCertificate();
+      await expectUnsigned("expired certificate", "Warning: not signed:");
+    }, GROUP_TIMEOUT * 4);
+
+    /** Renames the project in place, keeping its built tree. */
+    function setPackageName(name: string): void {
+      const manifest = path.join(projectDir, "package.json");
+      const parsed = JSON.parse(fs.readFileSync(manifest, "utf8")) as { name?: string };
+      parsed.name = name;
+      fs.writeFileSync(manifest, JSON.stringify(parsed));
+    }
+
+    /** Replaces the scope's certificate by one whose validity ended in the past, signed by its own key. */
+    async function writeExpiredCertificate(): Promise<void> {
+      const webcrypto = crypto.webcrypto as unknown as Crypto;
+      x509.cryptoProvider.set(webcrypto);
+      const keys = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+      const day = 24 * 60 * 60 * 1000;
+      const cert = await x509.X509CertificateGenerator.createSelfSigned({
+        serialNumber: "01",
+        name: "CN=Expired Test",
+        notBefore: new Date(Date.now() - 30 * day),
+        notAfter: new Date(Date.now() - 2 * day),
+        signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+        keys,
+      });
+      fs.writeFileSync(signing.scopeCertPath(SCOPE), cert.toString("pem"));
+    }
+  });
 
   describe("library search", () => {
     const pkgConfigAvailable = findOnPath("pkg-config") !== null;

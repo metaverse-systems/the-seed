@@ -1,3 +1,5 @@
+import type { StepOutputMode } from "./StepRunner";
+
 export interface AuthorType {
   name: string;
   email: string;
@@ -259,9 +261,9 @@ export interface RecursiveBuildResult {
 export interface ProjectFailure {
   /** The project that failed */
   project: BuildableProject;
-  /** Label of the step that failed (autogen, configure, compile, install, strip or sign) */
+  /** Label of the step that failed (autogen, configure, compile, install, strip, sign or place) */
   step: string;
-  /** Full captured output of the failed command, or the error message for strip and sign */
+  /** Full captured output of the failed command, or the error message for strip, sign and place */
   output: string;
 }
 
@@ -273,16 +275,6 @@ export interface RecursiveBuildCallbacks {
   onStepComplete?: (project: BuildableProject, step: BuildStep) => void;
   /** Called when a project finishes building successfully */
   onProjectComplete?: (project: BuildableProject, index: number, total: number) => void;
-}
-
-// ── Strip Types ─────────────────────────────────────────
-
-/** Result returned by the stripBinaries() function */
-export interface StripResult {
-  /** Absolute paths of files that were successfully stripped */
-  strippedFiles: string[];
-  /** The strip tool that was used (e.g., 'strip' or 'x86_64-w64-mingw32-strip') */
-  stripTool: string;
 }
 
 /** Configuration options for a recursive build execution. */
@@ -297,7 +289,7 @@ export interface RecursiveBuildOptions {
   signal?: AbortSignal;
   /** Optional progress/status callbacks */
   callbacks?: RecursiveBuildCallbacks;
-  /** When true, strip binaries after compile and before sign. Defaults to false. */
+  /** When true, the install phase strips the installed programs and libraries (and their build-tree copies) before signing them. Defaults to false. */
   release?: boolean;
   /**
    * Maximum number of projects to build at once (a positive integer, capped
@@ -311,8 +303,9 @@ export interface RecursiveBuildOptions {
   jobs?: number;
   /**
    * Optional second, forced cancellation. Aborting `signal` stops running
-   * steps but lets an install in progress finish; aborting this also stops
-   * the install.
+   * steps but lets an install phase in progress finish and place its files;
+   * aborting this also discards an install phase that has not reached
+   * placement.
    */
   forceSignal?: AbortSignal;
 }
@@ -325,7 +318,7 @@ export interface BuildRequest {
   target?: "native" | "windows";
   /** Build every buildable dependency first */
   recursive: boolean;
-  /** Strip binaries after install, before signing */
+  /** Strip the installed programs and libraries (and the build-tree copies "package" reads) before they are signed */
   release: boolean;
   /** Maximum number of projects to build at once; 1 unless --parallel was given */
   parallel: number;
@@ -341,7 +334,7 @@ export interface ProjectBuildOptions {
   projectDir: string;
   /** Absent for an incremental build (compile and install only) */
   target?: "native" | "windows";
-  /** Strip the installed binaries (full builds only) */
+  /** Strip the programs and libraries in the install phase, before they are signed (needs a target) */
   release: boolean;
   /** Compile job limit */
   jobs?: number;
@@ -349,18 +342,113 @@ export interface ProjectBuildOptions {
   configDir: string;
   /** Base environment for every step; process.env when omitted */
   env?: NodeJS.ProcessEnv;
-  /** First cancellation: stops every step except install, strip and sign */
+  /** First cancellation: stops every step except the install phase (staged install, strip, sign, placement) */
   signal?: AbortSignal;
-  /** Second cancellation: also stops install, strip and sign */
+  /** Second cancellation: also discards an install phase that has not reached placement */
   forceSignal?: AbortSignal;
   /** Receives each step's output as it arrives; the tool's own streams when omitted */
   output?: { stdout(chunk: Buffer): void; stderr(chunk: Buffer): void };
   /** Receives each progress line; console.log when omitted */
   log?: (line: string) => void;
+  /** Called before each step, the install step included; `index` is 0-based */
+  onStepStart?(step: BuildStep, index: number, total: number): void;
 }
 
 /** How Build.buildProject() ended. */
 export type ProjectBuildResult =
   | { status: "completed" }
+  /** `step` is a build step label (install included), or strip, sign or place from the install phase */
   | { status: "failed"; step: string; message: string }
-  | { status: "cancelled" };
+  /** `installed` is set when the install phase finished and placed its files before the build stopped */
+  | { status: "cancelled"; installed?: true };
+
+/** What a file is for a build target. */
+export type OutputKind = "elfExecutable" | "elfShared" | "peProgram" | "peLibrary";
+
+/** One entry under the staged prefix root. `relPath` is relative to the root and uses "/". */
+export interface StagedEntry {
+  relPath: string;
+  type: "dir" | "file" | "symlink";
+  mode: number;
+  linkTarget?: string;
+  dev: number;
+  ino: number;
+}
+
+/** The result of reading the stage after the install step. */
+export interface StagedTree {
+  /** The DESTDIR given to the install step */
+  stageDir: string;
+  target: "native" | "windows";
+  /** <config prefix>/<triplet> */
+  prefix: string;
+  /** stageDir + prefix */
+  root: string;
+  /** Every entry under root, depth first, directories before their contents */
+  entries: StagedEntry[];
+}
+
+/** One program or library output and every name it has. */
+export interface OutputGroup {
+  /** Absolute path of the real file */
+  file: string;
+  kind: OutputKind;
+  /** Absolute path of every name: the file, each symlink in a chain that ends at it, each hard link */
+  names: string[];
+  /** The symlink names with their readlink text */
+  links: { path: string; target: string }[];
+  /** The hard-link names other than file */
+  hardLinks: string[];
+  /** The path printed in progress lines */
+  display: string;
+}
+
+/** Whether a project is signed, and if not, why. */
+export type SigningOutcome =
+  | { kind: "signed"; scope: string }
+  | {
+      kind: "unsigned";
+      reason: "noPackageJson" | "unreadablePackageJson" | "noScope" | "noCertificate" | "expired";
+      scope?: string;
+      name?: string;
+      expiredOn?: Date;
+      detail?: string;
+    };
+
+/** What a successful install phase did. */
+export interface InstallReport {
+  prefix: string;
+  installed: number;
+  stripped: string[];
+  signed: { display: string; form: "embedded" | "detached" }[];
+  outcome: SigningOutcome;
+}
+
+/** Options for the install phase of one project. */
+export interface InstallPhaseOptions {
+  projectDir: string;
+  /** config.config.prefix */
+  configPrefix: string;
+  /** Directory holding the signing certificates */
+  configDir: string;
+  /** Absent for an incremental build */
+  target?: "native" | "windows";
+  /** Strip only when true and a target is given */
+  release: boolean;
+  /** The install step; DESTDIR is appended */
+  installStep: BuildStep;
+  /** Base environment of the step */
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+  output: StepOutputMode;
+  /** One whole line per call */
+  log: (line: string) => void;
+  /** Called once, right after the install step succeeds */
+  onInstalled?: () => void;
+}
+
+/** How the install phase ended. */
+export type InstallPhaseResult =
+  | { status: "completed"; report: InstallReport }
+  | { status: "failed"; step: "install" | "strip" | "sign" | "place"; message: string; output?: string }
+  | { status: "interrupted" };
