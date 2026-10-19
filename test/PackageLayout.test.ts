@@ -214,7 +214,11 @@ describe("package layout", () => {
     logSpy.mockRestore();
     errorSpy.mockRestore();
     warnSpy.mockRestore();
-    process.env.HOME = originalHome;
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
     fs.rmSync(root, { recursive: true, force: true });
   });
 

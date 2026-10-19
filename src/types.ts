@@ -586,7 +586,7 @@ export interface PackageResult {
   message: string | null;
   /** The output directory as given */
   outputDir: string;
-  /** As in the plan; empty when refused before discovery finished */
+  /** As in the plan on success; empty on any refusal or failure */
   projects: string[];
   /** Names written, signatures excluded, in copy order */
   files: string[];

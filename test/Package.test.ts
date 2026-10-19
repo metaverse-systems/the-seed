@@ -997,6 +997,26 @@ describe("test Package", () => {
       expect(mockedListDependencies).not.toHaveBeenCalled();
       expect(fs.existsSync(outputDir)).toBe(false);
     });
+
+    it("reports a given directory without binaries before any collision between the others", async () => {
+      const dirs = ["one", "two"].map(name => {
+        const projectDir = createProjectDir(tempDir, name, "bin_PROGRAMS = app\napp_SOURCES = app.cpp\n");
+        fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({ name: "@t/" + name, version: "1.0.0" }));
+        installBuildOutput(projectDir, "app", "content of " + name);
+        return projectDir;
+      });
+      const empty = createProjectDir(tempDir, "empty", "bin_PROGRAMS = nothing\nnothing_SOURCES = nothing.cpp\n");
+      const outputDir = path.join(tempDir, "my-release");
+
+      const errorSpy = jest.spyOn(console, "error").mockImplementation();
+      const result = await pkg.run(outputDir, [...dirs, empty]);
+      errorSpy.mockRestore();
+
+      expect(result.success).toBe(false);
+      expect(result.message).toBe("No installed binaries found for " + empty);
+      expect(mockedListDependencies).not.toHaveBeenCalled();
+      expect(fs.existsSync(outputDir)).toBe(false);
+    });
   });
 
   describe("run - copy failure", () => {

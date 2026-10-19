@@ -253,13 +253,18 @@ class Package {
     for (const projectDir of projectDirs) {
       givenByLocation.set(fs.realpathSync(path.resolve(projectDir)), projectDir);
     }
+    const outputsByLocation = new Map<string, string[]>();
+    for (const location of projectNames.keys()) {
+      const outputs = this.resolveBinaryPaths(location);
+      if (outputs.length === 0 && given.has(location)) {
+        return refuse("No installed binaries found for " + (givenByLocation.get(location) ?? location));
+      }
+      outputsByLocation.set(location, outputs);
+    }
     const binaryPaths: string[] = [];
     for (const [location, name] of projectNames) {
-      const outputs = this.resolveBinaryPaths(location);
+      const outputs = outputsByLocation.get(location) ?? [];
       if (outputs.length === 0) {
-        if (given.has(location)) {
-          return refuse("No installed binaries found for " + (givenByLocation.get(location) ?? location));
-        }
         continue;
       }
       const isLibrary = this.parseMakefileAm(location)?.type === "library";

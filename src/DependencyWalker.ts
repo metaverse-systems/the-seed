@@ -66,7 +66,7 @@ export class ConflictingProjectError extends DependencyDiscoveryError {
   /** The package name both projects carry */
   packageName: string;
   /** Real locations of the two projects, in the order found */
-  locations: string[];
+  locations: [string, string];
 
   constructor(packageName: string, first: string, second: string) {
     super(

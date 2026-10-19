@@ -211,7 +211,11 @@ describe("recursive discovery", () => {
     cwdSpy = undefined;
     logSpy.mockRestore();
     errorSpy.mockRestore();
-    process.env.HOME = originalHome;
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
     process.exitCode = originalExitCode;
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
