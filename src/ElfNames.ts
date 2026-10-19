@@ -1,3 +1,9 @@
+/**
+ * Reads the names an ELF file records about itself: the name programs load a library by (its
+ * soname) and the library names it asks for. Packaging uses the soname to write each Linux library
+ * under the name programs load it by (for example libgreet.so.0) and the needed names to list the
+ * libraries left to the target system. Only the parts of the file that hold these names are read.
+ */
 import fs from "fs";
 
 export type ElfNames = {

@@ -360,7 +360,9 @@ async function walkProject(projectDir: string, walk: WalkState): Promise<void> {
  *
  * When multiple projects have in-degree 0, the one with the lowest
  * ProjectType value (Component < System < Program) is dequeued first.
- * The root project (projectDir) is always placed last in the sequence.
+ * The root project (projectDir) is always placed last in the sequence. The root is
+ * identified by its real location. The graph from walkDependencies() has no cycle;
+ * the cycle check here only defends against a graph built another way.
  *
  * @param graph - Dependency graph from walkDependencies()
  * @param rootProjectPath - Absolute path of the invoking project (sorted to end)

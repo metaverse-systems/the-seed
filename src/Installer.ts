@@ -135,8 +135,10 @@ class Installer {
   };
 
   /**
-   * Ensure the dist/ directory of the project exists. If missing, packages the project into it.
-   * Returns true if dist/ exists and is non-empty after this call.
+   * Ensure the dist/ directory of the project exists. If missing, packages the project into it
+   * (the project's own dist/, whatever the working directory is). When packaging is refused,
+   * for example for a name collision, the refusal is printed and no installer is built.
+   * Resolves true if dist/ exists and is non-empty after this call.
    */
   ensureDist = async (projectDir: string): Promise<boolean> => {
     const distDir = path.join(projectDir, "dist");

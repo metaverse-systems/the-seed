@@ -19,6 +19,16 @@ import {
   UnpackagedLibrary,
 } from "./types";
 
+/**
+ * Packages project binaries with the shared libraries they need into one directory.
+ *
+ * Dependency projects are found by the rule the recursive build uses (`file:` paths relative to the
+ * declaring project, other names in its own node_modules, each project once by real location).
+ * A Linux library is written under the name programs load it by (its soname), as a regular file,
+ * with its signature under the same name; programs and Windows files keep their names. Two
+ * different files for one name are refused and nothing is written. Libraries needed but left to
+ * the target system are reported.
+ */
 class Package {
   config: Config;
 
@@ -178,7 +188,9 @@ class Package {
   /**
    * Decide what packaging the given project directories would write, without writing anything.
    * Dependency projects are found with the walker the recursive build uses; a directory that is
-   * not a project contributes itself alone.
+   * not a project contributes itself alone. Resolves a refusal (not a rejection) for a dependency
+   * cycle, two different directories with one package name, an unreadable package.json, a malformed
+   * ELF file, or two different files that would be written under one name.
    */
   plan = async (projectDirs: string[]): Promise<PackagePlan> => {
     const refuse = (message: string): PackagePlan => ({ ok: false, message });
@@ -453,7 +465,8 @@ class Package {
 
   /**
    * Main entry point: validate inputs, decide what to package, create the directory, copy files.
-   * Resolves a result; a refusal or failure is printed once as "Error: <message>" and nothing is left written.
+   * Resolves a PackageResult (it no longer returns a boolean); a refusal or failure is printed once
+   * as "Error: <message>", `success` is false and nothing is left written.
    */
   run = async (outputDir: string, projectDirs: string[]): Promise<PackageResult> => {
     const failed = (message: string): PackageResult => {

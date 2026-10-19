@@ -18,6 +18,11 @@ const PackageCLI = async (scriptConfig: ScriptArgsType) => {
     console.log("The command reads src/Makefile.am to determine the binary type and name,");
     console.log("resolves installed binaries for all build targets, uses DependencyLister");
     console.log("to find shared library dependencies, and copies everything into the output directory.");
+    console.log("");
+    console.log("Dependency projects are found the way \"the-seed build --recursive\" finds them: \"file:\" paths");
+    console.log("relative to the declaring project, other names in its node_modules. Linux libraries are written");
+    console.log("under the name programs load them by (for example libgreet.so.0), each with its .sig when signed.");
+    console.log("Two different files with the same name are refused; nothing is written.");
     return;
   }
 

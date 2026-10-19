@@ -1054,6 +1054,36 @@ describe("test Package", () => {
       expect(logCalls.some(msg => msg.includes("output-directory"))).toBe(true);
       expect(logCalls.some(msg => msg.includes("project-dir"))).toBe(true);
     });
+
+    it("explains how dependency projects are found, how libraries are named and that collisions are refused", async () => {
+      const scriptConfig: ScriptArgsType = {
+        binName: "the-seed",
+        args: ["node", "the-seed", "package", "help"],
+        configDir: configDir
+      };
+
+      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
+      await PackageCLI(scriptConfig);
+      const logCalls = consoleSpy.mock.calls.map(c => String(c[0]));
+      consoleSpy.mockRestore();
+      const help = logCalls.join("\n");
+
+      // The help is printed after the usage lines; the four lines are matched
+      // as a whole text so the choice of one console.log call or several is open.
+      const lines = [
+        "Dependency projects are found the way \"the-seed build --recursive\" finds them: \"file:\" paths",
+        "relative to the declaring project, other names in its node_modules. Linux libraries are written",
+        "under the name programs load them by (for example libgreet.so.0), each with its .sig when signed.",
+        "Two different files with the same name are refused; nothing is written."
+      ];
+      for (const line of lines) {
+        expect(help).toContain(line);
+      }
+      expect(help.indexOf(lines[0])).toBeGreaterThan(help.indexOf("project-dir"));
+      for (let i = 1; i < lines.length; i++) {
+        expect(help.indexOf(lines[i])).toBeGreaterThan(help.indexOf(lines[i - 1]));
+      }
+    });
   });
 
   // T017: no arguments prints usage message (US2)
