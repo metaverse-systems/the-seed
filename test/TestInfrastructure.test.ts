@@ -6,7 +6,10 @@ import * as runChecks from "../scripts/run-checks";
 import { KnownGapEntry, runKnownGap, itKnownGap, staleMessage } from "./helpers/KnownGap";
 import { expectPresent } from "./helpers/Assert";
 import { makeUniversal } from "./helpers/Universal";
-import { checkMachO } from "./helpers/MachOChecker";
+import Signing from "../src/Signing";
+import { readSignedData } from "../src/CmsReader";
+import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
+import { toolEnv } from "./helpers/IndependentCheck";
 
 // Expected shapes of the runner's pure functions, as exercised here:
 //   summariseResults(jest, entries) -> { lines: string[], failed: boolean }
@@ -820,6 +823,90 @@ describe("makeUniversal", () => {
     for (const line of lines) {
       expect(line).not.toMatch(/src\/|MachOChecker/);
       expect(line).toMatch(/["'](fs|path|crypto|os|buffer|node:[a-z]+)["']/);
+    }
+  });
+});
+
+describe("independent checks", () => {
+  // Choices where the contracts leave the shape open:
+  //   - the scope is created in a scratch configuration directory whose config.json names the scope with an author
+  //   - toolEnv returns PATH from the process environment, or "/usr/bin:/bin" when it is unset
+  //   - the sliceSignatureBlobs entries are compared by cputype: x86-64 is 0x01000007, arm64 is 0x0100000c
+  const X86_64 = 0x01000007;
+  const ARM64 = 0x0100000c;
+  const created: string[] = [];
+  let savedHome: string | undefined;
+
+  function tempDir(prefix: string): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    created.push(dir);
+    return dir;
+  }
+
+  function genuine(name: string): Buffer {
+    return fs.readFileSync(rel("test", "fixtures", "binaries", "genuine", name));
+  }
+
+  beforeAll(() => {
+    savedHome = process.env.HOME;
+    process.env.HOME = tempDir("independent-home-");
+  });
+
+  afterAll(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    for (const dir of created) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("sliceSignatureBlobs gives both slices of a signed universal program in table order, each with a parseable container", async () => {
+    const scope = "@infra";
+    const configDir = tempDir("independent-config-");
+    const scopes = { [scope]: { author: { name: "Signer infra", email: "signer@example.com", url: "" } } };
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(configDir, "prefix"), scopes }, null, 2));
+    const signing = new Signing(configDir);
+    await signing.createCert({ validityDays: 365, scope });
+    const file = path.join(tempDir("independent-file-"), "tiny-macho-universal");
+    fs.writeFileSync(file, genuine("tiny-macho-universal"));
+    await signing.signFileMachO(file, scope);
+
+    const entries = sliceSignatureBlobs(fs.readFileSync(file));
+    expect(entries).toHaveLength(2);
+    expect(entries.map((entry) => entry.cputype)).toEqual([X86_64, ARM64]);
+    for (const entry of entries) {
+      expect(entry.codeDirectory.readUInt32BE(0)).toBe(0xfade0c02);
+      expect(entry.cms).not.toBeNull();
+      const info = readSignedData(entry.cms as Buffer);
+      expect(info.signers).toHaveLength(1);
+    }
+  });
+
+  it("sliceSignatureBlobs gives no entry for an unsigned program", () => {
+    expect(sliceSignatureBlobs(genuine("tiny-macho-arm64"))).toEqual([]);
+  });
+
+  it("sliceSignatureBlobs gives one entry with no container for an ad-hoc signed slice", () => {
+    const entries = sliceSignatureBlobs(genuine("tiny-macho-arm64-adhoc"));
+    expect(entries).toHaveLength(1);
+    expect(entries[0].cputype).toBe(ARM64);
+    expect(entries[0].codeDirectory.readUInt32BE(0)).toBe(0xfade0c02);
+    expect(entries[0].cms).toBeNull();
+  });
+
+  it("toolEnv gives exactly PATH, HOME, LC_ALL and TZ", () => {
+    const env = toolEnv("/some/scratch/home");
+    expect(Object.keys(env).sort()).toEqual(["HOME", "LC_ALL", "PATH", "TZ"]);
+    expect(env.HOME).toBe("/some/scratch/home");
+    expect(env.LC_ALL).toBe("C");
+    expect(env.TZ).toBe("UTC");
+    expect(env.PATH).toBe(process.env.PATH ?? "/usr/bin:/bin");
+  });
+
+  it("IndependentCheck imports nothing from the source tree", () => {
+    const source = fs.readFileSync(rel("test", "helpers", "IndependentCheck.ts"), "utf8");
+    const specifiers = [...source.matchAll(/(?:from\s+|require\()\s*["']([^"']+)["']/g)].map((match) => match[1]);
+    expect(specifiers.length).toBeGreaterThan(0);
+    for (const specifier of specifiers) {
+      expect(specifier).not.toMatch(/(^|\/)src(\/|$)/);
     }
   });
 });
