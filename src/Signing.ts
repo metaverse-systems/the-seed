@@ -416,8 +416,9 @@ class Signing {
   }
 
   /**
-   * The scope's private key, checked to be an ECDSA P-256 key matching the scope's certificate.
-   * @throws UnsupportedSigningKey, before anything has been changed
+   * The scope's private key, checked to be an ECDSA P-256 key matching the scope's certificate. Signing calls this
+   * first, so a key the tool cannot sign with is refused before any file is changed.
+   * @throws UnsupportedSigningKey when the key cannot be read, is not ECDSA P-256 or does not match the certificate
    */
   loadSigningKey(scope: string): crypto.KeyObject {
     const keyPath = this.scopeKeyPath(scope);
@@ -470,9 +471,12 @@ class Signing {
   }
 
   /**
-   * Sign a PE file by embedding an Authenticode signature.
-   * Uses native addon for digest computation and embedding.
-   * @throws if file is not a valid PE binary
+   * Sign a PE file by embedding an Authenticode signature in the standard container (CMS SignedData with signed
+   * attributes and a program-image data record) that other Authenticode verifiers accept. The container is built by
+   * buildSignatureContainer; the native addon computes the digest and embeds the result, replacing any earlier
+   * signature. Works for any certificate the scope holds.
+   * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
+   * @throws if file is not a valid PE binary, or UnsupportedSigningKey before any change
    */
   async signFileAuthenticode(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
@@ -520,7 +524,7 @@ class Signing {
     // Embed signature into PE file via native addon
     addon.peEmbedSignature(resolvedPath, Buffer.from(pkcs7Der));
 
-    // Clean up stale .sig file if it exists (FR-021)
+    // Clean up stale .sig file if it exists
     const staleSigPath = resolvedPath + ".sig";
     if (fs.existsSync(staleSigPath)) {
       fs.unlinkSync(staleSigPath);
@@ -537,9 +541,11 @@ class Signing {
   }
 
   /**
-   * Sign a Mach-O file by embedding a code signature.
-   * Handles single-arch and universal (fat) binaries.
-   * @throws if file is not a valid Mach-O binary
+   * Sign a Mach-O file by embedding a code signature whose container is a standard CMS SignedData with signed
+   * attributes over each slice's code directory, built by buildSignatureContainer. Handles single-arch and
+   * universal (fat) binaries; each slice is signed on its own.
+   * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
+   * @throws if file is not a valid Mach-O binary, or UnsupportedSigningKey before any change
    */
   async signFileMachO(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
@@ -607,11 +613,12 @@ class Signing {
   }
 
   /**
-   * Sign an MSI file by embedding an Authenticode signature.
-   * MSI files use OLE Compound Document format; the signature is stored
-   * in the \x05DigitalSignature stream.
-   * Uses native addon for digest computation and embedding.
-   * @throws if file is not a valid MSI/CFBF
+   * Sign an MSI file by embedding an Authenticode signature in the standard container (CMS SignedData with signed
+   * attributes and an installer data record), built by buildSignatureContainer. MSI files use the OLE Compound
+   * Document format; the signature is stored in the \x05DigitalSignature stream by the native addon, which also
+   * computes the package fingerprint. The stored signature is read back and its fingerprint compared.
+   * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
+   * @throws if file is not a valid MSI/CFBF, or UnsupportedSigningKey before any change
    */
   async signFileMsi(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
@@ -683,10 +690,11 @@ class Signing {
   }
 
   /**
-   * Sign a single binary file. Detects format and dispatches to
-   * signFileAuthenticode/signFileMachO/existing detached signing.
-   * @param scope - The scope whose certificate to use for signing
-   * @throws if no certificate, certificate expired (and force=false), or file is not binary
+   * Sign a single binary file. Loads and checks the scope's key first, then detects the format and dispatches to
+   * signFileAuthenticode, signFileMsi or signFileMachO (embedded, standard container) or writes a detached .sig file.
+   * @param options.scope - The scope whose certificate to use for signing
+   * @throws if no certificate, certificate expired (and force=false), file is not binary, or UnsupportedSigningKey
+   * (nothing is changed in that case)
    */
   async signFile(filePath: string, options?: SignOptions): Promise<SignResult> {
     if (!options?.scope) {
@@ -713,7 +721,7 @@ class Signing {
       throw new Error(`File is not binary: ${resolvedPath}`);
     }
 
-    // Check write permission (FR-013)
+    // Check write permission
     try {
       fs.accessSync(resolvedPath, fs.constants.W_OK);
     } catch {
@@ -765,10 +773,12 @@ class Signing {
 
   /**
    * Sign all binary files in a directory. Produces .sig files and the .signatures.json manifest.
-   * Uses format-aware signing per file (v2 manifest with signatureType per entry) and records the files judged
-   * not binary and left unsigned in the manifest's `skipped` list, so that verification can account for them.
-   * @param scope - The scope whose certificate to use for signing
-   * @throws if no certificate or certificate expired (and force=false)
+   * Uses format-aware signing per file (v2 manifest with signatureType per entry; embedded files carry standard
+   * containers) and records the files judged not binary and left unsigned in the manifest's `skipped` list, so that
+   * verification can account for them.
+   * @param options.scope - The scope whose certificate to use for signing
+   * @throws if no certificate or certificate expired (and force=false), or UnsupportedSigningKey before any file is
+   * changed
    */
   async signDirectory(dirPath: string, options?: SignOptions): Promise<DirectorySignResult> {
     if (!options?.scope) {

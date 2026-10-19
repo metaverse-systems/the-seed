@@ -1,7 +1,10 @@
 /**
  * Builds the signature containers the tool writes: a CMS ContentInfo holding SignedData with one signer, in the standard
- * form other verifiers accept, for Windows programs, installers and Mac programs. The functions work on bytes only: the
- * certificate and the signing function are arguments, and nothing is read from files or keys here.
+ * form other verifiers accept, for Windows programs, installers and Mac programs. The structures come from the
+ * @peculiar ASN.1 libraries (no hand-assembled encoding); the signer carries signed attributes (content type and message
+ * digest; the Windows forms add the program description and statement type) and the signature is made over them. A finished container is read
+ * back with CmsReader before it is returned. The functions work on bytes only: the certificate and the signing
+ * function are arguments, and nothing is read from files or keys here.
  */
 import crypto from "crypto";
 import * as asn1js from "asn1js";

@@ -36,6 +36,7 @@ import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
 //     compared (the ECDSA signature is 70 to 72 bytes)
 
 const created: string[] = [];
+const shared: string[] = [];
 let savedHome: string | undefined;
 let home: string;
 let configDir: string;
@@ -68,6 +69,7 @@ beforeAll(async () => {
   home = tempDir("interop-home-");
   process.env.HOME = home;
   configDir = tempDir("interop-config-");
+  shared.push(home, configDir);
   fs.writeFileSync(
     path.join(configDir, "config.json"),
     JSON.stringify({ prefix: path.join(configDir, "prefix"), scopes: { "@ti": { author: { name: "Test Interop", email: "ti@example.com", url: "" } } } }, null, 2)
@@ -75,6 +77,13 @@ beforeAll(async () => {
   signing = new Signing(configDir);
   await signing.createCert({ validityDays: 365, scope: "@ti" });
   certPath = signing.scopeCertPath("@ti");
+});
+
+afterEach(() => {
+  for (const dir of created.splice(0).filter((entry) => !shared.includes(entry))) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  created.push(...shared);
 });
 
 afterAll(() => {
@@ -402,7 +411,7 @@ describe("re-signing", () => {
   }
 
   it("a program signed by osslsigncode: replaced, one signature, passes", async () => {
-    if (!haveTool()) return;
+    if (!haveTool() || !haveOpensslTool()) return;
     const file = osslsigncodeSigned(false);
     const result = await signing.signFile(file, { scope: "@ti" });
     expect(result.warnings).toContain("Replaced existing embedded signature");
@@ -413,7 +422,7 @@ describe("re-signing", () => {
   });
 
   it("a program with a nested signature: replaced by one, no nested warning", async () => {
-    if (!haveTool()) return;
+    if (!haveTool() || !haveOpensslTool()) return;
     const file = osslsigncodeSigned(true);
     expect(osslsigncodeVerify(file, path.join(path.dirname(file), "edge-cert.pem"), home).signatureCount).toBe(2);
 

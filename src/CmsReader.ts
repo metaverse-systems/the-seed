@@ -1,7 +1,8 @@
 /**
- * Reads the CMS SignedData of a signature: the signer certificate and the signer's signature over its signed
- * attributes and content digest. This is the integrity half of trust decisions; whether the signer is trusted is
- * decided in Trust.ts. Unreadable input throws CmsDamaged, a form not handled throws CmsUnsupported.
+ * Reads the CMS SignedData of a signature with the @peculiar ASN.1 libraries: the signer certificate and the signer's
+ * signature over its signed attributes and content digest. Containers in the standard form and the earlier form
+ * (no signed attributes) are both read. This is the integrity half of trust decisions; whether the signer is trusted
+ * is decided in Trust.ts. Unreadable input throws CmsDamaged, a form not handled throws CmsUnsupported.
  */
 import crypto from "crypto";
 import * as asn1js from "asn1js";
