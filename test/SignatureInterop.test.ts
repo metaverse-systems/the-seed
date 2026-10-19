@@ -2,10 +2,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import crypto from "crypto";
+import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
 import { OID, readSignedData } from "../src/CmsReader";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
-import { edgeCaseScope, haveOpenssl, haveOsslsigncode, opensslVerifyDetached, osslsigncodeVerify } from "./helpers/IndependentCheck";
+import { edgeCaseScope, haveOpenssl, haveOsslsigncode, opensslVerifyDetached, osslsigncodeVerify, toolEnv } from "./helpers/IndependentCheck";
 import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
 
 // Choices where the contracts leave the shape open:
@@ -26,6 +27,13 @@ import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
 //   - the tool's verifier is asked only for integrity here (the scopes of the edge-case certificates are not in the configuration, so trust is not asserted)
 //   - tool-independent checks (signer serial bytes, the tool's own verification) run for every fresh certificate even without the external tools
 //   - the changed byte is the first byte of the first section's raw data, found by reading the section table here
+
+//   - re-signing: a program signed by osslsigncode uses a P-256 certificate written by edgeCaseScope (serial 0x0a1b); the nested
+//     signature is added with `osslsigncode sign -nest` on that result, and the case first checks the tool reports two signatures
+//   - re-signing cases sign scratch copies with the scope @ti and name every compared copy alike, so the Mac identifier is the same
+//   - "equals signing the unsigned original once" compares the signed content (Authenticode content value) of programs and
+//     installers, the code directories of Mac slices, and the tool's status, integrity and trust states; file sizes are not
+//     compared (the ECDSA signature is 70 to 72 bytes)
 
 const created: string[] = [];
 let savedHome: string | undefined;
@@ -368,5 +376,142 @@ describe("fresh certificates", () => {
 
   it("20 certificates from createCert: every Mac slice passes openssl", async () => {
     expect(await allPass("mac")).toEqual([]);
+  });
+});
+
+describe("re-signing", () => {
+  function runTool(args: string[]): void {
+    const result = spawnSync("osslsigncode", args, { env: toolEnv(home), encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error("osslsigncode " + args.join(" ") + " failed: " + result.stdout + result.stderr);
+    }
+  }
+
+  /** tiny.exe signed by osslsigncode (and again with -nest when asked) with a fresh openssl certificate. */
+  function osslsigncodeSigned(nested: boolean): string {
+    const dir = tempDir("interop-ossl-");
+    const made = edgeCaseScope(dir, { serialHex: "0a1b" });
+    const first = path.join(dir, "tiny.exe");
+    runTool(["sign", "-certs", made.certPath, "-key", made.keyPath, "-h", "sha256", "-in", fixture("tiny.exe"), "-out", first]);
+    if (!nested) {
+      return first;
+    }
+    const second = path.join(dir, "tiny-nested.exe");
+    runTool(["sign", "-nest", "-certs", made.certPath, "-key", made.keyPath, "-h", "sha256", "-in", first, "-out", second]);
+    return second;
+  }
+
+  it("a program signed by osslsigncode: replaced, one signature, passes", async () => {
+    if (!haveTool()) return;
+    const file = osslsigncodeSigned(false);
+    const result = await signing.signFile(file, { scope: "@ti" });
+    expect(result.warnings).toContain("Replaced existing embedded signature");
+
+    const checked = osslsigncodeVerify(file, certPath, home);
+    expect(checked.signatureCount).toBe(1);
+    expect(checked.passed).toBe(true);
+  });
+
+  it("a program with a nested signature: replaced by one, no nested warning", async () => {
+    if (!haveTool()) return;
+    const file = osslsigncodeSigned(true);
+    expect(osslsigncodeVerify(file, path.join(path.dirname(file), "edge-cert.pem"), home).signatureCount).toBe(2);
+
+    const result = await signing.signFile(file, { scope: "@ti" });
+    expect(result.warnings).toContain("Replaced existing embedded signature");
+
+    const checked = osslsigncodeVerify(file, certPath, home);
+    expect(checked.signatureCount).toBe(1);
+    expect(checked.passed).toBe(true);
+    const verified = await signing.verifyFile(file);
+    expect(verified.status).toBe("VALID");
+    expect(verified.warnings.filter((warning: string) => /nested/i.test(warning))).toEqual([]);
+  });
+
+  it.each(["tiny-osslsig-small.msi", "tiny-osslsig-large.msi", "tiny-osslsig-dse.msi"])("installer sample %s passes after re-signing", async (name) => {
+    const file = path.join(tempDir("interop-resign-msi-"), name);
+    fs.copyFileSync(fixture("genuine", name), file);
+    await signing.signFile(file, { scope: "@ti" });
+
+    expect((addon.msiCheckSignature(file) as { state: string }).state).toBe("matches");
+    if (!haveTool()) return;
+    const result = osslsigncodeVerify(file, certPath, home);
+    expect(result.signatureCount).toBe(1);
+    expect(result.passed).toBe(true);
+  });
+
+  it.each(["tiny-macho-arm64-adhoc", "tiny-macho-x86_64-adhoc", "tiny-macho-universal-adhoc"])("ad-hoc Mac sample %s gets a standard container on every slice", async (name) => {
+    const file = path.join(tempDir("interop-resign-mac-"), name);
+    fs.copyFileSync(fixture("genuine", name), file);
+    await signing.signFile(file, { scope: "@ti" });
+
+    const slices = sliceSignatureBlobs(fs.readFileSync(file));
+    expect(slices).toHaveLength(name === "tiny-macho-universal-adhoc" ? 2 : 1);
+    for (const slice of slices) {
+      expect(slice.cms).not.toBeNull();
+      const attributes = readSignedData(slice.cms as Buffer).signers[0].signedAttributes;
+      expect(attributes).toBeDefined();
+      expect(((attributes as NonNullable<typeof attributes>).messageDigest as Buffer).equals(crypto.createHash("sha256").update(slice.codeDirectory).digest())).toBe(true);
+      if (haveOpensslTool()) {
+        expect(opensslVerifyDetached(slice.cms as Buffer, slice.codeDirectory, certPath, tempDir("interop-openssl-")).passed).toBe(true);
+      }
+    }
+    expect(checkMachO(fs.readFileSync(file)).problems).toEqual([]);
+    expect((await signing.verifyFile(file)).status).toBe("VALID");
+  });
+
+  describe("earlier-form fixtures", () => {
+    const FORMS: Array<{ name: string; original: string[]; kind: "program" | "installer" | "mac" }> = [
+      { name: "tiny.exe", original: ["tiny.exe"], kind: "program" },
+      { name: "tiny.msi", original: ["genuine", "tiny.msi"], kind: "installer" },
+      { name: "tiny-macho-universal", original: ["genuine", "tiny-macho-universal"], kind: "mac" },
+    ];
+
+    /** Copies `source` under `name` into a directory of its own and signs it with @ti. */
+    async function signedFrom(source: string, name: string): Promise<string> {
+      const file = path.join(tempDir("interop-earlier-"), name);
+      fs.copyFileSync(source, file);
+      await signing.signFile(file, { scope: "@ti" });
+      return file;
+    }
+
+    function signedContent(kind: "program" | "installer", file: string): Buffer {
+      const container = (kind === "program" ? addon.peExtractSignature(file) : addon.msiExtractSignature(file)) as Buffer;
+      return readSignedData(container).content as Buffer;
+    }
+
+    it.each(FORMS)("$name, signed again, passes and equals signing the unsigned original once", async ({ name, original, kind }) => {
+      const again = await signedFrom(fixture("earlier-form", name), name);
+      const once = await signedFrom(fixture(...original), name);
+
+      const verdictAgain = await signing.verifyFile(again);
+      const verdictOnce = await signing.verifyFile(once);
+      expect(verdictAgain.status).toBe(verdictOnce.status);
+      expect(verdictAgain.status).toBe("VALID");
+      expect(verdictAgain.integrity.state).toBe(verdictOnce.integrity.state);
+      expect(verdictAgain.trust.state).toBe(verdictOnce.trust.state);
+      expect(verdictAgain.warnings).toEqual(verdictOnce.warnings);
+
+      if (kind === "mac") {
+        const slicesAgain = sliceSignatureBlobs(fs.readFileSync(again));
+        const slicesOnce = sliceSignatureBlobs(fs.readFileSync(once));
+        expect(slicesAgain).toHaveLength(2);
+        expect(slicesAgain.map((slice) => slice.cputype)).toEqual(slicesOnce.map((slice) => slice.cputype));
+        slicesAgain.forEach((slice, index) => {
+          expect(slice.codeDirectory.equals(slicesOnce[index].codeDirectory)).toBe(true);
+          expect(slice.cms).not.toBeNull();
+          if (haveOpensslTool()) {
+            expect(opensslVerifyDetached(slice.cms as Buffer, slice.codeDirectory, certPath, tempDir("interop-openssl-")).passed).toBe(true);
+          }
+        });
+        expect(checkMachO(fs.readFileSync(again)).problems).toEqual([]);
+      } else {
+        expect(signedContent(kind, again).equals(signedContent(kind, once))).toBe(true);
+        if (haveTool()) {
+          expect(osslsigncodeVerify(again, certPath, home).passed).toBe(true);
+          expect(osslsigncodeVerify(once, certPath, home).passed).toBe(true);
+        }
+      }
+    });
   });
 });

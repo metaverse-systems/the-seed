@@ -9,7 +9,7 @@ import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
 import Config from "./Config";
 import { buildSignatureContainer, containerCapacity } from "./CmsBuilder";
-import { NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates, worst } from "./Trust";
+import { EARLIER_FORM_NOTICE_WINDOWS, NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates, worst } from "./Trust";
 import { MachOSliceInfo, checkMachO } from "./MachOVerifier";
 import { CmsDamaged, CmsUnsupported, OID, findSignerCertificate, readSignedData, readSpcDigest, verifySignerSignature } from "./CmsReader";
 import {
@@ -1351,6 +1351,10 @@ class Signing {
 
     // Without signed attributes the tool's own form signs the fingerprint itself and the standard form signs the content
     let outcome = verifySignerSignature(signer, certificate, signer.signedAttributes === undefined ? computed : info.content);
+    if (outcome === "verified" && signer.signedAttributes === undefined) {
+      // Only the tool's earlier form signs the fingerprint itself; other verifiers reject it
+      warnings.push(EARLIER_FORM_NOTICE_WINDOWS);
+    }
     if (outcome === "failed" && signer.signedAttributes === undefined) {
       outcome = verifySignerSignature(signer, certificate, info.content);
     }

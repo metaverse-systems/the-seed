@@ -1,8 +1,10 @@
+import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
 import Signing from "../src/Signing";
 import { SigningManifestFormat } from "../src/types";
+import { EARLIER_FORM_NOTICE_MAC, EARLIER_FORM_NOTICE_WINDOWS } from "../src/Trust";
 import { expectPresent } from "./helpers/Assert";
 import { checkMachO } from "./helpers/MachOChecker";
 
@@ -496,5 +498,88 @@ describe("verifyFile with both kinds of signature and other edge cases", () => {
     fs.writeFileSync(manifest, "{}");
 
     await expect(A.signing.verifyFile(manifest)).rejects.toThrow(`${manifest} is a directory manifest; verify the directory ${tempDir} instead`);
+  });
+});
+
+// Choices where the contracts leave the shape open:
+//   - the outcomes asserted for the earlier-form files are the ones the earlier tool gave for the same files with the same
+//     trust inputs: with the fixture certificate supplied, VALID / intact / trusted; with a scope that holds another certificate,
+//     UNTRUSTED / intact / untrusted (unknown-signer); the notice is the only warning
+//   - the notice texts are compared as whole warning strings, not by matching words
+describe("earlier-form signatures", () => {
+  const EARLIER = path.join(__dirname, "fixtures", "binaries", "earlier-form");
+  const FORMS: Array<{ name: string; notice: string }> = [
+    { name: "tiny.exe", notice: EARLIER_FORM_NOTICE_WINDOWS },
+    { name: "tiny.msi", notice: EARLIER_FORM_NOTICE_WINDOWS },
+    { name: "tiny-macho-universal", notice: EARLIER_FORM_NOTICE_MAC },
+  ];
+  let A: { signing: Signing; configDir: string; scope: string };
+  let dir: string;
+
+  beforeAll(async () => {
+    A = await setupSigning("@A");
+  });
+
+  beforeEach(() => {
+    dir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  afterAll(() => {
+    for (const configDir of configDirs.splice(0)) {
+      fs.rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  function earlierCopy(name: string): string {
+    const file = path.join(dir, name);
+    fs.copyFileSync(path.join(EARLIER, name), file);
+    return file;
+  }
+
+  it.each(FORMS)("$name with the fixture certificate supplied: VALID, intact, trusted, with the notice for its form", async ({ name, notice }) => {
+    const result = await A.signing.verifyFile(earlierCopy(name), { trust: A.signing.loadTrust([path.join(EARLIER, "cert.pem")]) });
+    expect(result.status).toBe("VALID");
+    expect(result.integrity.state).toBe("intact");
+    expect(result.trust.state).toBe("trusted");
+    expect(result.warnings).toEqual([notice]);
+  });
+
+  it.each(FORMS)("$name with only another scope trusted: UNTRUSTED, intact, with the same notice", async ({ name, notice }) => {
+    const result = await A.signing.verifyFile(earlierCopy(name), { trust: A.signing.loadTrust() });
+    expect(result.status).toBe("UNTRUSTED");
+    expect(result.integrity.state).toBe("intact");
+    expect(result.trust.state).toBe("untrusted");
+    expect(result.trust.reason).toBe("unknown-signer");
+    expect(result.warnings).toEqual([notice]);
+  });
+
+  it("the Mac fixture's certificate serial has its top bit set and the signer is still found", async () => {
+    const certificate = new crypto.X509Certificate(fs.readFileSync(path.join(EARLIER, "cert.pem")));
+    expect(parseInt(certificate.serialNumber.slice(0, 2), 16) & 0x80).not.toBe(0);
+
+    const result = await A.signing.verifyFile(earlierCopy("tiny-macho-universal"), { trust: A.signing.loadTrust([path.join(EARLIER, "cert.pem")]) });
+    expect(result.trust.state).toBe("trusted");
+    expect(result.signer).toBeDefined();
+    expect(result.slices).toHaveLength(2);
+    for (const slice of result.slices ?? []) {
+      expect(slice.state).toBe("intact");
+      expect(slice.signerFingerprint).toBeDefined();
+    }
+  });
+
+  it.each(["tiny.exe", "tiny.msi", "tiny-macho-universal"])("%s signed now by the tool carries neither notice", async (name) => {
+    const original = name === "tiny.exe" ? path.join(__dirname, "fixtures", "binaries", name) : path.join(__dirname, "fixtures", "binaries", "genuine", name);
+    const file = path.join(dir, name);
+    fs.copyFileSync(original, file);
+    await A.signing.signFile(file, { scope: A.scope });
+
+    const result = await A.signing.verifyFile(file);
+    expect(result.status).toBe("VALID");
+    expect(result.warnings).not.toContain(EARLIER_FORM_NOTICE_WINDOWS);
+    expect(result.warnings).not.toContain(EARLIER_FORM_NOTICE_MAC);
   });
 });
