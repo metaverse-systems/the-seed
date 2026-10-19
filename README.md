@@ -500,7 +500,7 @@ Nobody has checked a signature produced by this library with the platform's own 
 
 Version 1.10.0 also fixes `_buildMachOCms`, which wrote the signature OCTET STRING length as a single byte; it now uses the DER length encoding, so signatures of 128 bytes or more are no longer malformed. The addon exports `machoComputeCodeDirectory` and `machoEmbedSignature` were removed (they always throw); see `structure.md` for the new exports.
 
-**Windows installers.** `sign` embeds the signature of a `.msi` package into its `\x05DigitalSignature` stream. The package fingerprint is computed by libthe-seed by the rule osslsigncode uses, the signature is written, and the command then reads it back from the finished file: success is reported only when the stored fingerprint equals the package's. A signature whose fingerprint does not belong to the package is refused and the file is left as it was. Signing an already signed installer replaces its signature (the warning "Replaced existing embedded signature" is shown); a stale extended signature stream is dropped. `verify` reports no signature as `NOT_FOUND`, a signature whose fingerprint differs from the package as `INVALID` ("signature present but does not match the package contents"), a signature that cannot be read as `INVALID` ("signature present but could not be read (<detail>)"), and otherwise checks the signature and compares its signer with your trusted certificates (see Verification). An extended signature stream is "present, not checked".
+**Windows installers.** `sign` embeds the signature of a `.msi` package into its `\x05DigitalSignature` stream. The package fingerprint is computed by libthe-seed by the rule osslsigncode uses, the signature is written, and the command then reads it back from the finished file: success is reported only when the stored fingerprint equals the package's. A signature whose fingerprint does not belong to the package is refused and the file is left as it was. Signing an already signed installer replaces its signature (the warning "Replaced existing embedded signature" is shown); a stale extended signature stream is dropped. `verify` reports no signature as `NOT_FOUND`, a signature whose fingerprint differs from the package as `INVALID` ("the file was changed after signing: its fingerprint differs from the one in the signature"), a signature that cannot be read as `INVALID` ("signature present but could not be read (<detail>)"), and otherwise checks the signature and compares its signer with your trusted certificates (see Verification). An extended signature stream is "present, not checked".
 
 What is not checked: certificate chains and revocation, and the cryptographic check of the-seed's own signature container by standard verifiers. That container has no signed attributes: the ECDSA signature is made over the package fingerprint bytes, not over the DER of signed attributes, so osslsigncode reports a failure for the certificate and signature of a package signed by the-seed even when the fingerprint and structure are right. This is a known limitation; the-seed makes no claim about how Windows or standard verifiers treat its own installer signatures.
 
@@ -538,7 +538,7 @@ What is checked, by form:
 * **Installer** (`.msi`): the fingerprint in the `\x05DigitalSignature` stream against the package, and the signature with the signer's key.
 * **Mac program**: every page fingerprint of every slice and the special slots, and the signature over the code directory, with a line for each slice.
 
-When a file has both an embedded and a detached signature, both are checked and the worse result is the headline.
+When a file has both an embedded and a detached signature, both are checked and the worse result is the headline. A Mac program or installer that is recognised but whose structure cannot be read, for example one cut short inside its signature, is `INVALID` with the reason the native component gives, not `NOT_FOUND`.
 
 **Trusted certificates.** By default the trusted certificates are the certificates of your configured scopes. `--cert <file>` (PEM with one or more certificates, or DER; may be repeated) replaces them with the certificates in the named files. A signer is trusted when its SHA-256 fingerprint equals that of a trusted certificate. Without any trusted certificate nothing is trusted, and the report says to create one with `the-seed signing create-cert` or to name one with `--cert`.
 
@@ -582,7 +582,7 @@ Manifest version 2 example:
 }
 ```
 
-`skipped` lists files that were judged not to be binaries and left unsigned. Directory verification checks that the manifest's certificate is trusted and matches the fingerprint the manifest records, that each file's signer equals it, the recorded fingerprint for embedded entries, that every listed file is present and valid, that files not in the manifest fail (links inside the directory that point to listed files are reported, not failed; skipped files are reported as present but not signed, with contents not checked), and that the result is the worst of these. Manifests written by earlier versions (version 1) still verify and are reported as the earlier format.
+`skipped` lists files that were judged not to be binaries and left unsigned. Directory verification checks that the manifest's certificate is trusted and matches the fingerprint the manifest records, that each file's signer equals it, the recorded fingerprint for embedded entries, that every listed file is present and valid, that files not in the manifest fail (links inside the directory that point to listed files are reported, not failed; skipped files are reported as present but not signed, with contents not checked), and that the result is the worst of these. A listed file whose detached signature file is gone is reported as missing, naming the signature file. The command prints `Result: PASS` (exit status 0), `Result: NOT TRUSTED` (4: nothing failed but the manifest's certificate is not trusted) or `Result: FAIL` (1), with the number of files in each outcome. Manifests written by earlier versions (version 1) still verify and are reported as the earlier format.
 
 ### installer
 
@@ -832,7 +832,8 @@ interface IntegrityResult {
 interface TrustResult {
   state: "trusted" | "untrusted" | "not-applicable";
   anchor?: TrustAnchor;   // set when trusted
-  message?: string;       // set when untrusted
+  reason?: "unknown-signer" | "no-signer" | "no-trusted-certificates";   // set when untrusted
+  message?: string;       // the sentence printed when untrusted
 }
 
 interface VerifyOptions {

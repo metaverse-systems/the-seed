@@ -38,6 +38,9 @@ import {
   VerifyStatus,
 } from "./types";
 
+/** The reason given for a listed file that is not in the directory. */
+export const MISSING_FILE_REASON = "the file is missing";
+
 // Result of reading an installer signature back from the package
 interface MsiSignatureCheck {
   state: "none" | "matches" | "mismatch" | "unreadable";
@@ -1343,6 +1346,10 @@ class Signing {
       let hasEmbedded = false;
       try {
         format = addon.detectBinaryFormat(resolvedPath).format;
+      } catch {
+        // Unreadable by the native component: fall through to the detached check
+      }
+      try {
         if (format === "pe") {
           hasEmbedded = addon.peHasEmbeddedSignature(resolvedPath);
         } else if (format === "macho") {
@@ -1352,7 +1359,9 @@ class Signing {
           hasEmbedded = addon.msiHasEmbeddedSignature(resolvedPath);
         }
       } catch {
-        // Unreadable by the native component: fall through to the detached check
+        // A program or installer whose structure cannot be read may hold a damaged signature: the form's own
+        // verifier reports it as invalid with the native component's reason, rather than as unsigned
+        hasEmbedded = true;
       }
       if (hasEmbedded) {
         if (format === "pe") {
@@ -1963,7 +1972,7 @@ class Signing {
     const sigPath = filePath + ".sig";
     try {
       if (!fs.existsSync(filePath)) {
-        return fail("NOT_FOUND", "the file is missing", "none");
+        return fail("NOT_FOUND", MISSING_FILE_REASON, "none");
       }
       if (this._resolvesOutside(realDir, filePath) || (fs.existsSync(sigPath) && this._resolvesOutside(realDir, sigPath))) {
         return fail("INVALID", outside);
@@ -1973,6 +1982,24 @@ class Signing {
     }
 
     const embedded = entry.signatureType === "embedded";
+    try {
+      return await this._checkManifestEntry(filePath, sigPath, entry, embedded, manifestOnly, manifestTrust, fail);
+    } catch (err) {
+      return fail("INVALID", `the entry could not be verified (${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+
+  /** The checks of one manifest entry whose path has been found to stay inside the directory. */
+  async _checkManifestEntry(
+    filePath: string,
+    sigPath: string,
+    entry: SigningManifestEntry,
+    embedded: boolean,
+    manifestOnly: TrustedCertificates,
+    manifestTrust: TrustResult,
+    fail: (status: VerifyStatus, reason: string, integrityState?: "invalid" | "none") => DirectoryFileResult
+  ): Promise<DirectoryFileResult> {
+    const relativePath = entry.path;
     const verified = embedded ? await this.verifyFile(filePath, { trust: manifestOnly }) : await this._verifyFileDetached(filePath, { trust: manifestOnly });
 
     // The signer against the manifest's certificate
@@ -1999,6 +2026,9 @@ class Signing {
     }
 
     const result: DirectoryFileResult = { ...verified, relativePath, signerMatchesManifest, recordedValueMatches };
+    if (verified.status === "NOT_FOUND" && !embedded) {
+      return fail("NOT_FOUND", `the signature file ${entry.signatureFile ?? path.basename(sigPath)} is missing`, "none");
+    }
     if (verified.status === "NOT_FOUND") {
       const reason = `no signature found, although the manifest lists one (${verified.reason ?? "none present"})`;
       return { ...result, status: "INVALID", reason, integrity: { state: "invalid", reason, checked: [] } };

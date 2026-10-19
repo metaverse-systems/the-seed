@@ -7,7 +7,7 @@ import { expectPresent } from "./helpers/Assert";
 // Directory verification against the manifest. One configuration (scope @ta) signs and verifies
 // everything here; every directory is created under os.tmpdir() and removed afterwards.
 //
-// Choices where the contracts leave a detail open (the implementation matches these):
+// Details these tests fix:
 //   - a result's relativePath is the entry's path as written in the manifest
 //   - `links[].target` is the link's target as a path relative to the directory, with "/" separators
 //     (for a link made with a relative target in the same directory, just that name)
@@ -309,6 +309,39 @@ describe("verifyDirectory", () => {
     expect(result.counts.valid).toBe(2);
     expect(result.status).not.toBe("VALID");
     expect(result.status).not.toBe("UNTRUSTED");
+  });
+
+  it("reports a listed file whose detached signature file is missing as missing, naming the signature file", async () => {
+    await signing.signDirectory(dir, { scope: "@ta" });
+    fs.rmSync(path.join(dir, "lib", "b.bin.sig"));
+
+    const result = await signing.verifyDirectory(dir);
+    const entry = expectPresent(
+      result.results.find((candidate) => candidate.relativePath === "lib/b.bin"),
+      "lib/b.bin result"
+    );
+    expect(entry.status).toBe("NOT_FOUND");
+    expect(entry.reason).toContain("lib/b.bin.sig");
+    expect(result.counts.missing).toBe(1);
+    expect(result.counts.invalid).toBe(0);
+    expect(result.status).toBe("NOT_FOUND");
+  });
+
+  it("reports an entry that is a directory as invalid instead of failing the whole check", async () => {
+    await signing.signDirectory(dir, { scope: "@ta" });
+    fs.mkdirSync(path.join(dir, "folder"));
+    const manifest = readManifest(dir);
+    manifest.files.push({ path: "folder", signatureFile: null, algorithm: "SHA256", signature: "", signatureType: "embedded" });
+    writeManifest(dir, manifest);
+
+    const result = await signing.verifyDirectory(dir);
+    const entry = expectPresent(
+      result.results.find((candidate) => candidate.relativePath === "folder"),
+      "folder result"
+    );
+    expect(entry.status).toBe("INVALID");
+    expect(result.status).toBe("INVALID");
+    expect(result.counts.valid).toBe(3);
   });
 
   describe("a malformed manifest", () => {

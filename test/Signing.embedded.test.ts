@@ -985,7 +985,7 @@ describe("tampered and mismatched installers are never reported signed (real add
       expect(result.signer?.subject.commonName).toBe("sample-check");
       expect(result.reason).not.toMatch(/does not match the package contents/);
 
-      if (optionalExternalCheck("openssl pkcs7 -print_certs", spawnSync("openssl", ["version"]).status === 0, "openssl not found")) {
+      if (optionalExternalCheck("openssl pkcs7 -print_certs", spawnSync("openssl", ["version"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).status === 0, "openssl not found")) {
         const certFile = path.join(tempDir, name + ".cert.pem");
         const signatureFile = path.join(tempDir, name + ".p7");
         fs.writeFileSync(signatureFile, loadAddon().msiExtractSignature(file) as Buffer);
@@ -1051,7 +1051,7 @@ describe("tampered and mismatched installers are never reported signed (real add
 });
 
 describe("signatures made by other tools (real addon, openssl and osslsigncode)", () => {
-  // Choices where the contracts leave the wording open (the implementation matches these):
+  // Wording these tests fix:
   //   - a Windows program or installer whose stored fingerprint differs from the file's:
   //       reason contains "the file was changed after signing: its fingerprint differs from the one in the signature"
   //   - an installer with an extended signature stream (\u0005MsiDigitalSignatureEx):
@@ -1075,7 +1075,7 @@ describe("signatures made by other tools (real addon, openssl and osslsigncode)"
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  const haveTools = (): boolean => spawnSync("openssl", ["version"]).status === 0 && spawnSync("osslsigncode", ["--version"]).status === 0;
+  const haveTools = (): boolean => spawnSync("openssl", ["version"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).status === 0 && spawnSync("osslsigncode", ["--version"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).status === 0;
 
   /** Runs a tool with an explicit environment, in the scratch directory. */
   function run(command: string, args: string[]): void {

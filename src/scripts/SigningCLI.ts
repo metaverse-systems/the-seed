@@ -1,6 +1,6 @@
 import path from "path";
 import inquirer from "inquirer";
-import Signing from "../Signing";
+import Signing, { MISSING_FILE_REASON } from "../Signing";
 import Config from "../Config";
 import { exitStatusOf } from "../Trust";
 import { IntegrityResult, MachOSliceResult, ScriptArgsType, TrustResult, VerifyResult, VerifyStatus } from "../types";
@@ -440,7 +440,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           for (const r of result.results) {
             const word = headlines[r.status] ?? r.status;
             if (r.status === "NOT_FOUND") {
-              console.log(row(word, r.relativePath));
+              console.log(row(word, r.reason === MISSING_FILE_REASON || !r.reason ? r.relativePath : `${r.relativePath} — ${r.reason}`));
             } else if (r.status === "VALID" || r.status === "UNTRUSTED") {
               console.log(row(word, `${r.relativePath} (${formLabels[r.form ?? "detached"] ?? r.form}; signer matches the manifest)`));
             } else {

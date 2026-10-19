@@ -347,7 +347,7 @@ const OPAQUE_DATA = Buffer.from([0x6f, 0x70, 0x61, 0x71, 0x75, 0x65, 0x00, 0x00,
 
 // ── both signatures and other edge cases ─────────────────────
 //
-// Wording chosen where the contracts leave it open:
+// Wording these tests fix:
 //   - the stale detached signature reason contains "stale detached signature"
 //   - the warning for a file with both kinds contains the word "both"
 //   - the native component reason contains "native component"
@@ -472,8 +472,8 @@ describe("verifyFile with both kinds of signature and other edge cases", () => {
       expect(result.reason).toMatch(/native component/i);
     });
 
-    it("a text file with a detached signature still verifies", async () => {
-      const file = path.join(tempDir, "notes.txt");
+    it("a binary file in no known program format still verifies by its detached signature without the native component", async () => {
+      const file = path.join(tempDir, "opaque.dat");
       fs.writeFileSync(file, OPAQUE_DATA);
       await A.signing.signFile(file, { scope: "@ta", detached: true });
 
@@ -484,7 +484,7 @@ describe("verifyFile with both kinds of signature and other edge cases", () => {
   });
 
   it("refuses a .sig path whose file exists, naming the file to verify instead", async () => {
-    const file = path.join(tempDir, "notes.txt");
+    const file = path.join(tempDir, "opaque.dat");
     fs.writeFileSync(file, OPAQUE_DATA);
     await A.signing.signFile(file, { scope: "@ta", detached: true });
 

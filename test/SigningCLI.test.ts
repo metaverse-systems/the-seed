@@ -10,13 +10,13 @@ import { makeUniversal } from "./helpers/Universal";
 // The verify command, run through runCli with a scratch configuration directory and a scratch HOME.
 // Two configurations are used: A (scope @ta) and B (scope @tb). The command's status is the first
 // status passed to process.exit, or 0 when it never calls it. Usage errors are written to stderr
-// as "Error: <text>"; wherever the contract leaves the wording open, the tests below fix it:
+// as "Error: <text>"; the tests below fix the wording:
 //   - a --cert without a value:  "Error: --cert needs a file"  followed by the usage line
 //   - an unknown option:         "Error: Unknown option <option>"  followed by the usage line
 //   - the usage line:            "Usage: the-seed signing verify [--cert <file>]... <path>"
-// Directory report (choices where the contract leaves a form open):
+// Directory report (forms these tests fix):
 //   - each per-file line is two spaces, the headline word padded with spaces to 17 characters, then
-//     the text (the contract's example lines have the text starting in the same column)
+//     the text (so the text of every line starts in the same column)
 //   - the em dash " — " separates a path from its reason
 //   - the "Verifying directory:" line shows the path as given on the command line
 //   - a missing listed file prints "MISSING" and its path with no reason
@@ -239,6 +239,16 @@ describe("signing verify <directory>", () => {
     expect(withCert.out).toContain("  Result: PASS");
   });
 
+  it("exits 1 and prints MISSING with the signature file named when a listed file's detached signature is gone", async () => {
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    fs.rmSync(path.join(dir, "lib", "b.bin.sig"));
+
+    const run = await runVerify([dir], A.configDir, home);
+    expect(run.status).toBe(1);
+    expect(run.out.split("\n")).toContain(line("MISSING", "lib/b.bin — the signature file lib/b.bin.sig is missing"));
+    expect(run.out).toContain("  Result: FAIL (valid 2, untrusted 0, invalid 0, not fully signed 0, not checked 0, missing 1, unlisted 0; skipped 0)");
+  });
+
   it("exits 1 and prints INVALID, MISSING, UNLISTED, LINK and SKIPPED lines with the counts for a directory that has changed", async () => {
     const outside = path.join(root, "outside.bin");
     fs.writeFileSync(outside, Buffer.from([0, 1, 2, 3]));
@@ -358,7 +368,7 @@ describe("signing verify <directory>", () => {
 const OPAQUE_DATA = Buffer.from([0x6f, 0x70, 0x61, 0x71, 0x75, 0x65, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0xff, 0xfe, 0x0a]);
 
 describe("signing verify <file>", () => {
-  // Choices where the contract leaves a form open:
+  // Forms these tests fix:
   //   - a Mac program's "Slice <arch>:" labels are padded with spaces to the width of the longest label
   //     plus one space, so the states line up ("Slice x86_64: intact", "Slice arm64:  intact")
   //   - with both kinds of signature, "Form:" reads "<program form> (embedded) and detached (<file name>.sig)"
@@ -465,7 +475,7 @@ describe("signing verify <file>", () => {
     });
 
     it("exits 3 for a .sig path, naming the file to verify instead, and prints no report", async () => {
-      const file = path.join(dir, "notes.txt");
+      const file = path.join(dir, "opaque.dat");
       fs.writeFileSync(file, OPAQUE_DATA);
       await A.signing.signFile(file, { scope: "@ta", detached: true });
       const run = await runVerify([file + ".sig"], A.configDir, home);
@@ -546,12 +556,12 @@ describe("signing verify <file>", () => {
     });
 
     it("prints a detached file's form with its signature file name", async () => {
-      const file = path.join(dir, "notes.txt");
+      const file = path.join(dir, "opaque.dat");
       fs.writeFileSync(file, OPAQUE_DATA);
       await A.signing.signFile(file, { scope: "@ta", detached: true });
       const run = await runVerify([file], A.configDir, home);
       expect(run.status).toBe(0);
-      expect(run.out).toMatch(/^ {2}Form: {8}detached \(.*notes\.txt\.sig\)$/m);
+      expect(run.out).toMatch(/^ {2}Form: {8}detached \(.*opaque\.dat\.sig\)$/m);
     });
 
     it("prints every warning of the result, here the one for a file with both kinds of signature", async () => {
@@ -633,8 +643,8 @@ describe("signing verify <file>", () => {
 });
 
 // The help text, run through runCli with a scratch configuration directory and a scratch HOME.
-// Choices where the contract leaves the form open:
-//   - the paragraph is printed with the line breaks of the contract's example, after the command list;
+// Form these tests fix:
+//   - the paragraph is printed with the line breaks the help text uses, after the command list;
 //     the test compares it with whitespace collapsed, so only the words and their order are fixed
 //   - the usage line in the "Commands:" list shows "the-seed signing verify [--cert <file>]... <path>"
 describe("signing help", () => {

@@ -110,6 +110,20 @@ describe("Mac program", () => {
     expect(expectPresent(result.slices, "slices")[0].state).toBe("invalid");
   });
 
+  it("a signed program cut short in its signature is invalid with a reason, never reported as unsigned", async () => {
+    const file = copyGenuine("tiny-macho-arm64", dir);
+    await A.signing.signFileMachO(file, "@ta");
+    const signed = fs.readFileSync(file);
+    fs.writeFileSync(file, signed.subarray(0, signed.length - 100));
+
+    const result = await A.signing.verifyFile(file);
+    expect(result.status).toBe("INVALID");
+    expect(result.form).toBe("mac-program");
+    expect(result.integrity.state).toBe("invalid");
+    expect(result.integrity.reason).toMatch(/extends past the end of the file/);
+    expect(result.trust.state).toBe("not-applicable");
+  });
+
   it("an unchanged signed program is valid and shows its signer and each slice", async () => {
     const fingerprint = expectPresent(A.signing.getCertInfo("@ta"), "A").fingerprint;
     for (const name of ["tiny-macho-arm64", "tiny-macho-universal"]) {

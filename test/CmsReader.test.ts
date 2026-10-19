@@ -302,7 +302,7 @@ describe("installers signed by osslsigncode (genuine samples)", () => {
 // ── a program signed by osslsigncode with an openssl ECDSA certificate ──
 
 describe("a Windows program signed by osslsigncode with an ECDSA certificate", () => {
-  const haveTools = (): boolean => spawnSync("openssl", ["version"]).status === 0 && spawnSync("osslsigncode", ["--version"]).status === 0;
+  const haveTools = (): boolean => spawnSync("openssl", ["version"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).status === 0 && spawnSync("osslsigncode", ["--version"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).status === 0;
 
   /** Runs a tool with an explicit environment, in the scratch directory. */
   function run(dir: string, command: string, args: string[]): void {

@@ -16,7 +16,7 @@ import { optionalExternalCheck } from "./helpers/ExternalTools";
 // genuine fixtures signed with a scratch certificate. The independent checker of the test helpers is
 // the second opinion for the agreement cases.
 //
-// Choices where the contracts leave the wording open (the implementation matches these):
+// Wording these tests fix:
 //   - a page that does not match:        reason contains "slice <arch>: page <n> fingerprint does not match"
 //   - signature over the code directory:  reason contains "signature over the code directory does not verify"
 //   - special slot that does not match:   reason contains "special slot <n>"
@@ -510,10 +510,10 @@ describe("agreement with the independent checker", () => {
 describe("standard signed-attribute signatures made by openssl", () => {
   // The CodeDirectory of the arm64 sample is prepared with the library (capacity 4096), signed by
   // `openssl cms -sign -binary -md sha256` (DER, detached, with signed attributes), and the result is put in
-  // with machoCompleteSignature. Choices where the contracts leave the wording open (the implementation matches these):
+  // with machoCompleteSignature. Wording these tests fix:
   //   - a signature algorithm the verifier does not implement (RSA-PSS): the program's integrity is `not-checked`
   //     with a reason containing "unsupported signature algorithm"; the slice is `not-checked` too
-  const haveOpenssl = (): boolean => spawnSync("openssl", ["version"]).status === 0;
+  const haveOpenssl = (): boolean => spawnSync("openssl", ["version"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).status === 0;
 
   function run(dir: string, args: string[]): void {
     const result = spawnSync("openssl", args, {

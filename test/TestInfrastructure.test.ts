@@ -726,7 +726,7 @@ describe("command line", () => {
 });
 
 describe("makeUniversal", () => {
-  // Choices where the helper's contract is open: the result is a 32-bit table (magic 0xcafebabe)
+  // What these tests fix about the helper: the result is a 32-bit table (magic 0xcafebabe)
   // with one 20-byte entry per slice in the order given (cpu type, cpu subtype, offset, size, align,
   // all big-endian), the first slice at the first multiple of 2^align after the table, each next
   // slice at the next multiple after the previous one, and zero bytes between them.
