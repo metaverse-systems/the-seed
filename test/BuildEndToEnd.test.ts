@@ -905,12 +905,31 @@ describe("BuildEndToEnd", () => {
     it("building twice leaves one valid signature and the same size (windows)", async () => {
       if (!optionalExternalCheck("build-end-to-end", toolsAvailable && mingwAvailable, mingwReason)) return;
       const files = () => [...windowsFiles(), buildTreeProgram("tiny.exe")];
+      // A DER ECDSA signature is 70 to 72 bytes, so the signed files may differ in size by the table's alignment;
+      // the size that must not change is that of the file with its signature removed, and a second signature must not be added
+      const unsignedSizes = (): number[] => {
+        const copyDir = fs.mkdtempSync(path.join(root, "unsigned-"));
+        try {
+          return files().map((file) => {
+            const copy = path.join(copyDir, file.replace(/[^A-Za-z0-9.]/g, "_"));
+            fs.copyFileSync(file, copy);
+            expect([file, signing.removeEmbeddedSignature(copy)]).toEqual([file, true]);
+            expect([file, signing.removeEmbeddedSignature(copy)]).toEqual([file, false]);
+            return fs.statSync(copy).size;
+          });
+        } finally {
+          fs.rmSync(copyDir, { recursive: true, force: true });
+        }
+      };
 
       expect(await fullBuild("windows", true)).toEqual({ status: "completed" });
       const sizes = files().map((file) => fs.statSync(file).size);
+      const bare = unsignedSizes();
       expect(await fullBuild("windows", true)).toEqual({ status: "completed" });
 
-      expect(files().map((file) => fs.statSync(file).size)).toEqual(sizes);
+      expect(unsignedSizes()).toEqual(bare);
+      const after = files().map((file) => fs.statSync(file).size);
+      after.forEach((size, index) => expect(Math.abs(size - sizes[index])).toBeLessThanOrEqual(8));
       for (const file of windowsFiles()) {
         await expectValid(file, "embedded");
         expect([file, fs.existsSync(file + ".sig")]).toEqual([file, false]);

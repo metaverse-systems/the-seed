@@ -8,6 +8,7 @@ import { pipeline } from "stream/promises";
 import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
 import Config from "./Config";
+import { buildSignatureContainer } from "./CmsBuilder";
 import { NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates, worst } from "./Trust";
 import { MachOSliceInfo, checkMachO } from "./MachOVerifier";
 import { CmsDamaged, CmsUnsupported, OID, findSignerCertificate, readSignedData, readSpcDigest, verifySignerSignature } from "./CmsReader";
@@ -445,20 +446,16 @@ class Signing {
     // Compute Authenticode digest via native addon
     const digestResult = addon.peComputeDigest(resolvedPath);
 
-    // Build CMS/PKCS#7 Authenticode SignedData
+    // Build the standard-form container over the file's Authenticode digest
     const certPem = fs.readFileSync(certPath, "utf-8");
     const keyPem = fs.readFileSync(keyPath, "utf-8");
     const privateKey = crypto.createPrivateKey(keyPem);
-
-    // Sign the digest with ECDSA-SHA256
-    const sign = crypto.createSign("SHA256");
-    sign.update(digestResult.digest);
-    const signature = sign.sign(privateKey);
-
-    // Build a minimal CMS SignedData (DER-encoded) wrapping the Authenticode digest
-    // For Authenticode, we use SpcIndirectDataContent OID 1.3.6.1.4.1.311.2.1.4
-    // Simplified: embed raw signature + cert as PKCS#7 structure
-    const pkcs7Der = this._buildAuthenticodeCms(digestResult.digest, signature, certPem);
+    const certDer = Buffer.from(new x509.X509Certificate(certPem).rawData);
+    const pkcs7Der = buildSignatureContainer(
+      { kind: "windows-program", fingerprint: Buffer.from(digestResult.digest) },
+      certDer,
+      (data) => crypto.sign("sha256", data, privateKey),
+    );
 
     // Embed signature into PE file via native addon
     addon.peEmbedSignature(resolvedPath, Buffer.from(pkcs7Der));
