@@ -4,6 +4,7 @@ import path from "path";
 import Signing from "../src/Signing";
 import { SigningManifestFormat } from "../src/types";
 import { expectPresent } from "./helpers/Assert";
+import { checkMachO } from "./helpers/MachOChecker";
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "signing-verify-test-"));
@@ -101,6 +102,19 @@ describe("verifyFile (embedded auto-detection)", () => {
     const result = await signing.verifyFile(machoFile);
     expect(result.status).toBe("VALID");
     expect(result.signatureType).toBe("embedded");
+    expect(result.form).toBe("mac-program");
+    expect(result.integrity.state).toBe("intact");
+    // The page count comes from the independent checker, not from the code under test
+    const pages = checkMachO(fs.readFileSync(machoFile)).slices[0].pagesChecked;
+    expect(pages).toBeGreaterThan(0);
+    const slices = expectPresent(result.slices, "slices");
+    expect(slices).toHaveLength(1);
+    expect(slices[0].state).toBe("intact");
+    expect(slices[0].codeDirectories[0].pages).toBe(pages);
+    expect(slices[0].codeDirectories[0].pagesMismatched).toBe(0);
+    expect(expectPresent(result.signer, "signer").fingerprint).toBe(expectPresent(signing.getCertInfo(scope), "certificate").fingerprint);
+    expect(result.trust.state).toBe("trusted");
+    expect(result.trust.anchor).toMatchObject({ source: "scope", scope: "@test" });
   });
 
   it("warns when both embedded and detached signatures exist (FR-008)", async () => {
@@ -228,6 +242,13 @@ describe("verifyFileMachO", () => {
     const result = await signing.verifyFileMachO(machoFile);
     expect(result.status).toBe("VALID");
     expect(result.signatureType).toBe("embedded");
+    const slices = expectPresent(result.slices, "slices");
+    expect(slices.length).toBeGreaterThan(0);
+    for (const slice of slices) {
+      expect(slice.state).toBe("intact");
+    }
+    expect(expectPresent(result.signer, "signer").fingerprint).toBe(expectPresent(signing.getCertInfo(scope), "certificate").fingerprint);
+    expect(result.trust.state).toBe("trusted");
   });
 
   it("returns invalid for an unsigned Mach-O file", async () => {

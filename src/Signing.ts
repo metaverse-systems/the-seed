@@ -8,7 +8,8 @@ import { pipeline } from "stream/promises";
 import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
 import Config from "./Config";
-import { certificateFingerprint, readCertificates } from "./Trust";
+import { NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates } from "./Trust";
+import { MachOSliceInfo, checkMachO } from "./MachOVerifier";
 import {
   CertInfo,
   CertOptions,
@@ -27,6 +28,11 @@ import {
   MachOPreparedSignature,
   TrustedCertificates,
   TrustAnchor,
+  TrustResult,
+  IntegrityResult,
+  MachOSliceResult,
+  SignatureForm,
+  VerifyOptions,
 } from "./types";
 
 // Result of reading an installer signature back from the package
@@ -35,19 +41,6 @@ interface MsiSignatureCheck {
   storedDigest: Buffer;
   computedDigest: Buffer;
   detail: string;
-}
-
-// One entry of a Mac program's slice table, as the native component lists it
-export interface MachOSliceInfo {
-  cpuType: number;
-  cpuSubtype: number;
-  offset: number;
-  size: number;
-  isSigned: boolean;
-  signatureOffset: number; // relative to the slice
-  signatureSize: number;
-  supported: boolean;
-  unsupportedReason: string;
 }
 
 // Native addon interface for binary signing operations
@@ -1243,16 +1236,74 @@ class Signing {
   }
 
   /**
+   * Assemble a file verification result: the integrity found by the form's check, trust evaluated against the
+   * given certificates when a signer is known, and the status derived from the two.
+   * `signerDer` is undefined when the signer is not known (nothing readable), null for a signature without a signer.
+   */
+  _buildVerifyResult(
+    filePath: string,
+    form: SignatureForm,
+    signatureType: SignatureType,
+    integrity: IntegrityResult,
+    signerDer: Buffer | null | undefined,
+    trust: TrustedCertificates,
+    extra: { slices?: MachOSliceResult[]; warnings?: string[]; notChecked?: string[] } = {}
+  ): VerifyResult {
+    let trustResult: TrustResult = { state: "not-applicable" };
+    if (integrity.state === "intact" || (integrity.state === "invalid" && signerDer !== undefined)) {
+      trustResult = evaluateTrust(signerDer ?? null, trust);
+    }
+    const status = outcomeOf(integrity, trustResult);
+    const result: VerifyResult = {
+      filePath,
+      status,
+      form,
+      signatureType,
+      integrity,
+      trust: trustResult,
+      warnings: [...trust.warnings, ...(extra.warnings ?? [])],
+      notChecked: [...NOT_CHECKED_ALWAYS, ...(extra.notChecked ?? [])],
+    };
+    if (status === "UNTRUSTED") {
+      result.reason = trustResult.message;
+    } else if (status !== "VALID") {
+      result.reason = integrity.reason;
+    }
+    if (signerDer) {
+      result.signer = this._buildSignerInfo(new crypto.X509Certificate(signerDer));
+    }
+    if (extra.slices !== undefined) {
+      result.slices = extra.slices;
+    }
+    return result;
+  }
+
+  /** A result for a file that has no signature of the form asked for. */
+  _buildNotFoundResult(filePath: string, reason: string, trust: TrustedCertificates): VerifyResult {
+    return {
+      filePath,
+      status: "NOT_FOUND",
+      reason,
+      integrity: { state: "none", reason, checked: [] },
+      trust: { state: "not-applicable" },
+      warnings: [...trust.warnings],
+      notChecked: [...NOT_CHECKED_ALWAYS],
+    };
+  }
+
+  /**
    * Verify a single file's signature.
    * Checks for embedded signature first (PE/Mach-O/MSI), falls back to detached .sig.
    * Warns if both embedded and detached exist (FR-008).
+   * Trust is evaluated against options.trust, or the certificates of the configured scopes.
    */
-  async verifyFile(filePath: string): Promise<VerifyResult> {
+  async verifyFile(filePath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const resolvedPath = path.resolve(filePath);
     if (!fs.existsSync(resolvedPath)) {
       throw new Error(`File not found: ${resolvedPath}`);
     }
 
+    const resolvedOptions: VerifyOptions = { trust: options?.trust ?? this.loadTrust() };
     const warnings: string[] = [];
     const detection = this.detectBinaryFormat(resolvedPath);
 
@@ -1263,7 +1314,8 @@ class Signing {
       if (detection.format === "pe") {
         hasEmbedded = addon.peHasEmbeddedSignature(resolvedPath);
       } else if (detection.format === "macho") {
-        hasEmbedded = addon.machoHasEmbeddedSignature(resolvedPath);
+        // Any signed slice makes the signature embedded; a program whose slices are all unsigned has none
+        hasEmbedded = addon.machoListSlices(resolvedPath).some((slice) => slice.isSigned);
       } else if (detection.format === "msi") {
         hasEmbedded = addon.msiHasEmbeddedSignature(resolvedPath);
       }
@@ -1281,61 +1333,46 @@ class Signing {
 
     // Prefer embedded if present
     if (hasEmbedded) {
+      let result: VerifyResult | undefined;
       if (detection.format === "pe") {
-        const result = await this.verifyFileAuthenticode(resolvedPath);
-        if (warnings.length > 0) {
-          result.warnings = [...(result.warnings || []), ...warnings];
-        }
-        return result;
+        result = await this.verifyFileAuthenticode(resolvedPath, resolvedOptions);
       } else if (detection.format === "macho") {
-        const result = await this.verifyFileMachO(resolvedPath);
-        if (warnings.length > 0) {
-          result.warnings = [...(result.warnings || []), ...warnings];
-        }
-        return result;
+        result = await this.verifyFileMachO(resolvedPath, resolvedOptions);
       } else if (detection.format === "msi") {
-        const result = await this.verifyFileMsi(resolvedPath);
-        if (warnings.length > 0) {
-          result.warnings = [...(result.warnings || []), ...warnings];
-        }
+        result = await this.verifyFileMsi(resolvedPath, resolvedOptions);
+      }
+      if (result !== undefined) {
+        result.warnings = [...result.warnings, ...warnings];
         return result;
       }
     }
 
     // Fall back to detached .sig verification
-    return this._verifyFileDetached(resolvedPath);
+    return this._verifyFileDetached(resolvedPath, resolvedOptions);
   }
 
   /**
    * Verify a detached .sig file (original behavior).
    */
-  async _verifyFileDetached(resolvedPath: string): Promise<VerifyResult> {
+  async _verifyFileDetached(resolvedPath: string, options?: VerifyOptions): Promise<VerifyResult> {
+    const trust = options?.trust ?? this.loadTrust();
     const sigPath = resolvedPath + ".sig";
     if (!fs.existsSync(sigPath)) {
-      return {
-        filePath: resolvedPath,
-        status: "NOT_FOUND",
-        reason: `No signature file found (${sigPath} does not exist)`,
-      };
+      return this._buildNotFoundResult(resolvedPath, `No signature file found (${sigPath} does not exist)`, trust);
     }
+
+    const damaged = (reason: string): VerifyResult =>
+      this._buildVerifyResult(resolvedPath, "detached", "detached", { state: "invalid", reason, checked: [] }, undefined, trust);
 
     let sigData: SigFileFormat;
     try {
       sigData = JSON.parse(fs.readFileSync(sigPath, "utf-8"));
     } catch {
-      return {
-        filePath: resolvedPath,
-        status: "INVALID",
-        reason: "Signature file is malformed (invalid JSON)",
-      };
+      return damaged("Signature file is malformed (invalid JSON)");
     }
 
     if (sigData.version !== 1 || !sigData.signature || !sigData.certificate) {
-      return {
-        filePath: resolvedPath,
-        status: "INVALID",
-        reason: "Signature file has invalid format",
-      };
+      return damaged("Signature file has invalid format");
     }
 
     // Extract public key from embedded certificate
@@ -1343,11 +1380,7 @@ class Signing {
     try {
       x509Cert = new crypto.X509Certificate(sigData.certificate);
     } catch {
-      return {
-        filePath: resolvedPath,
-        status: "INVALID",
-        reason: "Embedded certificate is invalid",
-      };
+      return damaged("Embedded certificate is invalid");
     }
 
     const publicKey = x509Cert.publicKey;
@@ -1357,31 +1390,20 @@ class Signing {
     await pipeline(createReadStream(resolvedPath), verify);
     const isValid = verify.verify(publicKey, Buffer.from(sigData.signature, "base64"));
 
-    const signer = this._buildSignerInfo(x509Cert);
-
-    if (isValid) {
-      return {
-        filePath: resolvedPath,
-        status: "VALID",
-        signer,
-        signatureType: "detached",
-      };
-    } else {
-      return {
-        filePath: resolvedPath,
-        status: "INVALID",
-        reason: "File content has been modified after signing",
-        signer,
-        signatureType: "detached",
-      };
-    }
+    const integrity: IntegrityResult = isValid
+      ? { state: "intact", checked: ["signature over the whole file"] }
+      : { state: "invalid", reason: "File content has been modified after signing", checked: ["signature over the whole file"] };
+    return this._buildVerifyResult(resolvedPath, "detached", "detached", integrity, x509Cert.raw, trust);
   }
 
   /**
    * Verify an embedded Authenticode signature in a PE file.
    */
-  async verifyFileAuthenticode(filePath: string): Promise<VerifyResult> {
+  async verifyFileAuthenticode(filePath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const resolvedPath = path.resolve(filePath);
+    const trust = options?.trust ?? this.loadTrust();
+    const failed = (reason: string, signerDer?: Buffer): VerifyResult =>
+      this._buildVerifyResult(resolvedPath, "windows-program", "embedded", { state: "invalid", reason, checked: [] }, signerDer, trust);
 
     try {
       const addon = loadNativeAddon();
@@ -1389,22 +1411,13 @@ class Signing {
       // Extract embedded signature
       const pkcs7Der = addon.peExtractSignature(resolvedPath);
       if (!pkcs7Der) {
-        return {
-          filePath: resolvedPath,
-          status: "NOT_FOUND",
-          reason: "No embedded Authenticode signature found",
-        };
+        return this._buildNotFoundResult(resolvedPath, "No embedded Authenticode signature found", trust);
       }
 
       // Parse CMS to extract certificate and signature
       const cmsInfo = this._parseCmsSignedData(pkcs7Der);
       if (!cmsInfo) {
-        return {
-          filePath: resolvedPath,
-          status: "INVALID",
-          reason: "Embedded Authenticode signature has invalid CMS structure",
-          signatureType: "embedded",
-        };
+        return failed("Embedded Authenticode signature has invalid CMS structure");
       }
 
       // Recompute the Authenticode digest
@@ -1418,88 +1431,53 @@ class Signing {
       verify.update(digestResult.digest);
       const isValid = verify.verify(publicKey, cmsInfo.signature);
 
-      const signer = this._buildSignerInfo(x509Cert);
-
-      if (isValid) {
-        return {
-          filePath: resolvedPath,
-          status: "VALID",
-          signer,
-          signatureType: "embedded",
-        };
-      } else {
-        const expected = digestResult.digest.toString("hex").substring(0, 16) + "...";
-        return {
-          filePath: resolvedPath,
-          status: "INVALID",
-          reason: "Embedded signature invalid: digest mismatch — file may have been modified after signing",
-          signer,
-          signatureType: "embedded",
-        };
-      }
+      const checked = ["signature over the program's fingerprint"];
+      const integrity: IntegrityResult = isValid
+        ? { state: "intact", checked }
+        : { state: "invalid", reason: "Embedded signature invalid: digest mismatch — file may have been modified after signing", checked };
+      return this._buildVerifyResult(resolvedPath, "windows-program", "embedded", integrity, x509Cert.raw, trust);
     } catch (err) {
-      return {
-        filePath: resolvedPath,
-        status: "INVALID",
-        reason: `Failed to verify Authenticode signature: ${err instanceof Error ? err.message : String(err)}`,
-        signatureType: "embedded",
-      };
+      return failed(`Failed to verify Authenticode signature: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   /**
-   * Verify an embedded code signature in a Mach-O file.
+   * Verify the embedded code signature of a Mach-O file, thin or universal: every slice is checked
+   * (see MachOVerifier) and reported, and trust is evaluated for the one signer all slices share.
    */
-  async verifyFileMachO(filePath: string): Promise<VerifyResult> {
+  async verifyFileMachO(filePath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const resolvedPath = path.resolve(filePath);
+    const trust = options?.trust ?? this.loadTrust();
 
     try {
       const addon = loadNativeAddon();
-
-      // Extract embedded SuperBlob
-      const superBlobBuf = addon.machoExtractSignature(resolvedPath);
-      if (!superBlobBuf) {
-        return {
-          filePath: resolvedPath,
-          status: "NOT_FOUND",
-          reason: "No embedded Mach-O code signature found",
-        };
+      const slices = addon.machoListSlices(resolvedPath);
+      const check = checkMachO(fs.readFileSync(resolvedPath), slices);
+      if (check.integrity.state === "none") {
+        return this._buildNotFoundResult(resolvedPath, "No embedded Mach-O code signature found", trust);
       }
 
-      // TODO: Extract CMS and CodeDirectory from SuperBlob for full verification
-      // For now, basic check: signature is present and structurally valid
-      // The SuperBlob should start with FADE0CC0 magic
-      if (superBlobBuf.length < 12 ||
-          superBlobBuf.readUInt32BE(0) !== 0xFADE0CC0) {
-        return {
-          filePath: resolvedPath,
-          status: "INVALID",
-          reason: "Embedded Mach-O signature has invalid SuperBlob structure",
-          signatureType: "embedded",
-        };
-      }
-
-      // Signature is structurally valid
-      return {
-        filePath: resolvedPath,
-        status: "VALID",
-        signatureType: "embedded",
-      };
+      // An intact ad-hoc program has no signer (null); with damage found, the signer is known only if every slice agreed on one
+      const signerDer = check.integrity.state === "intact" ? (check.signerCertificate ?? null) : check.signerCertificate;
+      return this._buildVerifyResult(resolvedPath, "mac-program", "embedded", check.integrity, signerDer, trust, {
+        slices: check.slices,
+        warnings: check.warnings,
+        notChecked: check.notChecked,
+      });
     } catch (err) {
-      return {
-        filePath: resolvedPath,
-        status: "INVALID",
-        reason: `Failed to verify Mach-O signature: ${err instanceof Error ? err.message : String(err)}`,
-        signatureType: "embedded",
-      };
+      const reason = `Failed to verify Mach-O signature: ${err instanceof Error ? err.message : String(err)}`;
+      return this._buildVerifyResult(resolvedPath, "mac-program", "embedded", { state: "invalid", reason, checked: [] }, undefined, trust);
     }
   }
 
   /**
    * Verify an embedded Authenticode signature in an MSI file.
    */
-  async verifyFileMsi(filePath: string): Promise<VerifyResult> {
+  async verifyFileMsi(filePath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const resolvedPath = path.resolve(filePath);
+    const trust = options?.trust ?? this.loadTrust();
+    const failed = (reason: string): VerifyResult =>
+      this._buildVerifyResult(resolvedPath, "installer", "embedded", { state: "invalid", reason, checked: [] }, undefined, trust);
 
     try {
       const addon = loadNativeAddon();
@@ -1507,48 +1485,25 @@ class Signing {
       // Read the signature back and compare its fingerprint with the package
       const check = addon.msiCheckSignature(resolvedPath);
       if (check.state === "none") {
-        return {
-          filePath: resolvedPath,
-          status: "NOT_FOUND",
-          reason: "No embedded MSI Authenticode signature found",
-        };
+        return this._buildNotFoundResult(resolvedPath, "No embedded MSI Authenticode signature found", trust);
       }
       if (check.state === "mismatch") {
-        return {
-          filePath: resolvedPath,
-          status: "INVALID",
-          reason: "signature present but does not match the package contents; the package may have been modified after signing",
-          signatureType: "embedded",
-        };
+        return failed("signature present but does not match the package contents; the package may have been modified after signing");
       }
       if (check.state === "unreadable") {
-        return {
-          filePath: resolvedPath,
-          status: "INVALID",
-          reason: `signature present but could not be read (${check.detail})`,
-          signatureType: "embedded",
-        };
+        return failed(`signature present but could not be read (${check.detail})`);
       }
 
       // Extract embedded signature from \x05DigitalSignature stream
       const pkcs7Der = addon.msiExtractSignature(resolvedPath);
       if (!pkcs7Der) {
-        return {
-          filePath: resolvedPath,
-          status: "NOT_FOUND",
-          reason: "No embedded MSI Authenticode signature found",
-        };
+        return this._buildNotFoundResult(resolvedPath, "No embedded MSI Authenticode signature found", trust);
       }
 
       // Parse CMS to extract certificate and signature
       const cmsInfo = this._parseCmsSignedData(pkcs7Der);
       if (!cmsInfo) {
-        return {
-          filePath: resolvedPath,
-          status: "INVALID",
-          reason: "Embedded MSI Authenticode signature has invalid CMS structure",
-          signatureType: "embedded",
-        };
+        return failed("Embedded MSI Authenticode signature has invalid CMS structure");
       }
 
       // Recompute the MSI Authenticode digest
@@ -1562,31 +1517,13 @@ class Signing {
       verify.update(digestResult.digest);
       const isValid = verify.verify(publicKey, cmsInfo.signature);
 
-      const signer = this._buildSignerInfo(x509Cert);
-
-      if (isValid) {
-        return {
-          filePath: resolvedPath,
-          status: "VALID",
-          signer,
-          signatureType: "embedded",
-        };
-      } else {
-        return {
-          filePath: resolvedPath,
-          status: "INVALID",
-          reason: "Embedded MSI signature invalid: digest mismatch — file may have been modified after signing",
-          signer,
-          signatureType: "embedded",
-        };
-      }
+      const checked = ["the package's fingerprint against the signed one", "signature over the package's fingerprint"];
+      const integrity: IntegrityResult = isValid
+        ? { state: "intact", checked }
+        : { state: "invalid", reason: "Embedded MSI signature invalid: digest mismatch — file may have been modified after signing", checked };
+      return this._buildVerifyResult(resolvedPath, "installer", "embedded", integrity, x509Cert.raw, trust);
     } catch (err) {
-      return {
-        filePath: resolvedPath,
-        status: "INVALID",
-        reason: `Failed to verify MSI Authenticode signature: ${err instanceof Error ? err.message : String(err)}`,
-        signatureType: "embedded",
-      };
+      return failed(`Failed to verify MSI Authenticode signature: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1759,7 +1696,7 @@ class Signing {
    * Verify all files in a signed directory using .signatures.json manifest.
    * Handles both v1 (detached only) and v2 (mixed) manifests.
    */
-  async verifyDirectory(dirPath: string): Promise<DirectoryVerifyResult> {
+  async verifyDirectory(dirPath: string, options?: VerifyOptions): Promise<DirectoryVerifyResult> {
     const resolvedDir = path.resolve(dirPath);
     const manifestPath = path.join(resolvedDir, ".signatures.json");
 
@@ -1774,6 +1711,7 @@ class Signing {
       throw new Error("Manifest file .signatures.json is malformed");
     }
 
+    const resolvedOptions: VerifyOptions = { trust: options?.trust ?? this.loadTrust() };
     const results: VerifyResult[] = [];
     let passed = 0;
     let failed = 0;
@@ -1788,9 +1726,9 @@ class Signing {
 
       let result: VerifyResult;
       if (sigType === "embedded") {
-        result = await this.verifyFile(filePath);
+        result = await this.verifyFile(filePath, resolvedOptions);
       } else {
-        result = await this._verifyFileDetached(filePath);
+        result = await this._verifyFileDetached(filePath, resolvedOptions);
       }
       results.push(result);
 
@@ -1798,12 +1736,11 @@ class Signing {
         case "VALID":
           passed++;
           break;
-        case "INVALID":
-          failed++;
-          break;
         case "NOT_FOUND":
           notFound++;
           break;
+        default:
+          failed++;
       }
     }
 

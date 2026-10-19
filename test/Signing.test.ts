@@ -321,6 +321,8 @@ describe("Signing", () => {
       expect(result.signer).toBeDefined();
       expect(result.signer!.subject.commonName).toBe("Test User");
       expect(result.signer!.fingerprint).toMatch(/^SHA256:/);
+      expect(result.trust.state).toBe("trusted");
+      expect(result.integrity.state).toBe("intact");
     });
 
     it("returns INVALID when file content is modified", async () => {

@@ -201,15 +201,21 @@ export interface DirectorySignResult {
   skipped: string[];      // list of skipped (non-binary) files
 }
 
-export type VerifyStatus = "VALID" | "INVALID" | "NOT_FOUND";
+export type VerifyStatus = "VALID" | "UNTRUSTED" | "INVALID" | "NOT_FULLY_SIGNED" | "NOT_CHECKED" | "NOT_FOUND";
 
 export interface VerifyResult {
   filePath: string;
   status: VerifyStatus;
-  reason?: string;           // human-readable reason for INVALID/NOT_FOUND
-  signer?: CertInfo;         // certificate info of the signer (if signature exists)
+  reason?: string;               // the deciding reason: the integrity reason, or the trust message for UNTRUSTED
+  form?: SignatureForm;          // absent when NOT_FOUND
   signatureType?: SignatureType; // "embedded" or "detached"
-  warnings?: string[];       // e.g., "Both embedded and detached signatures found"
+  integrity: IntegrityResult;
+  trust: TrustResult;
+  signer?: CertInfo;             // certificate info of the signer (if a signature exists)
+  slices?: MachOSliceResult[];   // Mac programs
+  signatures?: VerifyResult[];   // both kinds present: [embedded, detached]; the top level is the worse
+  warnings: string[];            // e.g., "Both embedded and detached signatures found"
+  notChecked: string[];          // what this verification does not cover: the fixed list first, then file-specific items
 }
 
 export interface DirectoryVerifyResult {

@@ -1,11 +1,9 @@
 import crypto from "crypto";
 import fs from "fs";
-import { IntegrityResult, TrustedCertificates, TrustResult } from "./types";
+import { IntegrityResult, TrustedCertificates, TrustResult, VerifyStatus } from "./types";
 
-/** Outcome of checking one file, from best to worst as `worst` orders them. */
-export type Outcome = "VALID" | "UNTRUSTED" | "NOT_FOUND" | "NOT_CHECKED" | "NOT_FULLY_SIGNED" | "INVALID";
-
-const SEVERITY: Outcome[] = ["VALID", "UNTRUSTED", "NOT_FOUND", "NOT_CHECKED", "NOT_FULLY_SIGNED", "INVALID"];
+/** Statuses from best to worst, as `worst` orders them. */
+const SEVERITY: VerifyStatus[] = ["VALID", "UNTRUSTED", "NOT_FOUND", "NOT_CHECKED", "NOT_FULLY_SIGNED", "INVALID"];
 
 /** What a check never covers, whatever the file. */
 export const NOT_CHECKED_ALWAYS: readonly string[] = ["certificate chains", "revocation", "signing time", "acceptance by the platform's own verifier"];
@@ -80,7 +78,7 @@ export function evaluateTrust(signer: Buffer | null, trust: TrustedCertificates)
 }
 
 /** The status of one file from its integrity and trust results. */
-export function outcomeOf(integrity: IntegrityResult, trust: TrustResult): Outcome {
+export function outcomeOf(integrity: IntegrityResult, trust: TrustResult): VerifyStatus {
   switch (integrity.state) {
     case "none":
       return "NOT_FOUND";
@@ -94,7 +92,7 @@ export function outcomeOf(integrity: IntegrityResult, trust: TrustResult): Outco
 }
 
 /** The most severe of the given statuses. */
-export function worst(statuses: Outcome[]): Outcome {
+export function worst(statuses: VerifyStatus[]): VerifyStatus {
   let index = 0;
   for (const status of statuses) {
     index = Math.max(index, SEVERITY.indexOf(status));
@@ -103,7 +101,7 @@ export function worst(statuses: Outcome[]): Outcome {
 }
 
 /** Exit status of a single file: 0 for VALID, 4 for UNTRUSTED, 1 otherwise. */
-export function exitStatusOf(status: Outcome): 0 | 1 | 4 {
+export function exitStatusOf(status: VerifyStatus): 0 | 1 | 4 {
   if (status === "VALID") {
     return 0;
   }

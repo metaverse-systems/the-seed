@@ -272,8 +272,10 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
               console.log(`  VALID   ${relPath}`);
             } else if (r.status === "INVALID") {
               console.log(`  INVALID ${relPath} — ${r.reason || "Unknown reason"}`);
-            } else {
+            } else if (r.status === "NOT_FOUND") {
               console.log(`  NOT FOUND ${relPath}`);
+            } else {
+              console.log(`  ${r.status.replace(/_/g, " ")} ${relPath} — ${r.reason || "Unknown reason"}`);
             }
           }
           console.log("");
@@ -302,7 +304,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
             if (subjectStr) console.log(`  Signer:      ${subjectStr}`);
             process.exit(1);
           } else {
-            console.log("Verification: NOT FOUND");
+            console.log(`Verification: ${result.status.replace(/_/g, " ")}`);
             console.log(`  File:        ${result.filePath}`);
             console.log(`  Reason:      ${result.reason}`);
             process.exit(1);
