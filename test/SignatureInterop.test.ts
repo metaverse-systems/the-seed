@@ -13,7 +13,6 @@ import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
 //   - the scope @ti is created once for the file in a scratch configuration directory; each case signs its own scratch copy
 //   - the scratch HOME of the process is also the HOME given to the child tools
 //   - "no earlier-form notice" is checked on every warning, so it holds before the notice exists and keeps meaning after
-//   - the paths case asserts the exact-path reading (one signature, equal digests, tool VALID) and not the whole pass, so it guards the path handling alone
 //   - the Mac cases run on both genuine samples (thin arm64 and universal), one scratch copy each, and assert every slice
 //   - the Mac tamper case changes the last byte of the first slice's code directory in the file, then re-reads the slices from the changed file for openssl
 //   - the installer read-back is taken straight from the addon's msiCheckSignature
@@ -174,10 +173,10 @@ describe("Windows program", () => {
       const file = programCopy("tiny program (1).exe", directory);
       await signing.signFile(file, { scope: "@ti" });
 
-      // The check reads the signature at the exact path and its digests agree; the full pass is covered by the program cases
       const result = osslsigncodeVerify(file, certPath, home);
       expect(result.signatureCount).toBe(1);
       expect(result.digestsMatch).toBe(true);
+      expect(result.passed).toBe(true);
       expect((await signing.verifyFile(file)).status).toBe("VALID");
     });
   });
@@ -302,14 +301,14 @@ async function problemsFor(forms: Array<"program" | "installer" | "mac">, subjec
       await subject.signFile(file, { scope });
       if (!signerSerial(addon.peExtractSignature(file) as Buffer).equals(expected)) problems.push(`program ${serialText}: signer serial bytes differ`);
       if ((await subject.verifyFile(file)).integrity.state !== "intact") problems.push(`program ${serialText}: the tool does not find the signature intact`);
-      if (haveOsslsigncode() && !osslsigncodeVerify(file, certFile, home).passed) problems.push(`program ${serialText}: osslsigncode fails`);
+      if (haveTool() && !osslsigncodeVerify(file, certFile, home).passed) problems.push(`program ${serialText}: osslsigncode fails`);
     } else if (form === "installer") {
       const file = path.join(dir, "tiny.msi");
       fs.copyFileSync(fixture("genuine", "tiny.msi"), file);
       await subject.signFile(file, { scope });
       if (!signerSerial(addon.msiExtractSignature(file) as Buffer).equals(expected)) problems.push(`installer ${serialText}: signer serial bytes differ`);
       if ((addon.msiCheckSignature(file) as { state: string }).state !== "matches") problems.push(`installer ${serialText}: fingerprint does not read back`);
-      if (haveOsslsigncode() && !osslsigncodeVerify(file, certFile, home).passed) problems.push(`installer ${serialText}: osslsigncode fails`);
+      if (haveTool() && !osslsigncodeVerify(file, certFile, home).passed) problems.push(`installer ${serialText}: osslsigncode fails`);
     } else {
       const file = path.join(dir, "tiny-macho-universal");
       fs.copyFileSync(fixture("genuine", "tiny-macho-universal"), file);
@@ -319,7 +318,7 @@ async function problemsFor(forms: Array<"program" | "installer" | "mac">, subjec
       for (const slice of slices) {
         if (slice.cms === null || !signerSerial(slice.cms).equals(expected)) {
           problems.push(`mac ${serialText}: signer serial bytes differ`);
-        } else if (haveOpenssl() && !opensslVerifyDetached(slice.cms, slice.codeDirectory, certFile, tempDir("interop-openssl-")).passed) {
+        } else if (haveOpensslTool() && !opensslVerifyDetached(slice.cms, slice.codeDirectory, certFile, tempDir("interop-openssl-")).passed) {
           problems.push(`mac ${serialText}: openssl fails`);
         }
       }

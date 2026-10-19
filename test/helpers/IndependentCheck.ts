@@ -21,7 +21,7 @@ function run(command: string, args: string[], home: string): { status: number | 
 }
 
 function available(command: string, args: string[]): boolean {
-  const result = spawnSync(command, args, { env: toolEnv(process.env.HOME ?? "/"), encoding: "utf8" });
+  const result = spawnSync(command, args, { env: toolEnv(os.tmpdir()), encoding: "utf8" });
   return !result.error && result.status === 0;
 }
 
