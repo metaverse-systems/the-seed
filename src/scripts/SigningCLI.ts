@@ -3,7 +3,7 @@ import inquirer from "inquirer";
 import Signing from "../Signing";
 import Config from "../Config";
 import { exitStatusOf } from "../Trust";
-import { ScriptArgsType, TrustResult } from "../types";
+import { IntegrityResult, MachOSliceResult, ScriptArgsType, TrustResult, VerifyResult, VerifyStatus } from "../types";
 
 /**
  * Prompt the user to select a scope. If only one scope exists, auto-selects it.
@@ -38,6 +38,104 @@ function describeTrust(trust: TrustResult): string {
     return `not trusted: ${trust.message}`;
   }
   return "not applicable";
+}
+
+const FILE_HEADLINES: Record<VerifyStatus, string> = {
+  VALID: "VALID ✓",
+  UNTRUSTED: "INTACT, NOT TRUSTED ✗",
+  INVALID: "INVALID ✗",
+  NOT_FULLY_SIGNED: "NOT FULLY SIGNED ✗",
+  NOT_CHECKED: "SIGNATURE NOT CHECKED ✗",
+  NOT_FOUND: "NO SIGNATURE",
+};
+
+/** The words after "Form:" for one signature. */
+function describeForm(result: VerifyResult): string {
+  if (result.form === "detached") {
+    return `detached (${path.basename(result.filePath)}.sig)`;
+  }
+  if (result.form === "windows-program") {
+    return "Windows program (embedded)";
+  }
+  if (result.form === "installer") {
+    return "installer (embedded)";
+  }
+  if (result.form === "mac-program") {
+    const count = result.slices?.length ?? 0;
+    return count > 1 ? `Mac program (embedded, ${count} slices)` : "Mac program (embedded)";
+  }
+  return "none";
+}
+
+/** The words after "Integrity:" in a report. */
+function describeIntegrity(integrity: IntegrityResult): string {
+  switch (integrity.state) {
+    case "intact":
+      return `intact (${integrity.checked.join(", ")})`;
+    case "invalid":
+      return `invalid: ${integrity.reason ?? "unknown reason"}`;
+    case "not-checked":
+      return `not checked: ${integrity.reason ?? "unknown reason"}`;
+    default:
+      return `no signature: ${integrity.reason ?? "none found"}`;
+  }
+}
+
+/** The words after "Slice <arch>:" in a report. */
+function describeSlice(slice: MachOSliceResult): string {
+  switch (slice.state) {
+    case "intact":
+      return slice.adHoc ? "ad-hoc (no signer)" : `intact (${slice.codeDirectories[0]?.pages ?? 0} pages)`;
+    case "invalid":
+      return `invalid: ${slice.reason ?? "unknown reason"}`;
+    case "not-checked":
+      return `not checked: ${slice.reason ?? "unknown reason"}`;
+    default:
+      return "unsigned";
+  }
+}
+
+/** The lines of one signature's details (integrity, trust, signer, slices), each starting with the given indent. */
+function signatureLines(signing: Signing, result: VerifyResult, indent: string): string[] {
+  const lines = [`${indent}Integrity:   ${describeIntegrity(result.integrity)}`, `${indent}Trust:       ${describeTrust(result.trust)}`];
+  if (result.signer) {
+    const day = (date: Date): string => date.toISOString().slice(0, 10);
+    lines.push(`${indent}Signer:      ${signing._formatSubject(result.signer.subject)}`);
+    lines.push(`${indent}Issuer:      ${result.signer.issuer || "Unknown"}`);
+    lines.push(`${indent}Fingerprint: ${result.signer.fingerprint}`);
+    lines.push(`${indent}Valid:       ${day(result.signer.notBefore)} to ${day(result.signer.notAfter)}`);
+  }
+  if (result.slices) {
+    const labels = result.slices.map((slice) => `Slice ${slice.arch}:`);
+    const width = Math.max(0, ...labels.map((label) => label.length)) + 1;
+    result.slices.forEach((slice, index) => {
+      lines.push(`${indent}${labels[index].padEnd(width)}${describeSlice(slice)}`);
+    });
+  }
+  return lines;
+}
+
+/** The report for one file, as the lines to print. */
+function fileReport(signing: Signing, result: VerifyResult): string[] {
+  const lines = [`Verification: ${FILE_HEADLINES[result.status] ?? result.status}`, `  File:        ${result.filePath}`];
+  const kinds = result.signatures;
+  if (kinds && kinds.length === 2) {
+    lines.push(`  Form:        ${describeForm(kinds[0])} and ${describeForm(kinds[1])}`);
+  } else {
+    lines.push(`  Form:        ${describeForm(result)}`);
+  }
+  lines.push(...signatureLines(signing, result, "  "));
+  if (kinds && kinds.length === 2) {
+    for (const kind of kinds) {
+      lines.push(`  Signature ${kind.signatureType ?? "embedded"}:`);
+      lines.push(...signatureLines(signing, kind, "    "));
+    }
+  }
+  for (const warning of result.warnings) {
+    lines.push(`  Warning: ${warning}`);
+  }
+  lines.push(`  Not checked: ${result.notChecked.join(", ")}`);
+  return lines;
 }
 
 const SigningCLI = async (scriptConfig: ScriptArgsType) => {
@@ -374,29 +472,8 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           exitStatus = exitStatusOf(result.status);
         } else {
           const result = await signing.verifyFile(targetPath, { trust });
-          const headlines: Record<string, string> = {
-            VALID: "VALID ✓",
-            UNTRUSTED: "INTACT, NOT TRUSTED ✗",
-            INVALID: "INVALID ✗",
-            NOT_FULLY_SIGNED: "NOT FULLY SIGNED ✗",
-            NOT_CHECKED: "SIGNATURE NOT CHECKED ✗",
-            NOT_FOUND: "NO SIGNATURE",
-          };
-          console.log(`Verification: ${headlines[result.status] ?? result.status}`);
-          console.log(`  File:        ${result.filePath}`);
-          if (result.status !== "VALID" && result.reason) {
-            console.log(`  Reason:      ${result.reason}`);
-          }
-          if (result.trust.state !== "not-applicable") {
-            console.log(`  Trust:       ${describeTrust(result.trust)}`);
-          }
-          if (result.signer) {
-            console.log(`  Signer:      ${signing._formatSubject(result.signer.subject)}`);
-            console.log(`  Issuer:      ${result.signer.issuer || "Unknown"}`);
-            console.log(`  Fingerprint: ${result.signer.fingerprint}`);
-          }
-          for (const warning of result.warnings) {
-            console.log(`  Warning: ${warning}`);
+          for (const line of fileReport(signing, result)) {
+            console.log(line);
           }
           exitStatus = exitStatusOf(result.status);
         }
@@ -405,7 +482,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
         if (message.includes("No .signatures.json")) {
           console.error("Error: " + message);
           process.exit(2);
-        } else if (message.includes("malformed")) {
+        } else if (message.includes("malformed") || message.includes("is a signature file;") || message.includes("is a directory manifest;")) {
           console.error("Error: " + message);
           process.exit(3);
         } else {

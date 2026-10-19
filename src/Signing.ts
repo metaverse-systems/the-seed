@@ -1306,62 +1306,124 @@ class Signing {
 
   /**
    * Verify a single file's signature.
-   * Checks for embedded signature first (PE/Mach-O/MSI), falls back to detached .sig.
-   * Warns if both embedded and detached exist (FR-008).
+   * The embedded signature of the file's own form (Windows program, installer, Mac program) and the detached
+   * `<file>.sig` are each checked when present. With both, both results are kept in `signatures` ([embedded,
+   * detached]) and the top level is the worse one, the embedded one on a tie.
    * Trust is evaluated against options.trust, or the certificates of the configured scopes.
+   * Throws for a path that does not exist, a `.sig` file whose file exists and a directory manifest.
    */
   async verifyFile(filePath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const resolvedPath = path.resolve(filePath);
     if (!fs.existsSync(resolvedPath)) {
       throw new Error(`File not found: ${resolvedPath}`);
     }
+    if (path.basename(resolvedPath) === ".signatures.json") {
+      throw new Error(`${resolvedPath} is a directory manifest; verify the directory ${path.dirname(resolvedPath)} instead`);
+    }
+    if (resolvedPath.endsWith(".sig") && fs.existsSync(resolvedPath.slice(0, -4))) {
+      throw new Error(`${resolvedPath} is a signature file; verify ${resolvedPath.slice(0, -4)} instead`);
+    }
 
     const resolvedOptions: VerifyOptions = { trust: options?.trust ?? this.loadTrust() };
-    const warnings: string[] = [];
-    const detection = this.detectBinaryFormat(resolvedPath);
+    const trust = resolvedOptions.trust as TrustedCertificates;
 
-    // Check for embedded signature
-    let hasEmbedded = false;
+    // The native component is loaded once; without it embedded signatures cannot be checked
+    let addon: NativeAddon | undefined;
     try {
-      const addon = loadNativeAddon();
-      if (detection.format === "pe") {
-        hasEmbedded = addon.peHasEmbeddedSignature(resolvedPath);
-      } else if (detection.format === "macho") {
-        // Any signed slice makes the signature embedded; a program whose slices are all unsigned has none
-        hasEmbedded = addon.machoListSlices(resolvedPath).some((slice) => slice.isSigned);
-      } else if (detection.format === "msi") {
-        hasEmbedded = addon.msiHasEmbeddedSignature(resolvedPath);
+      addon = loadNativeAddon();
+    } catch {
+      addon = undefined;
+    }
+
+    let embedded: VerifyResult | undefined;
+    if (addon !== undefined) {
+      let format = "other";
+      let hasEmbedded = false;
+      try {
+        format = addon.detectBinaryFormat(resolvedPath).format;
+        if (format === "pe") {
+          hasEmbedded = addon.peHasEmbeddedSignature(resolvedPath);
+        } else if (format === "macho") {
+          // Any signed slice makes the signature embedded; a program whose slices are all unsigned has none
+          hasEmbedded = addon.machoListSlices(resolvedPath).some((slice) => slice.isSigned);
+        } else if (format === "msi") {
+          hasEmbedded = addon.msiHasEmbeddedSignature(resolvedPath);
+        }
+      } catch {
+        // Unreadable by the native component: fall through to the detached check
+      }
+      if (hasEmbedded) {
+        if (format === "pe") {
+          embedded = await this.verifyFileAuthenticode(resolvedPath, resolvedOptions);
+        } else if (format === "macho") {
+          embedded = await this.verifyFileMachO(resolvedPath, resolvedOptions);
+        } else {
+          embedded = await this.verifyFileMsi(resolvedPath, resolvedOptions);
+        }
+      }
+    } else {
+      const form = this._embeddedFormFromMagic(resolvedPath);
+      if (form !== undefined) {
+        const reason = "the native component is needed to check embedded signatures (run 'npm run build-addon')";
+        embedded = this._buildVerifyResult(resolvedPath, form, "embedded", { state: "not-checked", reason, checked: [] }, undefined, trust);
+      }
+    }
+    if (embedded?.status === "NOT_FOUND") {
+      embedded = undefined;
+    }
+
+    if (embedded === undefined) {
+      return this._verifyFileDetached(resolvedPath, resolvedOptions);
+    }
+    if (!fs.existsSync(resolvedPath + ".sig")) {
+      return embedded;
+    }
+
+    // Both kinds are present: both are checked and the worse decides
+    const detached = await this._verifyFileDetached(resolvedPath, resolvedOptions);
+    if (embedded.integrity.state === "intact" && detached.integrity.state === "invalid" && detached.integrity.checked.length > 0) {
+      const reason = "stale detached signature: the file changed after it was made (it was probably signed again in place)";
+      detached.integrity = { ...detached.integrity, reason };
+      detached.reason = reason;
+    }
+    const decided = worst([embedded.status, detached.status]) === embedded.status ? embedded : detached;
+    const combined: VerifyResult = { ...decided };
+    combined.signatures = [embedded, detached];
+    combined.warnings = [
+      ...new Set([...embedded.warnings, ...detached.warnings]),
+      "Both an embedded and a detached signature are present; both were checked",
+    ];
+    combined.notChecked = [...new Set([...embedded.notChecked, ...detached.notChecked])];
+    return combined;
+  }
+
+  /** The embedded form a file's first bytes announce (Windows program, Mac program, installer), without the native component. */
+  _embeddedFormFromMagic(filePath: string): SignatureForm | undefined {
+    const head = Buffer.alloc(8);
+    let length = 0;
+    try {
+      const fd = fs.openSync(filePath, "r");
+      try {
+        length = fs.readSync(fd, head, 0, 8, 0);
+      } finally {
+        fs.closeSync(fd);
       }
     } catch {
-      // Native addon not available, fall through to detached
+      return undefined;
     }
-
-    const sigPath = resolvedPath + ".sig";
-    const hasDetached = fs.existsSync(sigPath);
-
-    // Warn if both exist (FR-008)
-    if (hasEmbedded && hasDetached) {
-      warnings.push("Both embedded and detached signatures found; verifying embedded");
+    if (length >= 2 && head[0] === 0x4d && head[1] === 0x5a) {
+      return "windows-program";
     }
-
-    // Prefer embedded if present
-    if (hasEmbedded) {
-      let result: VerifyResult | undefined;
-      if (detection.format === "pe") {
-        result = await this.verifyFileAuthenticode(resolvedPath, resolvedOptions);
-      } else if (detection.format === "macho") {
-        result = await this.verifyFileMachO(resolvedPath, resolvedOptions);
-      } else if (detection.format === "msi") {
-        result = await this.verifyFileMsi(resolvedPath, resolvedOptions);
-      }
-      if (result !== undefined) {
-        result.warnings = [...result.warnings, ...warnings];
-        return result;
+    if (length >= 8 && head.equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]))) {
+      return "installer";
+    }
+    if (length >= 4) {
+      const magic = head.readUInt32BE(0);
+      if ([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xbebafeca].includes(magic)) {
+        return "mac-program";
       }
     }
-
-    // Fall back to detached .sig verification
-    return this._verifyFileDetached(resolvedPath, resolvedOptions);
+    return undefined;
   }
 
   /**

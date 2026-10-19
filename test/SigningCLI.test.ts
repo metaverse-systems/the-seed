@@ -4,6 +4,7 @@ import path from "path";
 import Signing from "../src/Signing";
 import { expectPresent } from "./helpers/Assert";
 import { runVerify } from "./helpers/Command";
+import { makeUniversal } from "./helpers/Universal";
 
 // The verify command, run through runCli with a scratch configuration directory and a scratch HOME.
 // Two configurations are used: A (scope @ta) and B (scope @tb). The command's status is the first
@@ -349,5 +350,266 @@ describe("signing verify <directory>", () => {
     expect(run.status).toBe(0);
     expect(run.out.split("\n")[0]).toBe("Verifying directory: " + odd);
     expect(run.out).toContain("  Result: PASS");
+  });
+});
+
+// A file in no known program format that signFile still treats as binary (it refuses plain text, so a text file cannot carry a detached signature)
+const OPAQUE_DATA = Buffer.from([0x6f, 0x70, 0x61, 0x71, 0x75, 0x65, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0xff, 0xfe, 0x0a]);
+
+describe("signing verify <file>", () => {
+  // Choices where the contract leaves a form open:
+  //   - a Mac program's "Slice <arch>:" labels are padded with spaces to the width of the longest label
+  //     plus one space, so the states line up ("Slice x86_64: intact", "Slice arm64:  intact")
+  //   - with both kinds of signature, "Form:" reads "<program form> (embedded) and detached (<file name>.sig)"
+  //     and the sub-blocks begin with "  Signature embedded:" and "  Signature detached:"; the lines in
+  //     them are the same lines as the main report, indented by four spaces
+  //   - the "Warning:" for a file with both kinds contains the word "both"
+  //   - the two refusals print "<abs> is a signature file; verify <abs without .sig> instead" and
+  //     "<abs> is a directory manifest; verify the directory <abs dir> instead"
+  const NOT_CHECKED_LINE = "  Not checked: certificate chains, revocation, signing time, acceptance by the platform's own verifier";
+  const genuine = (name: string): string => path.join(__dirname, "fixtures", "binaries", "genuine", name);
+  let dir: string;
+
+  function copyTo(name: string): string {
+    const dest = path.join(dir, name);
+    fs.copyFileSync(name === "tiny.exe" ? path.join(__dirname, "fixtures", "binaries", name) : genuine(name), dest);
+    return dest;
+  }
+
+  function dayOf(date: Date): string {
+    return date.toISOString().slice(0, 10);
+  }
+
+  function invertAt0x16ea(file: string): void {
+    const bytes = fs.readFileSync(file);
+    bytes[0x16ea] ^= 0xff;
+    fs.writeFileSync(file, bytes);
+  }
+
+  beforeEach(() => {
+    dir = tempDir("cli-file-report-");
+  });
+
+  describe("exit status per outcome", () => {
+    it("exits 0 for a valid file", async () => {
+      const file = copyTo("tiny-macho-arm64");
+      await A.signing.signFileMachO(file, "@ta");
+      expect((await runVerify([file], A.configDir, home)).status).toBe(0);
+    });
+
+    it("exits 4 for a file that is intact but not trusted", async () => {
+      expect((await runVerify([signedInB], A.configDir, home)).status).toBe(4);
+    });
+
+    it("exits 1 for an invalid file", async () => {
+      const file = copyTo("tiny-macho-arm64");
+      await A.signing.signFileMachO(file, "@ta");
+      invertAt0x16ea(file);
+      const run = await runVerify([file], A.configDir, home);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain("Verification: INVALID ✗");
+    });
+
+    it("exits 1 for a universal program with an unsigned slice", async () => {
+      const signed = copyTo("tiny-macho-arm64");
+      await A.signing.signFileMachO(signed, "@ta");
+      const file = path.join(dir, "partly-signed");
+      fs.writeFileSync(
+        file,
+        makeUniversal([
+          { cpuType: 0x0100000c, cpuSubtype: 0, bytes: fs.readFileSync(signed) },
+          { cpuType: 0x01000007, cpuSubtype: 0x80000003, bytes: fs.readFileSync(genuine("tiny-macho-x86_64")) },
+        ])
+      );
+      const run = await runVerify([file], A.configDir, home);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain("Verification: NOT FULLY SIGNED ✗");
+      expect(run.out).toMatch(/^ {2}Slice x86_64: +unsigned$/m);
+    });
+
+    it("exits 1 for a file with no signature", async () => {
+      const run = await runVerify([copyTo("tiny-macho-arm64")], A.configDir, home);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain("Verification: NO SIGNATURE");
+    });
+
+    it("exits 2 for a path that does not exist", async () => {
+      const missing = path.join(dir, "absent.bin");
+      const run = await runVerify([missing], A.configDir, home);
+      expect(run.status).toBe(2);
+      expect(run.err).toContain("Error: File not found: " + missing);
+    });
+
+    it("exits 3 when no path is given", async () => {
+      const run = await runVerify([], A.configDir, home);
+      expect(run.status).toBe(3);
+      expect(run.err).toContain("Missing path argument. " + USAGE);
+    });
+
+    it("exits 3 for a .sig path, naming the file to verify instead, and prints no report", async () => {
+      const file = path.join(dir, "notes.txt");
+      fs.writeFileSync(file, OPAQUE_DATA);
+      await A.signing.signFile(file, { scope: "@ta", detached: true });
+      const run = await runVerify([file + ".sig"], A.configDir, home);
+      expect(run.status).toBe(3);
+      expect(run.err).toContain("Error: " + file + ".sig is a signature file; verify " + file + " instead");
+      expect(run.out).not.toContain("Verification:");
+    });
+
+    it("exits 3 for .signatures.json, naming the directory to verify instead, and prints no report", async () => {
+      const manifest = path.join(dir, ".signatures.json");
+      fs.writeFileSync(manifest, "{}");
+      const run = await runVerify([manifest], A.configDir, home);
+      expect(run.status).toBe(3);
+      expect(run.err).toContain("Error: " + manifest + " is a directory manifest; verify the directory " + dir + " instead");
+      expect(run.out).not.toContain("Verification:");
+    });
+  });
+
+  describe("report lines", () => {
+    it("prints the labelled lines in order for a valid universal Mac program, one line per slice", async () => {
+      const file = copyTo("tiny-macho-universal");
+      await A.signing.signFileMachO(file, "@ta");
+      const cert = expectPresent(A.signing.getCertInfo("@ta"), "certificate");
+
+      const run = await runVerify([file], A.configDir, home);
+      expect(run.status).toBe(0);
+      const lines = run.out.split("\n");
+      expect(lines[0]).toBe("Verification: VALID ✓");
+      expect(lines[1]).toBe("  File:        " + file);
+      expect(lines[2]).toBe("  Form:        Mac program (embedded, 2 slices)");
+      expect(lines[3]).toMatch(/^ {2}Integrity: {3}intact \(.+\)$/);
+      expect(lines[4]).toBe("  Trust:       trusted: certificate of scope @ta");
+      expect(lines[5]).toBe("  Signer:      " + A.signing._formatSubject(cert.subject));
+      expect(lines[6]).toBe("  Issuer:      " + cert.issuer);
+      expect(lines[7]).toBe("  Fingerprint: " + cert.fingerprint);
+      expect(lines[8]).toBe("  Valid:       " + dayOf(cert.notBefore) + " to " + dayOf(cert.notAfter));
+      expect(lines[9]).toMatch(/^ {2}Slice x86_64: intact \(\d+ pages\)$/);
+      expect(lines[10]).toMatch(/^ {2}Slice arm64: {2}intact \(\d+ pages\)$/);
+      expect(lines[lines.length - 1]).toBe(NOT_CHECKED_LINE);
+      expect(run.out).not.toContain("Warning:");
+    });
+
+    it("prints Integrity, Fingerprint and Valid for an invalid file whose signer was read, and the reason", async () => {
+      const file = copyTo("tiny-macho-arm64");
+      await A.signing.signFileMachO(file, "@ta");
+      invertAt0x16ea(file);
+      const cert = expectPresent(A.signing.getCertInfo("@ta"), "certificate");
+
+      const run = await runVerify([file], A.configDir, home);
+      const lines = run.out.split("\n");
+      expect(lines[0]).toBe("Verification: INVALID ✗");
+      expect(lines.some((line) => /^ {2}Integrity: {3}invalid: .*slice arm64: page 1/.test(line))).toBe(true);
+      expect(lines).toContain("  Fingerprint: " + cert.fingerprint);
+      expect(lines).toContain("  Valid:       " + dayOf(cert.notBefore) + " to " + dayOf(cert.notAfter));
+      expect(lines.some((line) => /^ {2}Slice arm64: +invalid: /.test(line))).toBe(true);
+      expect(lines[lines.length - 1]).toBe(NOT_CHECKED_LINE);
+    });
+
+    it("prints the untrusted headline with the signer lines and the trust sentence", async () => {
+      const run = await runVerify([signedInB], A.configDir, home);
+      const lines = run.out.split("\n");
+      expect(lines[0]).toBe("Verification: INTACT, NOT TRUSTED ✗");
+      expect(lines).toContain("  Trust:       not trusted: signer certificate is not one of the trusted certificates");
+      expect(lines.some((line) => /^ {2}Signer: {6}CN=/.test(line))).toBe(true);
+      expect(lines.some((line) => line.startsWith("  Valid:       "))).toBe(true);
+    });
+
+    it("prints no signer lines for a file with no signature, and not applicable for trust", async () => {
+      const file = copyTo("tiny-macho-arm64");
+      const run = await runVerify([file], A.configDir, home);
+      const lines = run.out.split("\n");
+      expect(lines[0]).toBe("Verification: NO SIGNATURE");
+      expect(lines[1]).toBe("  File:        " + file);
+      expect(lines.some((line) => /^ {2}Integrity: {3}no signature: .+/.test(line))).toBe(true);
+      expect(lines).toContain("  Trust:       not applicable");
+      expect(run.out).not.toContain("Signer:");
+      expect(lines[lines.length - 1]).toBe(NOT_CHECKED_LINE);
+    });
+
+    it("prints a detached file's form with its signature file name", async () => {
+      const file = path.join(dir, "notes.txt");
+      fs.writeFileSync(file, OPAQUE_DATA);
+      await A.signing.signFile(file, { scope: "@ta", detached: true });
+      const run = await runVerify([file], A.configDir, home);
+      expect(run.status).toBe(0);
+      expect(run.out).toMatch(/^ {2}Form: {8}detached \(.*notes\.txt\.sig\)$/m);
+    });
+
+    it("prints every warning of the result, here the one for a file with both kinds of signature", async () => {
+      const file = copyTo("tiny.exe");
+      await A.signing.signFile(file, { scope: "@ta" });
+      await A.signing.signFile(file, { scope: "@ta", detached: true });
+      const run = await runVerify([file], A.configDir, home);
+      const lines = run.out.split("\n");
+      const result = await A.signing.verifyFile(file);
+      expect(result.warnings.length).toBeGreaterThanOrEqual(1);
+      expect(result.warnings.some((warning) => /both/i.test(warning))).toBe(true);
+      for (const warning of result.warnings) {
+        expect(lines).toContain("  Warning: " + warning);
+      }
+    });
+  });
+
+  describe("a file with both kinds of signature", () => {
+    it("prints both forms and a sub-block per kind when both are intact and trusted", async () => {
+      const file = copyTo("tiny.exe");
+      await A.signing.signFile(file, { scope: "@ta" });
+      await A.signing.signFile(file, { scope: "@ta", detached: true });
+
+      const run = await runVerify([file], A.configDir, home);
+      expect(run.status).toBe(0);
+      const lines = run.out.split("\n");
+      expect(lines[0]).toBe("Verification: VALID ✓");
+      expect(lines.some((line) => /^ {2}Form: {8}Windows program \(embedded\) and detached \(.*tiny\.exe\.sig\)$/.test(line))).toBe(true);
+      const embedded = lines.indexOf("  Signature embedded:");
+      const detached = lines.indexOf("  Signature detached:");
+      expect(embedded).toBeGreaterThan(0);
+      expect(detached).toBeGreaterThan(embedded);
+      for (const block of [lines.slice(embedded + 1, detached), lines.slice(detached + 1)]) {
+        expect(block.some((line) => /^ {4}Integrity: {3}intact/.test(line))).toBe(true);
+        expect(block).toContain("    Trust:       trusted: certificate of scope @ta");
+        expect(block.some((line) => line.startsWith("    Signer:      "))).toBe(true);
+      }
+    });
+
+    it("shows the worse headline and the failing kind when the detached signature is stale", async () => {
+      const file = copyTo("tiny.exe");
+      await A.signing.signFile(file, { scope: "@ta", detached: true });
+      const kept = fs.readFileSync(file + ".sig");
+      await A.signing.signFile(file, { scope: "@ta" });
+      fs.writeFileSync(file + ".sig", kept);
+
+      const run = await runVerify([file], A.configDir, home);
+      expect(run.status).toBe(1);
+      const lines = run.out.split("\n");
+      expect(lines[0]).toBe("Verification: INVALID ✗");
+      const embedded = lines.indexOf("  Signature embedded:");
+      const detached = lines.indexOf("  Signature detached:");
+      expect(embedded).toBeGreaterThan(0);
+      expect(detached).toBeGreaterThan(embedded);
+      expect(lines.slice(embedded + 1, detached).some((line) => /^ {4}Integrity: {3}intact/.test(line))).toBe(true);
+      expect(lines.slice(detached + 1).some((line) => /^ {4}Integrity: {3}invalid: .*stale detached signature/i.test(line))).toBe(true);
+    });
+
+    it("shows the untrusted headline when the detached signature is from another scope, exiting 4", async () => {
+      const file = copyTo("tiny.exe");
+      await A.signing.signFile(file, { scope: "@ta" });
+      await B.signing.signFile(file, { scope: "@tb", detached: true });
+
+      const run = await runVerify([file], A.configDir, home);
+      expect(run.status).toBe(4);
+      expect(run.out.split("\n")[0]).toBe("Verification: INTACT, NOT TRUSTED ✗");
+    });
+  });
+
+  it("verifies a path with spaces and shell-special characters exactly", async () => {
+    const odd = path.join(dir, "my prog $(echo x) & 'q' ;`z` *.bin");
+    fs.copyFileSync(genuine("tiny-macho-arm64"), odd);
+    await A.signing.signFileMachO(odd, "@ta");
+
+    const run = await runVerify([odd], A.configDir, home);
+    expect(run.status).toBe(0);
+    expect(run.out.split("\n")[1]).toBe("  File:        " + odd);
   });
 });
