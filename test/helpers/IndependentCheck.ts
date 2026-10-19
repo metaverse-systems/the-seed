@@ -59,7 +59,7 @@ export function osslsigncodeVerify(file: string, certPath: string, home: string)
   const calculated = digestValue(lines, "Calculated message digest");
   const digestsMatch = current !== null && calculated !== null && current === calculated;
   const signatureCount = lines.filter((line) => line.startsWith("Signature Index:")).length;
-  const isProgram = current !== null || calculated !== null;
+  const isProgram = current !== null;
   const passed =
     status === 0 &&
     lines.includes("Signature verification: ok") &&

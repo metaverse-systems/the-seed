@@ -1,15 +1,21 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import crypto from "crypto";
 import Signing from "../src/Signing";
+import { OID, readSignedData } from "../src/CmsReader";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
-import { haveOsslsigncode, osslsigncodeVerify } from "./helpers/IndependentCheck";
+import { haveOpenssl, haveOsslsigncode, opensslVerifyDetached, osslsigncodeVerify } from "./helpers/IndependentCheck";
+import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
 
 // Choices where the contracts leave the shape open:
 //   - the scope @ti is created once for the file in a scratch configuration directory; each case signs its own scratch copy
 //   - the scratch HOME of the process is also the HOME given to the child tools
 //   - "no earlier-form notice" is checked on every warning, so it holds before the notice exists and keeps meaning after
 //   - the paths case asserts the exact-path reading (one signature, equal digests, tool VALID) and not the whole pass, so it guards the path handling alone
+//   - the Mac cases run on both genuine samples (thin arm64 and universal), one scratch copy each, and assert every slice
+//   - the Mac tamper case changes the last byte of the first slice's code directory in the file, then re-reads the slices from the changed file for openssl
+//   - the installer read-back is taken straight from the addon's msiCheckSignature
 //   - the changed byte is the first byte of the first section's raw data, found by reading the section table here
 
 const created: string[] = [];
@@ -27,6 +33,13 @@ function tempDir(prefix: string): string {
 function fixture(...parts: string[]): string {
   return path.join(__dirname, "fixtures", "binaries", ...parts);
 }
+
+function haveOpensslTool(): boolean {
+  return optionalExternalCheck("signature-interop-openssl", haveOpenssl(), "openssl not found");
+}
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
+const addon = require("../native/build/Release/dependency_lister.node") as Record<string, (...args: unknown[]) => unknown>;
 
 function haveTool(): boolean {
   return optionalExternalCheck("signature-interop-osslsigncode", haveOsslsigncode(), "osslsigncode not found");
@@ -140,5 +153,89 @@ describe("Windows program", () => {
       expect(result.digestsMatch).toBe(true);
       expect((await signing.verifyFile(file)).status).toBe("VALID");
     });
+  });
+});
+
+describe("installer", () => {
+  it("genuine/tiny.msi signed by the tool passes osslsigncode, and reads back as matching", async () => {
+    const file = path.join(tempDir("interop-msi-"), "tiny.msi");
+    fs.copyFileSync(fixture("genuine", "tiny.msi"), file);
+    await signing.signFile(file, { scope: "@ti" });
+
+    expect((addon.msiCheckSignature(file) as { state: string }).state).toBe("matches");
+    if (!haveTool()) return;
+    const result = osslsigncodeVerify(file, certPath, home);
+    expect(result.output).not.toMatch(/asn1/i);
+    expect(result.passed).toBe(true);
+  });
+});
+
+const MAC_SAMPLES = ["tiny-macho-arm64", "tiny-macho-universal"];
+
+async function signedMac(name: string): Promise<string> {
+  const file = path.join(tempDir("interop-mac-"), name);
+  fs.copyFileSync(fixture("genuine", name), file);
+  await signing.signFile(file, { scope: "@ti" });
+  return file;
+}
+
+describe("Mac program", () => {
+  it("each slice of genuine/tiny-macho-arm64 and genuine/tiny-macho-universal carries a standard container that openssl verifies over the slice's code directory", async () => {
+    const certificate = Buffer.from(new crypto.X509Certificate(fs.readFileSync(certPath)).raw);
+    for (const name of MAC_SAMPLES) {
+      const file = await signedMac(name);
+      const slices = sliceSignatureBlobs(fs.readFileSync(file));
+      expect(slices).toHaveLength(name === "tiny-macho-universal" ? 2 : 1);
+      for (const slice of slices) {
+        expect(slice.cms).not.toBeNull();
+        const info = readSignedData(slice.cms as Buffer);
+        expect(info.contentType).toBe(OID.data);
+        expect(info.content).toBeUndefined();
+        expect(info.certificates).toHaveLength(1);
+        expect(info.certificates[0].equals(certificate)).toBe(true);
+        const attributes = info.signers[0].signedAttributes;
+        expect(attributes).toBeDefined();
+        const found = attributes as NonNullable<typeof attributes>;
+        expect(found.contentType).toBe(OID.data);
+        expect((found.messageDigest as Buffer).equals(crypto.createHash("sha256").update(slice.codeDirectory).digest())).toBe(true);
+
+        if (haveOpensslTool()) {
+          expect(opensslVerifyDetached(slice.cms as Buffer, slice.codeDirectory, certPath, tempDir("interop-openssl-")).passed).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("the independent checker reports every slice intact and the tool's verifier reports it valid and trusted", async () => {
+    for (const name of MAC_SAMPLES) {
+      const file = await signedMac(name);
+      const report = checkMachO(fs.readFileSync(file));
+      expect(report.problems).toEqual([]);
+      for (const slice of report.slices) {
+        expect(slice.pagesChecked).toBeGreaterThan(0);
+        expect(slice.pagesMismatched).toBe(0);
+      }
+      const verified = await signing.verifyFile(file);
+      expect(verified.status).toBe("VALID");
+      expect(verified.trust.state).toBe("trusted");
+    }
+  });
+
+  it("a changed code directory byte: openssl and the tool both reject", async () => {
+    for (const name of MAC_SAMPLES) {
+      const file = await signedMac(name);
+      const data = fs.readFileSync(file);
+      const codeDirectory = sliceSignatureBlobs(data)[0].codeDirectory;
+      const at = data.indexOf(codeDirectory);
+      expect(at).toBeGreaterThan(0);
+      data[at + codeDirectory.length - 1] ^= 0x01;
+      fs.writeFileSync(file, data);
+
+      expect((await signing.verifyFile(file)).status).toBe("INVALID");
+      if (haveOpensslTool()) {
+        const slice = sliceSignatureBlobs(data)[0];
+        expect(opensslVerifyDetached(slice.cms as Buffer, slice.codeDirectory, certPath, tempDir("interop-openssl-")).passed).toBe(false);
+      }
+    }
   });
 });

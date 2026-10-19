@@ -374,9 +374,9 @@ describe("damage to the signature structure", () => {
     // Rebuild the SuperBlob with an additional entitlements blob (slot 5); the code directory has only
     // two special slots, so nothing covers it
     const blobs = layout.slots.map((s) => ({ type: s.type, data: signedArm64.subarray(layout.signature + s.offset, layout.signature + s.offset + s.length) }));
-    const extra = Buffer.alloc(12);
+    const extra = Buffer.alloc(8);
     extra.writeUInt32BE(0xfade7171, 0);
-    extra.writeUInt32BE(12, 4);
+    extra.writeUInt32BE(8, 4);
     blobs.push({ type: 5, data: extra });
     const headerSize = 12 + 8 * blobs.length;
     const total = headerSize + blobs.reduce((sum, blob) => sum + blob.data.length, 0);

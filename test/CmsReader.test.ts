@@ -212,7 +212,7 @@ function earlierFormSamples(): Sample[] {
   return samples;
 }
 
-const STANDARD_FORM_KINDS: Sample["kind"][] = ["program"];
+const STANDARD_FORM_KINDS: Sample["kind"][] = ["program", "installer", "mac"];
 
 function describeOwnContainers(title: string, load: () => Promise<Sample[]> | Sample[], expectedCertificate: () => Buffer, standardForm: boolean): void {
   describe(title, () => {
@@ -222,7 +222,7 @@ function describeOwnContainers(title: string, load: () => Promise<Sample[]> | Sa
       samples = await load();
     });
 
-    // The forms already written in the standard form; the others are added as their writers switch over.
+    // The freshly signed samples are all in the standard form; the earlier-form set is not filtered.
     const covered = (): Sample[] => (standardForm ? samples.filter((sample) => STANDARD_FORM_KINDS.includes(sample.kind)) : samples);
 
     it("finds the signing certificate in the certificate list, for each form", () => {

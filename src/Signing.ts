@@ -8,7 +8,7 @@ import { pipeline } from "stream/promises";
 import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
 import Config from "./Config";
-import { buildSignatureContainer } from "./CmsBuilder";
+import { buildSignatureContainer, containerCapacity } from "./CmsBuilder";
 import { NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates, worst } from "./Trust";
 import { MachOSliceInfo, checkMachO } from "./MachOVerifier";
 import { CmsDamaged, CmsUnsupported, OID, findSignerCertificate, readSignedData, readSpcDigest, verifySignerSignature } from "./CmsReader";
@@ -502,18 +502,25 @@ class Signing {
     const certPem = fs.readFileSync(certPath, "utf-8");
     const privateKey = crypto.createPrivateKey(keyPem);
 
-    // Reserve room for the CMS of any slice, then let the library compute the
-    // CodeDirectory of every slice for the file as it will be after signing
-    const capacity = this._cmsCapacityFor(certPem, privateKey);
+    // Reserve room for the container of any slice, then let the library compute
+    // the CodeDirectory of every slice for the file as it will be after signing
+    const certDer = Buffer.from(new x509.X509Certificate(certPem).rawData);
+    const capacity = containerCapacity(certDer);
     const prepared = addon.machoPrepareSignature(resolvedPath, identity, capacity);
 
-    // Sign each raw CodeDirectory with ECDSA-SHA256 and wrap it in a detached CMS
-    // (RFC 5652, eContent absent)
+    // One standard-form container per slice, over that slice's CodeDirectory
     const cmsSignatures = prepared.slices.map((slice) => {
-      const sign = crypto.createSign("SHA256");
-      sign.update(slice.codeDirectory);
-      const signature = sign.sign(privateKey);
-      return Buffer.from(this._buildMachOCms(slice.codeDirectory, signature, certPem));
+      const container = buildSignatureContainer(
+        { kind: "mac-program", codeDirectory: Buffer.from(slice.codeDirectory) },
+        certDer,
+        (data) => crypto.sign("sha256", data, privateKey),
+      );
+      if (container.length > capacity) {
+        throw new Error(
+          `${resolvedPath}: the signature container (${container.length} bytes) does not fit the room reserved for it (${capacity} bytes)`
+        );
+      }
+      return container;
     });
 
     // The file is replaced here, once, with every slice signed
@@ -566,18 +573,17 @@ class Signing {
     // Compute MSI Authenticode digest via native addon
     const digestResult = addon.msiComputeDigest(resolvedPath);
 
-    // Build CMS/PKCS#7 Authenticode SignedData for MSI
     const certPem = fs.readFileSync(certPath, "utf-8");
     const keyPem = fs.readFileSync(keyPath, "utf-8");
     const privateKey = crypto.createPrivateKey(keyPem);
 
-    // Sign the digest with ECDSA-SHA256
-    const sign = crypto.createSign("SHA256");
-    sign.update(digestResult.digest);
-    const signature = sign.sign(privateKey);
-
-    // Build CMS blob with SpcSipInfo for MSI
-    const pkcs7Der = this._buildMsiCms(digestResult.digest, signature, certPem);
+    // Build the standard-form container over the package's fingerprint
+    const certDer = Buffer.from(new x509.X509Certificate(certPem).rawData);
+    const pkcs7Der = buildSignatureContainer(
+      { kind: "installer", fingerprint: Buffer.from(digestResult.digest) },
+      certDer,
+      (data) => crypto.sign("sha256", data, privateKey),
+    );
 
     // Embed signature into MSI file via native addon
     // The library refuses a blob whose fingerprint differs from the package's
@@ -590,9 +596,7 @@ class Signing {
         `Installer signature was written but does not read back (${check.detail || check.state})`
       );
     }
-    warnings.push(
-      "Installer fingerprint and structure were verified by reading the signature back; certificate trust is not checked"
-    );
+    warnings.push("Installer signature was read back: its fingerprint matches the package");
 
     // Clean up stale .sig file if it exists
     const staleSigPath = resolvedPath + ".sig";
@@ -610,75 +614,6 @@ class Signing {
     };
   }
 
-  /**
-   * Build a minimal CMS/PKCS#7 SignedData for Authenticode.
-   * Uses SpcIndirectDataContent (1.3.6.1.4.1.311.2.1.4) as eContentType.
-   */
-  _buildAuthenticodeCms(digest: Buffer, signature: Buffer, certPem: string): Buffer {
-    // Parse the X.509 certificate to get its DER encoding
-    const x509Cert = new x509.X509Certificate(certPem);
-    const certDer = Buffer.from(x509Cert.rawData);
-
-    // OIDs
-    const oidSignedData = Buffer.from([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02]); // 1.2.840.113549.1.7.2
-    const oidSpcIndirectData = Buffer.from([0x06, 0x0A, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x01, 0x04]); // 1.3.6.1.4.1.311.2.1.4
-    const oidSha256 = Buffer.from([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]); // 2.16.840.1.101.3.4.2.1
-    const oidEcdsaSha256 = Buffer.from([0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02]); // 1.2.840.10045.4.3.2
-
-    // Build SpcIndirectDataContent
-    //   SpcAttributeTypeAndOptionalValue: OID for SPC_PE_IMAGE_DATAOBJ (1.3.6.1.4.1.311.2.1.15)
-    //   DigestInfo: algorithm SHA-256 + digest value
-    const oidSpcPeImage = Buffer.from([0x06, 0x0A, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x01, 0x0F]); // 1.3.6.1.4.1.311.2.1.15
-
-    // SpcPeImageData (minimal: flags=0, no file link)
-    const spcPeImageData = this._asn1Sequence([
-      Buffer.from([0x03, 0x01, 0x00]), // BIT STRING, flags = 0
-      Buffer.concat([Buffer.from([0xA0, 0x02]), Buffer.from([0xA2, 0x00])]), // [0] EXPLICIT -> [2] IMPLICIT empty
-    ]);
-
-    const spcAttributeTypeAndValue = this._asn1Sequence([
-      oidSpcPeImage,
-      spcPeImageData,
-    ]);
-
-    const digestInfo = this._asn1Sequence([
-      this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])]), // AlgorithmIdentifier
-      Buffer.concat([Buffer.from([0x04, digest.length]), digest]), // OCTET STRING
-    ]);
-
-    const spcIndirectDataContent = this._asn1Sequence([
-      spcAttributeTypeAndValue,
-      digestInfo,
-    ]);
-
-    // Build SignerInfo
-    const issuerAndSerialNumber = this._buildIssuerAndSerialNumber(x509Cert);
-    const signerInfo = this._asn1Sequence([
-      Buffer.from([0x02, 0x01, 0x01]), // version 1
-      issuerAndSerialNumber,
-      this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])]), // digestAlgorithm
-      this._asn1Sequence([oidEcdsaSha256, Buffer.from([0x05, 0x00])]), // signatureAlgorithm
-      Buffer.concat([Buffer.from([0x04, signature.length]), signature]), // signature OCTET STRING
-    ]);
-
-    // Build SignedData
-    const signedData = this._asn1Sequence([
-      Buffer.from([0x02, 0x01, 0x01]), // version 1
-      this._asn1Set([this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])])]), // digestAlgorithms
-      this._asn1Sequence([oidSpcIndirectData, this._asn1Explicit(0, spcIndirectDataContent)]), // contentInfo
-      this._asn1Implicit(0, this._asn1Set([certDer])), // certificates [0] IMPLICIT
-      this._asn1Set([signerInfo]), // signerInfos
-    ]);
-
-    // ContentInfo wrapper
-    const contentInfo = this._asn1Sequence([
-      oidSignedData,
-      this._asn1Explicit(0, signedData),
-    ]);
-
-    return contentInfo;
-  }
-
   /** Name of a Mach-O CPU type as printed by lipo, or its hex value */
   _machoArchName(cpuType: number): string {
     switch (cpuType >>> 0) {
@@ -689,284 +624,6 @@ class Signing {
       default:
         return "0x" + (cpuType >>> 0).toString(16);
     }
-  }
-
-  /**
-   * Upper bound, in bytes, of the DER CMS that _buildMachOCms produces for this
-   * key and certificate. The CMS does not contain the CodeDirectory, so it is
-   * built once from a placeholder and an all-zero signature of the longest
-   * length the key can give, plus 16 bytes for the length encodings. Falls back
-   * to 8192 when no bound can be established.
-   */
-  _cmsCapacityFor(certPem: string, privateKey: crypto.KeyObject): number {
-    const fallback = 8192;
-    try {
-      let maxSignature = 0;
-      const details = privateKey.asymmetricKeyDetails;
-      if (privateKey.asymmetricKeyType === "ec") {
-        const curve = details?.namedCurve;
-        const bits: Record<string, number> = {
-          prime256v1: 256,
-          secp256k1: 256,
-          secp384r1: 384,
-          secp521r1: 521,
-        };
-        const orderBits = curve ? bits[curve] : undefined;
-        if (orderBits) {
-          maxSignature = 2 * Math.ceil(orderBits / 8) + 9;
-        }
-      } else if (privateKey.asymmetricKeyType === "rsa" && details?.modulusLength) {
-        maxSignature = Math.ceil(details.modulusLength / 8);
-      }
-      if (maxSignature === 0) {
-        return fallback;
-      }
-      const placeholder = this._buildMachOCms(Buffer.alloc(0), Buffer.alloc(maxSignature), certPem);
-      return placeholder.length + 16;
-    } catch {
-      return fallback;
-    }
-  }
-
-  /**
-   * Build a minimal CMS SignedData for Mach-O code signing.
-   * Uses id-data (1.2.840.113549.1.7.1) as eContentType, detached (no eContent).
-   */
-  _buildMachOCms(codeDirectory: Buffer, signature: Buffer, certPem: string): Buffer {
-    const x509Cert = new x509.X509Certificate(certPem);
-    const certDer = Buffer.from(x509Cert.rawData);
-
-    const oidSignedData = Buffer.from([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02]); // 1.2.840.113549.1.7.2
-    const oidData = Buffer.from([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x01]); // 1.2.840.113549.1.7.1
-    const oidSha256 = Buffer.from([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]); // 2.16.840.1.101.3.4.2.1
-    const oidEcdsaSha256 = Buffer.from([0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02]); // 1.2.840.10045.4.3.2
-
-    const issuerAndSerialNumber = this._buildIssuerAndSerialNumber(x509Cert);
-    const signerInfo = this._asn1Sequence([
-      Buffer.from([0x02, 0x01, 0x01]), // version 1
-      issuerAndSerialNumber,
-      this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])]), // digestAlgorithm
-      this._asn1Sequence([oidEcdsaSha256, Buffer.from([0x05, 0x00])]), // signatureAlgorithm
-      Buffer.concat([Buffer.from([0x04]), this._asn1EncodeLength(signature.length), signature]), // signature OCTET STRING
-    ]);
-
-    // Detached SignedData — no eContent in contentInfo
-    const signedData = this._asn1Sequence([
-      Buffer.from([0x02, 0x01, 0x01]), // version 1
-      this._asn1Set([this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])])]), // digestAlgorithms
-      this._asn1Sequence([oidData]), // contentInfo (detached: just OID, no content)
-      this._asn1Implicit(0, this._asn1Set([certDer])), // certificates [0] IMPLICIT
-      this._asn1Set([signerInfo]), // signerInfos
-    ]);
-
-    const contentInfo = this._asn1Sequence([
-      oidSignedData,
-      this._asn1Explicit(0, signedData),
-    ]);
-
-    return contentInfo;
-  }
-
-  /**
-   * Build a minimal CMS/PKCS#7 SignedData for MSI Authenticode.
-   * Uses SpcIndirectDataContent (1.3.6.1.4.1.311.2.1.4) as eContentType
-   * with SpcSipInfo (1.3.6.1.4.1.311.2.1.30) as the data type.
-   * The SIP class GUID for MSI is {000C10F1-0000-0000-C000-000000000046}.
-   */
-  _buildMsiCms(digest: Buffer, signature: Buffer, certPem: string): Buffer {
-    const x509Cert = new x509.X509Certificate(certPem);
-    const certDer = Buffer.from(x509Cert.rawData);
-
-    // OIDs
-    const oidSignedData = Buffer.from([0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02]); // 1.2.840.113549.1.7.2
-    const oidSpcIndirectData = Buffer.from([0x06, 0x0A, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x01, 0x04]); // 1.3.6.1.4.1.311.2.1.4
-    const oidSha256 = Buffer.from([0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01]); // 2.16.840.1.101.3.4.2.1
-    const oidEcdsaSha256 = Buffer.from([0x06, 0x08, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02]); // 1.2.840.10045.4.3.2
-    const oidSpcSipInfo = Buffer.from([0x06, 0x0A, 0x2B, 0x06, 0x01, 0x04, 0x01, 0x82, 0x37, 0x02, 0x01, 0x1E]); // 1.3.6.1.4.1.311.2.1.30
-
-    // MSI SIP class GUID: {000C10F1-0000-0000-C000-000000000046}
-    // Encoded in binary (mixed-endian Microsoft GUID format)
-    const msiSipGuid = Buffer.from([
-      0xF1, 0x10, 0x0C, 0x00,  // Data1 LE
-      0x00, 0x00,                // Data2 LE
-      0x00, 0x00,                // Data3 LE
-      0xC0, 0x00,                // Data4[0..1]
-      0x00, 0x00, 0x00, 0x00, 0x00, 0x46, // Data4[2..7]
-    ]);
-
-    // Build SpcSipInfo SEQUENCE: { a INTEGER, uuid OCTET STRING, b-f INTEGERs }
-    const spcSipInfoValue = this._asn1Sequence([
-      Buffer.from([0x02, 0x03, 0x01, 0x00, 0x00]), // INTEGER 65536 (0x010000)
-      Buffer.concat([Buffer.from([0x04, msiSipGuid.length]), msiSipGuid]), // OCTET STRING (GUID)
-      Buffer.from([0x02, 0x01, 0x00]), // INTEGER 0
-      Buffer.from([0x02, 0x01, 0x00]), // INTEGER 0
-      Buffer.from([0x02, 0x01, 0x00]), // INTEGER 0
-      Buffer.from([0x02, 0x01, 0x00]), // INTEGER 0
-    ]);
-
-    const spcAttributeTypeAndValue = this._asn1Sequence([
-      oidSpcSipInfo,
-      spcSipInfoValue,
-    ]);
-
-    const digestInfo = this._asn1Sequence([
-      this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])]), // AlgorithmIdentifier
-      Buffer.concat([Buffer.from([0x04, digest.length]), digest]), // OCTET STRING
-    ]);
-
-    const spcIndirectDataContent = this._asn1Sequence([
-      spcAttributeTypeAndValue,
-      digestInfo,
-    ]);
-
-    // Build SignerInfo
-    const issuerAndSerialNumber = this._buildIssuerAndSerialNumber(x509Cert);
-    const signerInfo = this._asn1Sequence([
-      Buffer.from([0x02, 0x01, 0x01]), // version 1
-      issuerAndSerialNumber,
-      this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])]), // digestAlgorithm
-      this._asn1Sequence([oidEcdsaSha256, Buffer.from([0x05, 0x00])]), // signatureAlgorithm
-      Buffer.concat([Buffer.from([0x04, signature.length]), signature]), // signature OCTET STRING
-    ]);
-
-    // Build SignedData
-    const signedData = this._asn1Sequence([
-      Buffer.from([0x02, 0x01, 0x01]), // version 1
-      this._asn1Set([this._asn1Sequence([oidSha256, Buffer.from([0x05, 0x00])])]), // digestAlgorithms
-      this._asn1Sequence([oidSpcIndirectData, this._asn1Explicit(0, spcIndirectDataContent)]), // contentInfo
-      this._asn1Implicit(0, this._asn1Set([certDer])), // certificates [0] IMPLICIT
-      this._asn1Set([signerInfo]), // signerInfos
-    ]);
-
-    // ContentInfo wrapper
-    const contentInfo = this._asn1Sequence([
-      oidSignedData,
-      this._asn1Explicit(0, signedData),
-    ]);
-
-    return contentInfo;
-  }
-
-  /**
-   * Build IssuerAndSerialNumber from an X.509 certificate for CMS SignerInfo.
-   */
-  _buildIssuerAndSerialNumber(cert: x509.X509Certificate): Buffer {
-    // Parse from the certificate's TBS to extract issuer and serial
-    const rawData = Buffer.from(cert.rawData);
-    // Extract serial number from cert
-    const serialHex = cert.serialNumber;
-    const serialBytes = Buffer.from(serialHex, "hex");
-    const serialAsn1 = Buffer.concat([
-      Buffer.from([0x02, serialBytes.length]),
-      serialBytes,
-    ]);
-
-    // Extract issuer Name from the TBS certificate
-    // The issuer is the same as subject for self-signed certs
-    const issuerDer = this._extractIssuerFromCert(rawData);
-
-    return this._asn1Sequence([issuerDer, serialAsn1]);
-  }
-
-  /**
-   * Extract the issuer Name DER from a certificate's raw DER encoding.
-   */
-  _extractIssuerFromCert(certDer: Buffer): Buffer {
-    // Parse outer SEQUENCE
-    let offset = 0;
-    if (certDer[offset] !== 0x30) throw new Error("Not a valid certificate");
-    offset++;
-    const { length: outerLen, bytesRead: outerLenBytes } = this._asn1ReadLength(certDer, offset);
-    offset += outerLenBytes;
-
-    // TBSCertificate SEQUENCE
-    if (certDer[offset] !== 0x30) throw new Error("Not a valid TBSCertificate");
-    offset++;
-    const { length: tbsLen, bytesRead: tbsLenBytes } = this._asn1ReadLength(certDer, offset);
-    offset += tbsLenBytes;
-
-    // version [0] EXPLICIT (optional)
-    if (certDer[offset] === 0xA0) {
-      offset++;
-      const { length: vLen, bytesRead: vLenBytes } = this._asn1ReadLength(certDer, offset);
-      offset += vLenBytes + vLen;
-    }
-
-    // serialNumber INTEGER
-    if (certDer[offset] !== 0x02) throw new Error("Expected INTEGER for serial");
-    offset++;
-    const { length: serialLen, bytesRead: serialLenBytes } = this._asn1ReadLength(certDer, offset);
-    offset += serialLenBytes + serialLen;
-
-    // signature AlgorithmIdentifier SEQUENCE
-    if (certDer[offset] !== 0x30) throw new Error("Expected SEQUENCE for algorithm");
-    offset++;
-    const { length: algLen, bytesRead: algLenBytes } = this._asn1ReadLength(certDer, offset);
-    offset += algLenBytes + algLen;
-
-    // issuer Name SEQUENCE
-    const issuerStart = offset;
-    if (certDer[offset] !== 0x30) throw new Error("Expected SEQUENCE for issuer");
-    offset++;
-    const { length: issuerContentLen, bytesRead: issuerLenBytes } = this._asn1ReadLength(certDer, offset);
-    offset += issuerLenBytes + issuerContentLen;
-    const issuerEnd = offset;
-
-    return certDer.subarray(issuerStart, issuerEnd);
-  }
-
-  /** Read ASN.1 length field, returning the length value and how many bytes the length field occupies */
-  _asn1ReadLength(buf: Buffer, offset: number): { length: number; bytesRead: number } {
-    const first = buf[offset];
-    if (first < 0x80) {
-      return { length: first, bytesRead: 1 };
-    }
-    const numBytes = first & 0x7F;
-    let length = 0;
-    for (let i = 0; i < numBytes; i++) {
-      length = (length << 8) | buf[offset + 1 + i];
-    }
-    return { length, bytesRead: 1 + numBytes };
-  }
-
-  /** Encode ASN.1 length */
-  _asn1EncodeLength(length: number): Buffer {
-    if (length < 0x80) {
-      return Buffer.from([length]);
-    }
-    const bytes: number[] = [];
-    let temp = length;
-    while (temp > 0) {
-      bytes.unshift(temp & 0xFF);
-      temp >>= 8;
-    }
-    return Buffer.from([0x80 | bytes.length, ...bytes]);
-  }
-
-  /** Build ASN.1 SEQUENCE */
-  _asn1Sequence(items: Buffer[]): Buffer {
-    const content = Buffer.concat(items);
-    return Buffer.concat([Buffer.from([0x30]), this._asn1EncodeLength(content.length), content]);
-  }
-
-  /** Build ASN.1 SET */
-  _asn1Set(items: Buffer[]): Buffer {
-    const content = Buffer.concat(items);
-    return Buffer.concat([Buffer.from([0x31]), this._asn1EncodeLength(content.length), content]);
-  }
-
-  /** Build ASN.1 EXPLICIT tagged value */
-  _asn1Explicit(tag: number, value: Buffer): Buffer {
-    return Buffer.concat([Buffer.from([0xA0 | tag]), this._asn1EncodeLength(value.length), value]);
-  }
-
-  /** Build ASN.1 IMPLICIT tagged wrapper (replaces outer tag of content) */
-  _asn1Implicit(tag: number, value: Buffer): Buffer {
-    // Replace the outer tag byte of value with the implicit tag
-    const result = Buffer.alloc(value.length);
-    value.copy(result);
-    result[0] = 0xA0 | tag;
-    return result;
   }
 
   /**
