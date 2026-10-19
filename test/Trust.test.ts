@@ -520,3 +520,90 @@ describe("signer certificate details (_buildSignerInfo)", () => {
     expect(info.notBefore.toISOString().slice(0, 10)).toBe(new Date(cert.validFrom).toISOString().slice(0, 10));
   });
 });
+
+// ── Expiry warnings ──────────────────────────────────────────
+
+describe("verify with a scope certificate outside its validity", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  // Choice: the warnings are worded exactly as below, with the date in UTC.
+  const expiredWarning = (date: string): string => `signer certificate expired on ${date}; the signing time is not established because timestamps are not checked`;
+  const notYetWarning = (date: string): string => `signer certificate is not valid until ${date}`;
+
+  /** A configuration whose scope certificate and key were written by hand with the given validity. */
+  async function scopeWithValidity(scope: string, notBefore: Date, notAfter: Date): Promise<{ signing: Signing; certPath: string; certificate: crypto.X509Certificate }> {
+    const configDir = tempDir("trust-expiry-");
+    writeConfig(configDir, [scope]);
+    const signing = new Signing(configDir);
+    const webcrypto = crypto.webcrypto as unknown as Crypto;
+    x509.cryptoProvider.set(webcrypto);
+    const keys = (await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" } as EcKeyGenParams, true, ["sign", "verify"])) as CryptoKeyPair;
+    const generated = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "0a",
+      name: "CN=Validity Test, O=" + scope,
+      notBefore,
+      notAfter,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" } as EcdsaParams,
+      keys,
+    });
+    const pkcs8 = Buffer.from(await webcrypto.subtle.exportKey("pkcs8", keys.privateKey));
+    fs.mkdirSync(path.dirname(signing.scopeCertPath(scope)), { recursive: true });
+    fs.writeFileSync(signing.scopeCertPath(scope), generated.toString("pem"));
+    fs.writeFileSync(signing.scopeKeyPath(scope), "-----BEGIN PRIVATE KEY-----\n" + (pkcs8.toString("base64").match(/.{1,64}/g) as string[]).join("\n") + "\n-----END PRIVATE KEY-----\n", { mode: 0o600 });
+    return { signing, certPath: signing.scopeCertPath(scope), certificate: new crypto.X509Certificate(generated.toString("pem")) };
+  }
+
+  function scratchFile(): string {
+    const file = path.join(tempDir("trust-expiry-file-"), "data.bin");
+    fs.writeFileSync(file, Buffer.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]));
+    return file;
+  }
+
+  const utcDate = (text: string): string => new Date(text).toISOString().slice(0, 10);
+
+  it("an expired scope certificate gives VALID with the expiry warning naming the certificate's notAfter date in UTC", async () => {
+    const { signing, certificate } = await scopeWithValidity("@old", new Date(Date.now() - 30 * DAY), new Date(Date.now() - DAY));
+    const file = scratchFile();
+    await signing.signFile(file, { scope: "@old", force: true });
+
+    const result = await signing.verifyFile(file);
+    expect(result.status).toBe("VALID");
+    expect(result.trust.state).toBe("trusted");
+    expect(result.warnings).toContain(expiredWarning(utcDate(certificate.validTo)));
+  });
+
+  it("a scope certificate that is not valid until tomorrow gives VALID with the 'is not valid until' warning", async () => {
+    const { signing, certificate } = await scopeWithValidity("@new", new Date(Date.now() + DAY), new Date(Date.now() + 30 * DAY));
+    const file = scratchFile();
+    await signing.signFile(file, { scope: "@new", force: true });
+
+    const result = await signing.verifyFile(file);
+    expect(result.status).toBe("VALID");
+    expect(result.warnings).toContain(notYetWarning(utcDate(certificate.validFrom)));
+    expect(result.warnings.filter((warning) => warning.includes("expired on"))).toEqual([]);
+  });
+
+  it("a certificate inside its validity gives no expiry or validity warning", async () => {
+    const { signing } = await setup(["@ok"], ["@ok"]);
+    const file = scratchFile();
+    await signing.signFile(file, { scope: "@ok" });
+
+    const result = await signing.verifyFile(file);
+    expect(result.status).toBe("VALID");
+    expect(result.warnings.filter((warning) => /expired on|not valid until/.test(warning))).toEqual([]);
+  });
+
+  it("an expired certificate used as a supplied anchor still matches by fingerprint, with the same warning", async () => {
+    const { signing, certPath, certificate } = await scopeWithValidity("@old", new Date(Date.now() - 30 * DAY), new Date(Date.now() - DAY));
+    const file = scratchFile();
+    await signing.signFile(file, { scope: "@old", force: true });
+
+    // A configuration that does not know the scope, so only the supplied certificate can match
+    const other = await setup(["@other"], ["@other"]);
+    const trust = other.signing.loadTrust([certPath]);
+    const result = await other.signing.verifyFile(file, { trust });
+    expect(result.status).toBe("VALID");
+    expect(result.trust.state).toBe("trusted");
+    expect(result.trust.anchor).toMatchObject({ source: "supplied", fingerprint: certificateFingerprint(Buffer.from(certificate.raw)) });
+    expect(result.warnings).toContain(expiredWarning(utcDate(certificate.validTo)));
+  });
+});

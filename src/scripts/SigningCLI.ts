@@ -2,6 +2,7 @@ import path from "path";
 import inquirer from "inquirer";
 import Signing from "../Signing";
 import Config from "../Config";
+import { exitStatusOf } from "../Trust";
 import { ScriptArgsType } from "../types";
 
 /**
@@ -243,14 +244,48 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
       break;
     }
     case "verify": {
-      const targetPath = getPositional();
+      const VERIFY_USAGE = "Usage: the-seed signing verify [--cert <file>]... <path>";
+      const certFiles: string[] = [];
+      let targetPath: string | undefined;
+      for (let i = 4; i < scriptConfig.args.length; i++) {
+        const arg = scriptConfig.args[i];
+        if (arg === "--cert") {
+          const value = scriptConfig.args[i + 1];
+          if (value === undefined) {
+            console.error("Error: --cert needs a file");
+            console.error(VERIFY_USAGE);
+            process.exit(3);
+            return;
+          }
+          certFiles.push(value);
+          i++;
+        } else if (arg.startsWith("--")) {
+          console.error(`Error: Unknown option ${arg}`);
+          console.error(VERIFY_USAGE);
+          process.exit(3);
+          return;
+        } else if (targetPath === undefined) {
+          targetPath = arg;
+        }
+      }
 
       if (!targetPath) {
-        console.error("Error: Missing path argument. Usage: the-seed signing verify <path>");
+        console.error(`Error: Missing path argument. ${VERIFY_USAGE}`);
         process.exit(3);
         return;
       }
 
+      // Supplied certificates are read before the target is examined; an unusable one stops the command.
+      let trust;
+      try {
+        trust = signing.loadTrust(certFiles.length > 0 ? certFiles : undefined);
+      } catch (err: unknown) {
+        console.error("Error: " + (err instanceof Error ? err.message : String(err)));
+        process.exit(2);
+        return;
+      }
+
+      let exitStatus = 0;
       try {
         const fs = await import("fs");
         const resolvedPath = path.resolve(targetPath);
@@ -264,7 +299,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
         const stat = fs.statSync(resolvedPath);
 
         if (stat.isDirectory()) {
-          const result = await signing.verifyDirectory(targetPath);
+          const result = await signing.verifyDirectory(targetPath, { trust });
           console.log(`Verifying directory: ${targetPath}`);
           for (const r of result.results) {
             const relPath = path.relative(resolvedPath, r.filePath);
@@ -283,32 +318,40 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
             console.log(`  Result: PASS (${result.passed} of ${result.results.length} files valid)`);
           } else {
             console.log(`  Result: FAIL (${result.failed + result.notFound} of ${result.results.length} files invalid)`);
-            process.exit(1);
+            exitStatus = 1;
           }
         } else {
-          const result = await signing.verifyFile(targetPath);
-          if (result.status === "VALID") {
-            const subjectStr = result.signer ? signing._formatSubject(result.signer.subject) : "Unknown";
-            const issuer = result.signer?.issuer || "Unknown";
-            const fingerprint = result.signer?.fingerprint || "Unknown";
-            console.log("Verification: VALID ✓");
-            console.log(`  File:        ${result.filePath}`);
-            console.log(`  Signer:      ${subjectStr}`);
-            console.log(`  Issuer:      ${issuer}`);
-            console.log(`  Fingerprint: ${fingerprint}`);
-          } else if (result.status === "INVALID") {
-            const subjectStr = result.signer ? signing._formatSubject(result.signer.subject) : "";
-            console.log("Verification: INVALID ✗");
-            console.log(`  File:        ${result.filePath}`);
+          const result = await signing.verifyFile(targetPath, { trust });
+          const headlines: Record<string, string> = {
+            VALID: "VALID ✓",
+            UNTRUSTED: "INTACT, NOT TRUSTED ✗",
+            INVALID: "INVALID ✗",
+            NOT_FULLY_SIGNED: "NOT FULLY SIGNED ✗",
+            NOT_CHECKED: "SIGNATURE NOT CHECKED ✗",
+            NOT_FOUND: "NO SIGNATURE",
+          };
+          console.log(`Verification: ${headlines[result.status] ?? result.status}`);
+          console.log(`  File:        ${result.filePath}`);
+          if (result.status !== "VALID" && result.reason) {
             console.log(`  Reason:      ${result.reason}`);
-            if (subjectStr) console.log(`  Signer:      ${subjectStr}`);
-            process.exit(1);
-          } else {
-            console.log(`Verification: ${result.status.replace(/_/g, " ")}`);
-            console.log(`  File:        ${result.filePath}`);
-            console.log(`  Reason:      ${result.reason}`);
-            process.exit(1);
           }
+          if (result.trust.state === "trusted" && result.trust.anchor) {
+            const anchor = result.trust.anchor;
+            console.log(
+              `  Trust:       trusted: ${anchor.source === "scope" ? `certificate of scope ${anchor.scope}` : `supplied certificate ${anchor.path}`}`
+            );
+          } else if (result.trust.state === "untrusted") {
+            console.log(`  Trust:       not trusted: ${result.trust.message}`);
+          }
+          if (result.signer) {
+            console.log(`  Signer:      ${signing._formatSubject(result.signer.subject)}`);
+            console.log(`  Issuer:      ${result.signer.issuer || "Unknown"}`);
+            console.log(`  Fingerprint: ${result.signer.fingerprint}`);
+          }
+          for (const warning of result.warnings) {
+            console.log(`  Warning: ${warning}`);
+          }
+          exitStatus = exitStatusOf(result.status);
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -322,6 +365,10 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           console.error("Error: " + message);
           process.exit(2);
         }
+        return;
+      }
+      if (exitStatus !== 0) {
+        process.exit(exitStatus);
       }
       break;
     }

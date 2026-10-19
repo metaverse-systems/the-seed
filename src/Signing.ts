@@ -1254,6 +1254,16 @@ class Signing {
       trustResult = evaluateTrust(signerDer ?? null, trust);
     }
     const status = outcomeOf(integrity, trustResult);
+    const signer = signerDer ? this._buildSignerInfo(new crypto.X509Certificate(signerDer)) : undefined;
+    const validityWarnings: string[] = [];
+    if (signer?.isExpired) {
+      validityWarnings.push(
+        `signer certificate expired on ${signer.notAfter.toISOString().slice(0, 10)}; the signing time is not established because timestamps are not checked`
+      );
+    }
+    if (signer?.isNotYetValid) {
+      validityWarnings.push(`signer certificate is not valid until ${signer.notBefore.toISOString().slice(0, 10)}`);
+    }
     const result: VerifyResult = {
       filePath,
       status,
@@ -1261,7 +1271,7 @@ class Signing {
       signatureType,
       integrity,
       trust: trustResult,
-      warnings: [...trust.warnings, ...(extra.warnings ?? [])],
+      warnings: [...trust.warnings, ...validityWarnings, ...(extra.warnings ?? [])],
       notChecked: [...NOT_CHECKED_ALWAYS, ...(extra.notChecked ?? [])],
     };
     if (status === "UNTRUSTED") {
@@ -1269,8 +1279,8 @@ class Signing {
     } else if (status !== "VALID") {
       result.reason = integrity.reason;
     }
-    if (signerDer) {
-      result.signer = this._buildSignerInfo(new crypto.X509Certificate(signerDer));
+    if (signer) {
+      result.signer = signer;
     }
     if (extra.slices !== undefined) {
       result.slices = extra.slices;
