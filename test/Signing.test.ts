@@ -321,6 +321,8 @@ describe("Signing", () => {
       expect(result.signer).toBeDefined();
       expect(result.signer!.subject.commonName).toBe("Test User");
       expect(result.signer!.fingerprint).toMatch(/^SHA256:/);
+      expect(result.trust.state).toBe("trusted");
+      expect(result.integrity.state).toBe("intact");
     });
 
     it("returns INVALID when file content is modified", async () => {
@@ -358,13 +360,12 @@ describe("Signing", () => {
       await signing.signDirectory(testDir, { scope: "@test" });
       const result = await signing.verifyDirectory(testDir);
 
-      expect(result.overallPass).toBe(true);
-      expect(result.passed).toBe(2);
-      expect(result.failed).toBe(0);
-      expect(result.notFound).toBe(0);
+      expect(result.status).toBe("VALID");
+      expect(result.counts.valid).toBe(2);
       expect(result.results.length).toBe(2);
       for (const r of result.results) {
         expect(r.status).toBe("VALID");
+        expect(r.signerMatchesManifest).toBe(true);
       }
     });
 
@@ -374,8 +375,12 @@ describe("Signing", () => {
       fs.appendFileSync(path.join(testDir, "a.bin"), Buffer.from([0x00]));
 
       const result = await signing.verifyDirectory(testDir);
-      expect(result.overallPass).toBe(false);
-      expect(result.failed).toBeGreaterThanOrEqual(1);
+      expect(result.status).toBe("INVALID");
+      expect(result.counts.invalid).toBe(1);
+      const tampered = result.results.find((r) => r.relativePath === "a.bin");
+      expect(tampered?.status).toBe("INVALID");
+      // the reason names the file as modified
+      expect(tampered?.reason).toMatch(/modified/i);
     });
   });
 

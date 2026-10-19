@@ -32,6 +32,7 @@ Mach-O code signing exports:
 | `machoStripSignature(filePath)` | Remove the code signature of every slice |
 | `machoBuildSuperBlob` | Format a SuperBlob only (not a signing step) |
 | `machoExtractSignature`, `machoHasEmbeddedSignature` | Read; `machoHasEmbeddedSignature` is true for a universal file only when every slice is signed |
+| `machoListSlices(filePath)` | The slice table, one entry per slice (one for a thin file): `cpuType`, `cpuSubtype`, `offset`, `size`, `isSigned`, `signatureOffset` (relative to the slice), `signatureSize`, `supported` and `unsupportedReason`; `verify` uses it, and throws the library's text for a file that is not a readable Mach-O program |
 | `machoComputeCodeDirectory`, `machoEmbedSignature` | Removed in libthe-seed 0.6.0; always throw an error that names the replacement |
 
 Windows installer exports:
@@ -46,4 +47,5 @@ Windows installer exports:
 ## Test helpers and fixtures
 
 * `test/helpers/CfbChecker.ts` is an independent TypeScript walker of the installer container (Node `crypto` SHA-256, children sorted by raw name bytes, signature streams excluded). It shares no code with `src/` and reads the values recorded in `test/fixtures/binaries/genuine/msi-reference.txt`.
+* `test/helpers/Universal.ts` assembles universal Mac programs from given slices (a 32-bit big-endian table, slices at `2^align` boundaries) for tests that need a partly signed or unsupported-slice program. `test/helpers/Command.ts` runs `signing verify` through `runCli` with a scratch configuration directory and a scratch `HOME`, capturing its output and exit status. Neither shares code with `src/`.
 * `test/fixtures/binaries/genuine/` holds the installer samples (`tiny.msi`, `tiny-v4.msi`, `tiny-osslsig-*.msi`, `nested.msi`, `legacy-the-seed-0.6.0.msi`) with their SHA-256 values in its `README.md`.

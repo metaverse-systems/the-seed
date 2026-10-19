@@ -4,9 +4,11 @@ import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
+import { readSignedData } from "../src/CmsReader";
 import { checkMachO } from "./helpers/MachOChecker";
 import { CfbPackage, loadReference, parsePackage, storedDigest } from "./helpers/CfbChecker";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { makeUniversal } from "./helpers/Universal";
 
 /**
  * Create a temporary directory for test isolation.
@@ -662,6 +664,7 @@ describe("signFileMsi", () => {
 
     const verifyResult = await signing.verifyFileMsi(msiFile);
     expect(verifyResult.status).toBe("VALID");
+    expect(verifyResult.trust.state).toBe("trusted");
     expect(verifyResult.signatureType).toBe("embedded");
   });
 
@@ -931,6 +934,7 @@ describe("tampered and mismatched installers are never reported signed (real add
     await signing.signFileMsi(file, scope);
     const result = await signing.verifyFileMsi(file);
     expect(result.status).toBe("VALID");
+    expect(result.trust.state).toBe("trusted");
     expect(result.signatureType).toBe("embedded");
     const check = loadAddon().msiCheckSignature(file) as { state: string; storedDigest: Buffer; computedDigest: Buffer };
     expect(check.state).toBe("matches");
@@ -955,7 +959,7 @@ describe("tampered and mismatched installers are never reported signed (real add
 
     const result = await signing.verifyFileMsi(file);
     expect(result.status).toBe("INVALID");
-    expect(result.reason).toMatch(/signature present but does not match the package contents/);
+    expect(result.reason).toMatch(/the file was changed after signing: its fingerprint differs from the one in the signature/);
     expect((loadAddon().msiCheckSignature(file) as { state: string }).state).toBe("mismatch");
   });
 
@@ -968,13 +972,38 @@ describe("tampered and mismatched installers are never reported signed (real add
   });
 
   it("verify reports the state of every osslsigncode sample the same way: matches the contents, then a certificate check", async () => {
-    // A signature made by another tool holds the right fingerprint, so the package side matches;
-    // the signer's certificate and signature are not the-seed's, so the result is not VALID.
-    const file = copyMsi("tiny-osslsig-small.msi", tempDir);
-    expect((loadAddon().msiCheckSignature(file) as { state: string }).state).toBe("matches");
-    const result = await signing.verifyFileMsi(file);
-    expect(result.status).not.toBe("VALID");
-    expect(result.reason).not.toMatch(/does not match the package contents/);
+    // A signature made by another tool holds the right fingerprint, so the package side matches and the
+    // file is intact; its signer is not one the configuration trusts, so the result is UNTRUSTED, and
+    // trusting that signer's certificate (read out by openssl, an independent tool) makes it VALID.
+    // The sample with an extended signature stream cannot be compared by this tool and is not checked.
+    for (const name of ["tiny-osslsig-small.msi", "tiny-osslsig-large.msi"]) {
+      const file = copyMsi(name, tempDir);
+      expect((loadAddon().msiCheckSignature(file) as { state: string }).state).toBe("matches");
+      const result = await signing.verifyFileMsi(file);
+      expect(result.status).toBe("UNTRUSTED");
+      expect(result.integrity.state).toBe("intact");
+      expect(result.signer?.subject.commonName).toBe("sample-check");
+      expect(result.reason).not.toMatch(/does not match the package contents/);
+
+      if (optionalExternalCheck("openssl pkcs7 -print_certs", spawnSync("openssl", ["version"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).status === 0, "openssl not found")) {
+        const certFile = path.join(tempDir, name + ".cert.pem");
+        const signatureFile = path.join(tempDir, name + ".p7");
+        fs.writeFileSync(signatureFile, loadAddon().msiExtractSignature(file) as Buffer);
+        const printed = spawnSync("openssl", ["pkcs7", "-inform", "DER", "-in", signatureFile, "-print_certs"], {
+          encoding: "utf8",
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tempDir, LC_ALL: "C", TZ: "UTC" },
+        });
+        expect(printed.status).toBe(0);
+        fs.writeFileSync(certFile, printed.stdout);
+        const trusted = await signing.verifyFileMsi(file, { trust: signing.loadTrust([certFile]) });
+        expect(trusted.status).toBe("VALID");
+        expect(trusted.trust.state).toBe("trusted");
+      }
+    }
+
+    const dse = await signing.verifyFileMsi(copyMsi("tiny-osslsig-dse.msi", tempDir));
+    expect(dse.status).toBe("NOT_CHECKED");
+    expect(dse.integrity.state).toBe("not-checked");
   });
 
   it("a signature made for another package is refused and the file stays as it was", () => {
@@ -1018,6 +1047,157 @@ describe("tampered and mismatched installers are never reported signed (real add
     const file = path.join(tempDir, "missing.msi");
     await expect(signing.signFileMsi(file, scope)).rejects.toThrow();
     expect(fs.readdirSync(tempDir)).toEqual([]);
+  });
+});
+
+describe("signatures made by other tools (real addon, openssl and osslsigncode)", () => {
+  // Wording these tests fix:
+  //   - a Windows program or installer whose stored fingerprint differs from the file's:
+  //       reason contains "the file was changed after signing: its fingerprint differs from the one in the signature"
+  //   - an installer with an extended signature stream (\u0005MsiDigitalSignatureEx):
+  //       NOT_CHECKED, integrity.reason contains "extended signature stream"
+  //   - a signature whose container the verifier cannot read keeps "could not be read" (installer, from the library)
+  let signing: Signing;
+  let scope: string;
+  let tempDir: string;
+
+  beforeAll(async () => {
+    const setup = await setupSigning();
+    signing = setup.signing;
+    scope = setup.scope;
+  });
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const haveTools = (): boolean => spawnSync("openssl", ["version"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).status === 0 && spawnSync("osslsigncode", ["--version"], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).status === 0;
+
+  /** Runs a tool with an explicit environment, in the scratch directory. */
+  function run(command: string, args: string[]): void {
+    const result = spawnSync(command, args, {
+      cwd: tempDir,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: tempDir, LC_ALL: "C", TZ: "UTC" },
+    });
+    if (result.status !== 0) {
+      throw new Error(command + " " + args.join(" ") + " failed: " + result.stdout + result.stderr);
+    }
+  }
+
+  /** An ECDSA certificate and key made by openssl; `plain` leaves out the extensions, which makes the certificate shorter. */
+  function makeCertificate(name: string, plain: boolean): { cert: string; key: string } {
+    const key = path.join(tempDir, name + "-key.pem");
+    const cert = path.join(tempDir, name + "-cert.pem");
+    run("openssl", ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key]);
+    const extensions = plain ? [] : ["-addext", "keyUsage=digitalSignature", "-addext", "extendedKeyUsage=codeSigning"];
+    run("openssl", ["req", "-new", "-x509", "-key", key, "-subj", "/CN=" + name, "-days", "30", "-out", cert, ...extensions]);
+    return { cert, key };
+  }
+
+  function signExe(certsFile: string, key: string, out: string): void {
+    run("osslsigncode", ["sign", "-certs", certsFile, "-key", key, "-h", "sha256", "-in", fixturePath("tiny.exe"), "-out", out]);
+  }
+
+  it("a Windows program signed by osslsigncode is intact but not trusted, and valid once its certificate is trusted", async () => {
+    if (!optionalExternalCheck("osslsigncode and openssl", haveTools(), "openssl or osslsigncode not found")) {
+      return;
+    }
+    const signer = makeCertificate("other-tool", false);
+    const out = path.join(tempDir, "signed.exe");
+    signExe(signer.cert, signer.key, out);
+
+    const result = await signing.verifyFile(out);
+    expect(result.status).toBe("UNTRUSTED");
+    expect(result.form).toBe("windows-program");
+    expect(result.integrity.state).toBe("intact");
+    expect(result.trust.state).toBe("untrusted");
+    expect(result.signer?.subject.commonName).toBe("other-tool");
+
+    const trusted = await signing.verifyFile(out, { trust: signing.loadTrust([signer.cert]) });
+    expect(trusted.status).toBe("VALID");
+    expect(trusted.trust.state).toBe("trusted");
+    expect(trusted.trust.anchor?.source).toBe("supplied");
+  });
+
+  it("names the signer the signer record names when another certificate comes first in the container", async () => {
+    if (!optionalExternalCheck("osslsigncode and openssl", haveTools(), "openssl or osslsigncode not found")) {
+      return;
+    }
+    const signer = makeCertificate("other-tool", false);
+    // The container's certificate list is a DER SET OF, which osslsigncode orders by encoding. The extra
+    // certificate has a short name and no extensions, so it is shorter than the signer's and comes first.
+    const extra = makeCertificate("x", true);
+    const chain = path.join(tempDir, "chain.pem");
+    fs.writeFileSync(chain, fs.readFileSync(extra.cert, "utf-8") + fs.readFileSync(signer.cert, "utf-8"));
+    const out = path.join(tempDir, "signed.exe");
+    signExe(chain, signer.key, out);
+
+    const extraDer = Buffer.from(new crypto.X509Certificate(fs.readFileSync(extra.cert)).raw);
+    const listed = readSignedData(loadAddon().peExtractSignature(out) as Buffer).certificates;
+    expect(listed).toHaveLength(2);
+    expect(listed[0].equals(extraDer)).toBe(true);
+
+    const result = await signing.verifyFile(out);
+    expect(result.status).toBe("UNTRUSTED");
+    expect(result.integrity.state).toBe("intact");
+    expect(result.signer?.subject.commonName).toBe("other-tool");
+
+    expect((await signing.verifyFile(out, { trust: signing.loadTrust([signer.cert]) })).status).toBe("VALID");
+    // The first certificate in the container is not the signer, so trusting it does not trust the file
+    expect((await signing.verifyFile(out, { trust: signing.loadTrust([extra.cert]) })).status).toBe("UNTRUSTED");
+  });
+
+  it("a byte changed in a program signed by osslsigncode is invalid: the file was changed after signing", async () => {
+    if (!optionalExternalCheck("osslsigncode and openssl", haveTools(), "openssl or osslsigncode not found")) {
+      return;
+    }
+    const signer = makeCertificate("other-tool", false);
+    const out = path.join(tempDir, "signed.exe");
+    signExe(signer.cert, signer.key, out);
+    const bytes = fs.readFileSync(out);
+    // The last byte of the original program is covered by the fingerprint
+    bytes[fs.statSync(fixturePath("tiny.exe")).size - 1] ^= 0xff;
+    fs.writeFileSync(out, bytes);
+
+    const result = await signing.verifyFile(out);
+    expect(result.status).toBe("INVALID");
+    expect(result.integrity.state).toBe("invalid");
+    expect(result.integrity.reason).toContain("the file was changed after signing: its fingerprint differs from the one in the signature");
+    expect(result.signer?.subject.commonName).toBe("other-tool");
+  });
+
+  it("the installer with an extended signature stream is not checked, rather than reported as changed", async () => {
+    const result = await signing.verifyFile(copyMsi("tiny-osslsig-dse.msi", tempDir));
+    expect(result.status).toBe("NOT_CHECKED");
+    expect(result.form).toBe("installer");
+    expect(result.integrity.state).toBe("not-checked");
+    expect(result.integrity.reason).toContain("extended signature stream");
+    expect(result.trust.state).toBe("not-applicable");
+  });
+
+  it("the installer signed by version 0.6.0 stays invalid: it could not be read", async () => {
+    // Through the installer verifier directly, as the earlier case did: verifyFile does not take this file as signed
+    const result = await signing.verifyFileMsi(copyMsi("legacy-the-seed-0.6.0.msi", tempDir));
+    expect(result.status).toBe("INVALID");
+    expect(result.integrity.reason).toMatch(/could not be read/);
+  });
+
+  it("a program and an installer signed by this tool are still valid and trusted", async () => {
+    const exe = copyFixture("tiny.exe", tempDir);
+    await signing.signFile(exe, { scope });
+    const msi = copyMsi("tiny.msi", tempDir);
+    await signing.signFile(msi, { scope });
+    for (const file of [exe, msi]) {
+      const result = await signing.verifyFile(file);
+      expect(result.status).toBe("VALID");
+      expect(result.integrity.state).toBe("intact");
+      expect(result.trust.state).toBe("trusted");
+    }
   });
 });
 
@@ -1202,5 +1382,162 @@ describe("PE signature removal (real addon)", () => {
     const verify = await signing.verifyFile(peFile);
     expect(verify.status).toBe("VALID");
     expect(loadAddon().peHasEmbeddedSignature(peFile)).toBe(true);
+  });
+});
+
+// ── Slice table (real addon) ─────────────────────────────────
+
+describe("machoListSlices (real addon)", () => {
+  interface SliceInfo {
+    cpuType: number;
+    cpuSubtype: number;
+    offset: number;
+    size: number;
+    isSigned: boolean;
+    signatureOffset: number;
+    signatureSize: number;
+    supported: boolean;
+    unsupportedReason: string;
+  }
+
+  let signing: Signing;
+  let scope: string;
+  let tempDir: string;
+  const addon = loadAddon();
+  const listSlices = (file: string): SliceInfo[] => addon.machoListSlices(file) as SliceInfo[];
+
+  beforeAll(async () => {
+    const setup = await setupSigning();
+    signing = setup.signing;
+    scope = setup.scope;
+  });
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  /** The slice table of a universal file, read here from its big-endian header (32-bit or 64-bit table). */
+  function tableOf(file: string): Array<{ cpuType: number; cpuSubtype: number; offset: number; size: number }> {
+    const data = fs.readFileSync(file);
+    const magic = data.readUInt32BE(0);
+    const count = data.readUInt32BE(4);
+    const wide = magic === 0xcafebabf;
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+      const at = 8 + i * (wide ? 32 : 20);
+      entries.push({
+        cpuType: data.readUInt32BE(at),
+        cpuSubtype: data.readUInt32BE(at + 4),
+        offset: wide ? Number(data.readBigUInt64BE(at + 8)) : data.readUInt32BE(at + 8),
+        size: wide ? Number(data.readBigUInt64BE(at + 16)) : data.readUInt32BE(at + 12),
+      });
+    }
+    return entries;
+  }
+
+  it("is exported by the addon", () => {
+    expect(typeof addon.machoListSlices).toBe("function");
+  });
+
+  it("gives one supported unsigned entry at offset 0 for a thin program", () => {
+    const file = copyGenuine("tiny-macho-arm64", tempDir);
+    const slices = listSlices(file);
+    expect(slices).toHaveLength(1);
+    expect(slices[0].offset).toBe(0);
+    expect(slices[0].size).toBe(fs.statSync(file).size);
+    expect(slices[0].cpuType).toBe(0x0100000c);
+    expect(slices[0].supported).toBe(true);
+    expect(slices[0].isSigned).toBe(false);
+  });
+
+  it("reports a signature inside the slice after the program is signed", async () => {
+    const file = copyGenuine("tiny-macho-arm64", tempDir);
+    await signing.signFileMachO(file, scope);
+    const slices = listSlices(file);
+    expect(slices).toHaveLength(1);
+    expect(slices[0].isSigned).toBe(true);
+    expect(slices[0].signatureSize).toBeGreaterThan(0);
+    // The signature offset is relative to the slice
+    expect(slices[0].signatureOffset).toBeGreaterThan(0);
+    expect(slices[0].signatureOffset + slices[0].signatureSize).toBeLessThanOrEqual(slices[0].size);
+    expect(fs.readFileSync(file).readUInt32BE(slices[0].offset + slices[0].signatureOffset)).toBe(0xfade0cc0);
+  });
+
+  it("lists the slices of the universal program in table order with the offsets and sizes of its table", () => {
+    const file = genuinePath("tiny-macho-universal");
+    const expected = tableOf(file);
+    expect(expected.length).toBe(2);
+    const slices = listSlices(file);
+    expect(slices.map((s) => [s.cpuType, s.cpuSubtype, s.offset, s.size])).toEqual(expected.map((e) => [e.cpuType, e.cpuSubtype, e.offset, e.size]));
+    for (const slice of slices) {
+      expect(slice.supported).toBe(true);
+      expect(slice.isSigned).toBe(false);
+    }
+  });
+
+  it("reports both slices signed after the universal program is signed", async () => {
+    const file = copyGenuine("tiny-macho-universal", tempDir);
+    await signing.signFileMachO(file, scope);
+    const slices = listSlices(file);
+    expect(slices).toHaveLength(2);
+    for (const slice of slices) {
+      expect(slice.isSigned).toBe(true);
+      expect(slice.signatureOffset + slice.signatureSize).toBeLessThanOrEqual(slice.size);
+    }
+  });
+
+  it("reports a 32-bit slice as not supported, with a reason, and still lists the others", () => {
+    const thin = fs.readFileSync(genuinePath("tiny-macho-arm64"));
+    // A 32-bit Mach-O header with no load commands: i386, little-endian
+    const small = Buffer.alloc(28);
+    small.writeUInt32LE(0xfeedface, 0);
+    small.writeUInt32LE(7, 4);
+    small.writeUInt32LE(3, 8);
+    small.writeUInt32LE(2, 12);
+    const file = path.join(tempDir, "mixed");
+    fs.writeFileSync(
+      file,
+      makeUniversal([
+        { cpuType: 0x0100000c, cpuSubtype: 0, bytes: thin },
+        { cpuType: 7, cpuSubtype: 3, bytes: small },
+      ])
+    );
+    const slices = listSlices(file);
+    expect(slices).toHaveLength(2);
+    expect(slices[0].supported).toBe(true);
+    expect(slices[1].cpuType).toBe(7);
+    expect(slices[1].supported).toBe(false);
+    expect(slices[1].unsupportedReason.length).toBeGreaterThan(0);
+  });
+
+  it("throws an Error with the library's message for a text file", () => {
+    const file = fixturePath("plain.txt");
+    let libraryMessage = "";
+    try {
+      addon.machoExtractSignature(file);
+    } catch (err) {
+      libraryMessage = (err as Error).message;
+    }
+    expect(libraryMessage.length).toBeGreaterThan(0);
+    let caught: Error | null = null;
+    try {
+      listSlices(file);
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).not.toBeNull();
+    expect((caught as Error).name).toBe("Error");
+    expect((caught as Error).message).toContain(libraryMessage);
+  });
+
+  it("throws a TypeError when called with no argument or with a number", () => {
+    // Calling a missing export is also a TypeError, so the export must exist for this case to mean anything
+    expect(typeof addon.machoListSlices).toBe("function");
+    expect(thrownName(() => addon.machoListSlices())).toBe("TypeError");
+    expect(thrownName(() => addon.machoListSlices(42))).toBe("TypeError");
   });
 });

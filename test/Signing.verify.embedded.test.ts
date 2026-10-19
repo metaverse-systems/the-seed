@@ -4,6 +4,7 @@ import path from "path";
 import Signing from "../src/Signing";
 import { SigningManifestFormat } from "../src/types";
 import { expectPresent } from "./helpers/Assert";
+import { checkMachO } from "./helpers/MachOChecker";
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "signing-verify-test-"));
@@ -39,10 +40,9 @@ function copyFixture(name: string, destDir: string): string {
   return dest;
 }
 
-async function setupSigning(): Promise<{ signing: Signing; configDir: string; scope: string }> {
+async function setupSigning(scope = "@test"): Promise<{ signing: Signing; configDir: string; scope: string }> {
   const configDir = createTempDir();
   configDirs.push(configDir);
-  const scope = "@test";
   writeConfig(configDir, { scope, name: "Test User", email: "test@test.com" });
   const signing = new Signing(configDir);
   await signing.createCert({ validityDays: 365, scope });
@@ -101,24 +101,38 @@ describe("verifyFile (embedded auto-detection)", () => {
     const result = await signing.verifyFile(machoFile);
     expect(result.status).toBe("VALID");
     expect(result.signatureType).toBe("embedded");
+    expect(result.form).toBe("mac-program");
+    expect(result.integrity.state).toBe("intact");
+    // The page count comes from the independent checker, not from the code under test
+    const pages = checkMachO(fs.readFileSync(machoFile)).slices[0].pagesChecked;
+    expect(pages).toBeGreaterThan(0);
+    const slices = expectPresent(result.slices, "slices");
+    expect(slices).toHaveLength(1);
+    expect(slices[0].state).toBe("intact");
+    expect(slices[0].codeDirectories[0].pages).toBe(pages);
+    expect(slices[0].codeDirectories[0].pagesMismatched).toBe(0);
+    expect(expectPresent(result.signer, "signer").fingerprint).toBe(expectPresent(signing.getCertInfo(scope), "certificate").fingerprint);
+    expect(result.trust.state).toBe("trusted");
+    expect(result.trust.anchor).toMatchObject({ source: "scope", scope: "@test" });
   });
 
-  it("warns when both embedded and detached signatures exist (FR-008)", async () => {
+  it("checks both signatures when a file has an embedded and a detached one", async () => {
     const peFile = copyFixture("tiny.exe", tempDir);
     // Sign with embedded
     await signing.signFile(peFile, { scope });
-    // Create a .sig file to simulate a stale detached signature
+    // A .sig file that is not a signature: the detached check fails
     fs.writeFileSync(peFile + ".sig", "fake detached sig");
 
     const result = await signing.verifyFile(peFile);
-    // Should still verify (using embedded), but warn about both existing
-    expect(result.signatureType).toBe("embedded");
-    if (result.warnings) {
-      const hasBothWarning = result.warnings.some((w: string) =>
-        w.includes("both") || w.includes("detached") || w.includes("embedded")
-      );
-      expect(hasBothWarning).toBe(true);
-    }
+    // The detached signature is malformed, so the file is invalid; both kinds are in `signatures`, embedded first
+    expect(result.status).toBe("INVALID");
+    const signatures = expectPresent(result.signatures, "signatures");
+    expect(signatures).toHaveLength(2);
+    expect(signatures[0].signatureType).toBe("embedded");
+    expect(signatures[0].status).toBe("VALID");
+    expect(signatures[1].signatureType).toBe("detached");
+    expect(signatures[1].status).toBe("INVALID");
+    expect(result.warnings.some((w: string) => /both/i.test(w))).toBe(true);
   });
 
   it("returns invalid for unsigned PE file", async () => {
@@ -228,6 +242,13 @@ describe("verifyFileMachO", () => {
     const result = await signing.verifyFileMachO(machoFile);
     expect(result.status).toBe("VALID");
     expect(result.signatureType).toBe("embedded");
+    const slices = expectPresent(result.slices, "slices");
+    expect(slices.length).toBeGreaterThan(0);
+    for (const slice of slices) {
+      expect(slice.state).toBe("intact");
+    }
+    expect(expectPresent(result.signer, "signer").fingerprint).toBe(expectPresent(signing.getCertInfo(scope), "certificate").fingerprint);
+    expect(result.trust.state).toBe("trusted");
   });
 
   it("returns invalid for an unsigned Mach-O file", async () => {
@@ -310,10 +331,170 @@ describe("signDirectory with mixed formats", () => {
     await signing.signDirectory(dir, { scope });
     const result = await signing.verifyDirectory(dir);
 
-    expect(result.overallPass).toBe(true);
-    expect(result.results.length).toBeGreaterThan(0);
-    expect(result.passed).toBe(result.results.length);
-    expect(result.failed).toBe(0);
-    expect(result.notFound).toBe(0);
+    // data.txt is not binary: signing records it as skipped, verification reports it present, not signed
+    expect(result.status).toBe("VALID");
+    expect(result.counts).toMatchObject({ valid: 1, skipped: 1, unlisted: 0 });
+    expect(result.manifest.trust.state).toBe("trusted");
+    expect(result.manifest.trust.anchor).toMatchObject({ source: "scope", scope });
+    expect(result.skipped).toEqual([{ relativePath: "data.txt", present: true }]);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].status).toBe("VALID");
+  });
+});
+
+// A file in no known program format that signFile still treats as binary (it refuses plain text, so a text file cannot carry a detached signature)
+const OPAQUE_DATA = Buffer.from([0x6f, 0x70, 0x61, 0x71, 0x75, 0x65, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x00, 0xff, 0xfe, 0x0a]);
+
+// ── both signatures and other edge cases ─────────────────────
+//
+// Wording these tests fix:
+//   - the stale detached signature reason contains "stale detached signature"
+//   - the warning for a file with both kinds contains the word "both"
+//   - the native component reason contains "native component"
+//   - the errors for a signature file and a manifest are
+//     "<absolute path> is a signature file; verify <absolute path without .sig> instead" and
+//     "<absolute path> is a directory manifest; verify the directory <absolute directory> instead"
+
+describe("verifyFile with both kinds of signature and other edge cases", () => {
+  let A: { signing: Signing; configDir: string; scope: string };
+  let B: { signing: Signing; configDir: string; scope: string };
+  let tempDir: string;
+  let savedHome: string | undefined;
+  const addonPath = path.join(__dirname, "..", "native", "build", "Release", "dependency_lister.node");
+
+  beforeAll(async () => {
+    savedHome = process.env.HOME;
+    process.env.HOME = createTempDir();
+    configDirs.push(process.env.HOME);
+    A = await setupSigning("@ta");
+    B = await setupSigning("@tb");
+  });
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    jest.dontMock(addonPath);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  afterAll(() => {
+    if (savedHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = savedHome;
+    }
+    for (const dir of configDirs.splice(0)) {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an embedded signature and a detached one made afterwards are both checked and the file is valid", async () => {
+    const file = copyFixture("tiny.exe", tempDir);
+    await A.signing.signFile(file, { scope: "@ta" });
+    await A.signing.signFile(file, { scope: "@ta", detached: true });
+    expect(fs.existsSync(file + ".sig")).toBe(true);
+
+    const result = await A.signing.verifyFile(file);
+    expect(result.status).toBe("VALID");
+    const signatures = expectPresent(result.signatures, "signatures");
+    expect(signatures.map((entry) => [entry.signatureType, entry.status])).toEqual([
+      ["embedded", "VALID"],
+      ["detached", "VALID"],
+    ]);
+    expect(result.warnings.some((w: string) => /both/i.test(w))).toBe(true);
+  });
+
+  it("a stale detached signature put back after signing in place makes the file invalid and is named as stale", async () => {
+    const file = copyFixture("tiny.exe", tempDir);
+    await A.signing.signFile(file, { scope: "@ta", detached: true });
+    const kept = fs.readFileSync(file + ".sig");
+    // Signing in place removes a .sig beside the file; the old one is then put back
+    await A.signing.signFile(file, { scope: "@ta" });
+    fs.writeFileSync(file + ".sig", kept);
+
+    const result = await A.signing.verifyFile(file);
+    expect(result.status).toBe("INVALID");
+    expect(result.reason).toMatch(/stale detached signature/i);
+    const signatures = expectPresent(result.signatures, "signatures");
+    expect(signatures.map((entry) => [entry.signatureType, entry.status])).toEqual([
+      ["embedded", "VALID"],
+      ["detached", "INVALID"],
+    ]);
+  });
+
+  it("an intact embedded signature from A with a detached one from B is intact but not trusted in A", async () => {
+    const file = copyFixture("tiny.exe", tempDir);
+    await A.signing.signFile(file, { scope: "@ta" });
+    await B.signing.signFile(file, { scope: "@tb", detached: true });
+
+    const result = await A.signing.verifyFile(file);
+    expect(result.status).toBe("UNTRUSTED");
+    const signatures = expectPresent(result.signatures, "signatures");
+    expect(signatures.map((entry) => [entry.signatureType, entry.status])).toEqual([
+      ["embedded", "VALID"],
+      ["detached", "UNTRUSTED"],
+    ]);
+  });
+
+  describe("without the native component", () => {
+    /** A Signing whose native addon cannot be loaded; the mock stays active until the case ends. */
+    function signingWithoutAddon(configDir: string): Signing {
+      let created: Signing | undefined;
+      jest.isolateModules(() => {
+        jest.doMock(addonPath, () => {
+          throw new Error("the native component cannot be loaded");
+        });
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module instance is needed for each case
+        const module = require("../src/Signing") as { default: new (dir: string) => Signing };
+        created = new module.default(configDir);
+      });
+      return expectPresent(created, "Signing without the addon");
+    }
+
+    it("a Windows program with an embedded signature is not checked, with the native component named", async () => {
+      const file = copyFixture("tiny.exe", tempDir);
+      await A.signing.signFile(file, { scope: "@ta" });
+
+      const result = await signingWithoutAddon(A.configDir).verifyFile(file);
+      expect(result.status).toBe("NOT_CHECKED");
+      expect(result.integrity.state).toBe("not-checked");
+      expect(result.reason).toMatch(/native component/i);
+    });
+
+    it("a Mac program with an embedded signature is not checked, with the native component named", async () => {
+      const file = copyFixture("tiny-macho-arm64", tempDir);
+      await A.signing.signFileMachO(file, "@ta");
+
+      const result = await signingWithoutAddon(A.configDir).verifyFile(file);
+      expect(result.status).toBe("NOT_CHECKED");
+      expect(result.reason).toMatch(/native component/i);
+    });
+
+    it("a binary file in no known program format still verifies by its detached signature without the native component", async () => {
+      const file = path.join(tempDir, "opaque.dat");
+      fs.writeFileSync(file, OPAQUE_DATA);
+      await A.signing.signFile(file, { scope: "@ta", detached: true });
+
+      const result = await signingWithoutAddon(A.configDir).verifyFile(file);
+      expect(result.status).toBe("VALID");
+      expect(result.signatureType).toBe("detached");
+    });
+  });
+
+  it("refuses a .sig path whose file exists, naming the file to verify instead", async () => {
+    const file = path.join(tempDir, "opaque.dat");
+    fs.writeFileSync(file, OPAQUE_DATA);
+    await A.signing.signFile(file, { scope: "@ta", detached: true });
+
+    await expect(A.signing.verifyFile(file + ".sig")).rejects.toThrow(`${file}.sig is a signature file; verify ${file} instead`);
+  });
+
+  it("refuses .signatures.json, naming the directory to verify instead", async () => {
+    const manifest = path.join(tempDir, ".signatures.json");
+    fs.writeFileSync(manifest, "{}");
+
+    await expect(A.signing.verifyFile(manifest)).rejects.toThrow(`${manifest} is a directory manifest; verify the directory ${tempDir} instead`);
   });
 });

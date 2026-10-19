@@ -135,7 +135,58 @@ export interface CertInfo {
   notBefore: Date;
   notAfter: Date;
   isExpired: boolean;
+  isNotYetValid: boolean; // validity period has not started
   certPath: string;     // absolute path to cert.pem
+}
+
+/** Which kind of signature a verification looked at. */
+export type SignatureForm = "detached" | "windows-program" | "installer" | "mac-program";
+
+/** Integrity: whether the file is unchanged since it was signed. Says nothing about who signed it. */
+export type IntegrityState = "intact" | "invalid" | "not-checked" | "none";
+
+export interface IntegrityResult {
+  state: IntegrityState;
+  reason?: string;           // present for invalid and not-checked
+  checked: string[];         // what was checked
+  unsignedOnly?: string[];   // set only on an invalid Mac result whose sole defect is unsigned slices
+}
+
+export type TrustAnchor =
+  | { source: "scope"; scope: string; fingerprint: string; certPath: string }
+  | { source: "supplied"; path: string; fingerprint: string };
+
+export interface TrustedCertificates {
+  source: "scopes" | "supplied";
+  anchors: TrustAnchor[];
+  warnings: string[];
+}
+
+/** Trust: whether the signer is one of the trusted certificates (compared by fingerprint). */
+export type TrustState = "trusted" | "untrusted" | "not-applicable";
+export type UntrustedReason = "unknown-signer" | "no-signer" | "no-trusted-certificates";
+
+export interface TrustResult {
+  state: TrustState;
+  anchor?: TrustAnchor;        // set when trusted
+  reason?: UntrustedReason;    // set when untrusted
+  message?: string;            // the sentence printed for an untrusted result
+}
+
+export interface MachOSliceResult {
+  arch: string;               // "arm64", "x86_64" or "0x<cputype>"
+  cpuType: number;
+  offset: number;             // in the file
+  size: number;
+  state: "intact" | "invalid" | "unsigned" | "not-checked";
+  reason?: string;
+  codeDirectories: Array<{ slot: number; hashType: "sha1" | "sha256" | "sha384"; pages: number; pagesMismatched: number; codeLimit: number }>;
+  adHoc: boolean;             // no CMS signer
+  signerFingerprint?: string;
+}
+
+export interface VerifyOptions {
+  trust?: TrustedCertificates;
 }
 
 export interface SignResult {
@@ -152,23 +203,52 @@ export interface DirectorySignResult {
   skipped: string[];      // list of skipped (non-binary) files
 }
 
-export type VerifyStatus = "VALID" | "INVALID" | "NOT_FOUND";
+/** Outcome of a verification: VALID needs both an intact file and a trusted signer; UNTRUSTED is intact with an untrusted signer. */
+export type VerifyStatus = "VALID" | "UNTRUSTED" | "INVALID" | "NOT_FULLY_SIGNED" | "NOT_CHECKED" | "NOT_FOUND";
 
+/** The result of verifying one file: its integrity, its trust, and the status derived from the two. */
 export interface VerifyResult {
   filePath: string;
   status: VerifyStatus;
-  reason?: string;           // human-readable reason for INVALID/NOT_FOUND
-  signer?: CertInfo;         // certificate info of the signer (if signature exists)
+  reason?: string;               // the deciding reason: the integrity reason, or the trust message for UNTRUSTED
+  form?: SignatureForm;          // absent when NOT_FOUND
   signatureType?: SignatureType; // "embedded" or "detached"
-  warnings?: string[];       // e.g., "Both embedded and detached signatures found"
+  integrity: IntegrityResult;
+  trust: TrustResult;
+  signer?: CertInfo;             // certificate info of the signer (if a signature exists)
+  slices?: MachOSliceResult[];   // Mac programs
+  signatures?: VerifyResult[];   // both kinds present: [embedded, detached]; the top level is the worse
+  warnings: string[];            // e.g., "Both embedded and detached signatures found"
+  notChecked: string[];          // what this verification does not cover: the fixed list first, then file-specific items
+}
+
+/** The result for one manifest entry: the file's verification plus how it relates to the manifest. */
+export interface DirectoryFileResult extends VerifyResult {
+  relativePath: string;                    // the entry's path exactly as written in the manifest
+  signerMatchesManifest: boolean | null;   // null when no signer was established
+  recordedValueMatches: boolean | null;    // embedded: recorded fingerprint; detached: recorded signature; null when not compared
 }
 
 export interface DirectoryVerifyResult {
-  results: VerifyResult[];
-  passed: number;
-  failed: number;
-  notFound: number;
-  overallPass: boolean;
+  directory: string;
+  manifest: {
+    path: string;
+    version: 1 | 2;
+    earlierFormat: boolean;                // version 1
+    signedAt: string;
+    certificate: CertInfo;
+    recordedFingerprint: string;           // the fingerprint the manifest records for its certificate
+    fingerprintConsistent: boolean;
+    trust: TrustResult;
+  };
+  results: DirectoryFileResult[];          // one per manifest entry, in manifest order
+  unlisted: Array<{ relativePath: string; kind: "file" | "link" | "other"; reason: string }>;
+  skipped: Array<{ relativePath: string; present: boolean }>;
+  links: Array<{ relativePath: string; target: string }>;
+  counts: { valid: number; untrusted: number; invalid: number; notFullySigned: number; notChecked: number; missing: number; unlisted: number; skipped: number };
+  status: VerifyStatus;                    // worst of the entries, the manifest checks and the unlisted entries (unlisted counts as INVALID)
+  warnings: string[];
+  notChecked: string[];
 }
 
 /** Structure of a .sig file (JSON) */
@@ -187,14 +267,19 @@ export interface SigningManifestFormat {
   certificate: string;     // PEM-encoded X.509 certificate
   certificateFingerprint: string; // "SHA256:<hex>"
   files: SigningManifestEntry[];
+  skipped?: string[];      // version 2: files directory signing judged not binary and left unsigned (relative paths)
 }
 
 export interface SigningManifestEntry {
   path: string;                     // relative path to signed file
   signatureFile: string | null;     // relative path to .sig file, null when embedded
   algorithm: "SHA256";
-  signature: string;                // base64-encoded signature
-  signatureType: SignatureType;     // "embedded" or "detached"
+  /**
+   * What is recorded for the file: for a detached entry, the base64 signature from its .sig file;
+   * for an embedded entry, the base64 SHA-256 of the signed file (a recorded fingerprint, not a signature).
+   */
+  signature: string;
+  signatureType?: SignatureType;    // "embedded" or "detached"; absent in version 1 manifests (meaning detached)
 }
 
 // ── Recursive Build Types ───────────────────────────────────
