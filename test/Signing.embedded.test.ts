@@ -7,6 +7,7 @@ import Signing from "../src/Signing";
 import { checkMachO } from "./helpers/MachOChecker";
 import { CfbPackage, loadReference, parsePackage, storedDigest } from "./helpers/CfbChecker";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { makeUniversal } from "./helpers/Universal";
 
 /**
  * Create a temporary directory for test isolation.
@@ -1202,5 +1203,162 @@ describe("PE signature removal (real addon)", () => {
     const verify = await signing.verifyFile(peFile);
     expect(verify.status).toBe("VALID");
     expect(loadAddon().peHasEmbeddedSignature(peFile)).toBe(true);
+  });
+});
+
+// ── Slice table (real addon) ─────────────────────────────────
+
+describe("machoListSlices (real addon)", () => {
+  interface SliceInfo {
+    cpuType: number;
+    cpuSubtype: number;
+    offset: number;
+    size: number;
+    isSigned: boolean;
+    signatureOffset: number;
+    signatureSize: number;
+    supported: boolean;
+    unsupportedReason: string;
+  }
+
+  let signing: Signing;
+  let scope: string;
+  let tempDir: string;
+  const addon = loadAddon();
+  const listSlices = (file: string): SliceInfo[] => addon.machoListSlices(file) as SliceInfo[];
+
+  beforeAll(async () => {
+    const setup = await setupSigning();
+    signing = setup.signing;
+    scope = setup.scope;
+  });
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  /** The slice table of a universal file, read here from its big-endian header (32-bit or 64-bit table). */
+  function tableOf(file: string): Array<{ cpuType: number; cpuSubtype: number; offset: number; size: number }> {
+    const data = fs.readFileSync(file);
+    const magic = data.readUInt32BE(0);
+    const count = data.readUInt32BE(4);
+    const wide = magic === 0xcafebabf;
+    const entries = [];
+    for (let i = 0; i < count; i++) {
+      const at = 8 + i * (wide ? 32 : 20);
+      entries.push({
+        cpuType: data.readUInt32BE(at),
+        cpuSubtype: data.readUInt32BE(at + 4),
+        offset: wide ? Number(data.readBigUInt64BE(at + 8)) : data.readUInt32BE(at + 8),
+        size: wide ? Number(data.readBigUInt64BE(at + 16)) : data.readUInt32BE(at + 12),
+      });
+    }
+    return entries;
+  }
+
+  it("is exported by the addon", () => {
+    expect(typeof addon.machoListSlices).toBe("function");
+  });
+
+  it("gives one supported unsigned entry at offset 0 for a thin program", () => {
+    const file = copyGenuine("tiny-macho-arm64", tempDir);
+    const slices = listSlices(file);
+    expect(slices).toHaveLength(1);
+    expect(slices[0].offset).toBe(0);
+    expect(slices[0].size).toBe(fs.statSync(file).size);
+    expect(slices[0].cpuType).toBe(0x0100000c);
+    expect(slices[0].supported).toBe(true);
+    expect(slices[0].isSigned).toBe(false);
+  });
+
+  it("reports a signature inside the slice after the program is signed", async () => {
+    const file = copyGenuine("tiny-macho-arm64", tempDir);
+    await signing.signFileMachO(file, scope);
+    const slices = listSlices(file);
+    expect(slices).toHaveLength(1);
+    expect(slices[0].isSigned).toBe(true);
+    expect(slices[0].signatureSize).toBeGreaterThan(0);
+    // The signature offset is relative to the slice
+    expect(slices[0].signatureOffset).toBeGreaterThan(0);
+    expect(slices[0].signatureOffset + slices[0].signatureSize).toBeLessThanOrEqual(slices[0].size);
+    expect(fs.readFileSync(file).readUInt32BE(slices[0].offset + slices[0].signatureOffset)).toBe(0xfade0cc0);
+  });
+
+  it("lists the slices of the universal program in table order with the offsets and sizes of its table", () => {
+    const file = genuinePath("tiny-macho-universal");
+    const expected = tableOf(file);
+    expect(expected.length).toBe(2);
+    const slices = listSlices(file);
+    expect(slices.map((s) => [s.cpuType, s.cpuSubtype, s.offset, s.size])).toEqual(expected.map((e) => [e.cpuType, e.cpuSubtype, e.offset, e.size]));
+    for (const slice of slices) {
+      expect(slice.supported).toBe(true);
+      expect(slice.isSigned).toBe(false);
+    }
+  });
+
+  it("reports both slices signed after the universal program is signed", async () => {
+    const file = copyGenuine("tiny-macho-universal", tempDir);
+    await signing.signFileMachO(file, scope);
+    const slices = listSlices(file);
+    expect(slices).toHaveLength(2);
+    for (const slice of slices) {
+      expect(slice.isSigned).toBe(true);
+      expect(slice.signatureOffset + slice.signatureSize).toBeLessThanOrEqual(slice.size);
+    }
+  });
+
+  it("reports a 32-bit slice as not supported, with a reason, and still lists the others", () => {
+    const thin = fs.readFileSync(genuinePath("tiny-macho-arm64"));
+    // A 32-bit Mach-O header with no load commands: i386, little-endian
+    const small = Buffer.alloc(28);
+    small.writeUInt32LE(0xfeedface, 0);
+    small.writeUInt32LE(7, 4);
+    small.writeUInt32LE(3, 8);
+    small.writeUInt32LE(2, 12);
+    const file = path.join(tempDir, "mixed");
+    fs.writeFileSync(
+      file,
+      makeUniversal([
+        { cpuType: 0x0100000c, cpuSubtype: 0, bytes: thin },
+        { cpuType: 7, cpuSubtype: 3, bytes: small },
+      ])
+    );
+    const slices = listSlices(file);
+    expect(slices).toHaveLength(2);
+    expect(slices[0].supported).toBe(true);
+    expect(slices[1].cpuType).toBe(7);
+    expect(slices[1].supported).toBe(false);
+    expect(slices[1].unsupportedReason.length).toBeGreaterThan(0);
+  });
+
+  it("throws an Error with the library's message for a text file", () => {
+    const file = fixturePath("plain.txt");
+    let libraryMessage = "";
+    try {
+      addon.machoExtractSignature(file);
+    } catch (err) {
+      libraryMessage = (err as Error).message;
+    }
+    expect(libraryMessage.length).toBeGreaterThan(0);
+    let caught: Error | null = null;
+    try {
+      listSlices(file);
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).not.toBeNull();
+    expect((caught as Error).name).toBe("Error");
+    expect((caught as Error).message).toContain(libraryMessage);
+  });
+
+  it("throws a TypeError when called with no argument or with a number", () => {
+    // Calling a missing export is also a TypeError, so the export must exist for this case to mean anything
+    expect(typeof addon.machoListSlices).toBe("function");
+    expect(thrownName(() => addon.machoListSlices())).toBe("TypeError");
+    expect(thrownName(() => addon.machoListSlices(42))).toBe("TypeError");
   });
 });

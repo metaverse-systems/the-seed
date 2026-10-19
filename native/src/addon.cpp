@@ -534,6 +534,41 @@ Napi::Value MachOHasEmbeddedSignature(const Napi::CallbackInfo& info) {
   }
 }
 
+Napi::Value MachOListSlices(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Expected (filePath: string)")
+        .ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  std::string filePath = info[0].As<Napi::String>().Utf8Value();
+
+  try {
+    auto slices = the_seed::MachOParser::GetArchSlices(filePath);
+    Napi::Array result = Napi::Array::New(env, slices.size());
+    for (size_t i = 0; i < slices.size(); i++) {
+      const auto& slice = slices[i];
+      Napi::Object entry = Napi::Object::New(env);
+      entry.Set("cpuType", Napi::Number::New(env, static_cast<double>(slice.cpu_type)));
+      entry.Set("cpuSubtype", Napi::Number::New(env, static_cast<double>(slice.cpu_subtype)));
+      entry.Set("offset", Napi::Number::New(env, static_cast<double>(slice.offset)));
+      entry.Set("size", Napi::Number::New(env, static_cast<double>(slice.size)));
+      entry.Set("isSigned", Napi::Boolean::New(env, slice.is_signed));
+      entry.Set("signatureOffset", Napi::Number::New(env, static_cast<double>(slice.signature_offset)));
+      entry.Set("signatureSize", Napi::Number::New(env, static_cast<double>(slice.signature_size)));
+      entry.Set("supported", Napi::Boolean::New(env, slice.supported));
+      entry.Set("unsupportedReason", Napi::String::New(env, slice.unsupported_reason));
+      result.Set(static_cast<uint32_t>(i), entry);
+    }
+    return result;
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
 // ── MSI Signing Operations ──────────────────────────────────
 
 Napi::Value MsiIsMsi(const Napi::CallbackInfo& info) {
@@ -724,6 +759,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("machoEmbedSignature", Napi::Function::New(env, MachOEmbedSignature));
   exports.Set("machoExtractSignature", Napi::Function::New(env, MachOExtractSignature));
   exports.Set("machoHasEmbeddedSignature", Napi::Function::New(env, MachOHasEmbeddedSignature));
+  exports.Set("machoListSlices", Napi::Function::New(env, MachOListSlices));
 
   // MSI signing operations
   exports.Set("msiIsMsi", Napi::Function::New(env, MsiIsMsi));

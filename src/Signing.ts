@@ -8,6 +8,7 @@ import { pipeline } from "stream/promises";
 import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
 import Config from "./Config";
+import { certificateFingerprint, readCertificates } from "./Trust";
 import {
   CertInfo,
   CertOptions,
@@ -24,6 +25,8 @@ import {
   FormatDetectionResult,
   SignOptions,
   MachOPreparedSignature,
+  TrustedCertificates,
+  TrustAnchor,
 } from "./types";
 
 // Result of reading an installer signature back from the package
@@ -32,6 +35,19 @@ interface MsiSignatureCheck {
   storedDigest: Buffer;
   computedDigest: Buffer;
   detail: string;
+}
+
+// One entry of a Mac program's slice table, as the native component lists it
+export interface MachOSliceInfo {
+  cpuType: number;
+  cpuSubtype: number;
+  offset: number;
+  size: number;
+  isSigned: boolean;
+  signatureOffset: number; // relative to the slice
+  signatureSize: number;
+  supported: boolean;
+  unsupportedReason: string;
 }
 
 // Native addon interface for binary signing operations
@@ -49,6 +65,7 @@ interface NativeAddon {
   machoBuildSuperBlob(codeDirectory: Buffer, cmsSignature: Buffer): Buffer;
   machoExtractSignature(filePath: string): Buffer | null;
   machoHasEmbeddedSignature(filePath: string): boolean;
+  machoListSlices(filePath: string): MachOSliceInfo[];
   msiIsMsi(filePath: string): boolean;
   msiComputeDigest(filePath: string): { digest: Buffer };
   msiEmbedSignature(filePath: string, pkcs7Der: Buffer, requireMatchingDigest?: boolean): void;
@@ -135,22 +152,7 @@ class Signing {
     const certPem = fs.readFileSync(certFilePath, "utf-8");
     const x509Cert = new crypto.X509Certificate(certPem);
 
-    const subject = this._parseSubject(x509Cert.subject);
-    const issuer = this._parseIssuerString(x509Cert.issuer, x509Cert.subject);
-    const fingerprint = "SHA256:" + x509Cert.fingerprint256.replace(/:/g, "").toLowerCase();
-    const notBefore = new Date(x509Cert.validFrom);
-    const notAfter = new Date(x509Cert.validTo);
-
-    return {
-      subject,
-      issuer,
-      fingerprint,
-      keyType: "ECDSA P-256",
-      notBefore,
-      notAfter,
-      isExpired: new Date() > notAfter,
-      certPath: certFilePath,
-    };
+    return { ...this._buildSignerInfo(x509Cert), certPath: certFilePath };
   }
 
   /**
@@ -260,6 +262,40 @@ class Signing {
     if (subject.email) parts.push(`EMAIL=${subject.email}`);
     if (subject.organization) parts.push(`O=${subject.organization}`);
     return parts.join(", ");
+  }
+
+  /**
+   * Load the certificates a signature is trusted against.
+   * Without paths these are the certificates of the configured scopes; with paths, only the certificates
+   * in those files (PEM or DER), and a file that is missing or holds no certificate is an error.
+   * Private keys are never read.
+   */
+  loadTrust(certificatePaths?: string[]): TrustedCertificates {
+    const anchors: TrustAnchor[] = [];
+    const warnings: string[] = [];
+
+    if (certificatePaths !== undefined) {
+      for (const certPath of certificatePaths) {
+        for (const der of readCertificates(certPath)) {
+          anchors.push({ source: "supplied", path: certPath, fingerprint: certificateFingerprint(der) });
+        }
+      }
+      return { source: "supplied", anchors, warnings };
+    }
+
+    for (const scope of this.getScopes()) {
+      const certPath = this.scopeCertPath(scope);
+      if (!fs.existsSync(certPath)) {
+        continue;
+      }
+      try {
+        const [der] = readCertificates(certPath);
+        anchors.push({ source: "scope", scope, fingerprint: certificateFingerprint(der), certPath });
+      } catch (err) {
+        warnings.push(`certificate of scope ${scope} could not be read; it is not trusted (${(err as Error).message})`);
+      }
+    }
+    return { source: "scopes", anchors, warnings };
   }
 
   /**
@@ -1687,17 +1723,36 @@ class Signing {
     const signerFingerprint = "SHA256:" + x509Cert.fingerprint256.replace(/:/g, "").toLowerCase();
     const notBefore = new Date(x509Cert.validFrom);
     const notAfter = new Date(x509Cert.validTo);
+    const now = new Date();
 
     return {
       subject: signerSubject,
       issuer: signerIssuer,
       fingerprint: signerFingerprint,
-      keyType: "ECDSA P-256",
+      keyType: this._keyTypeOf(x509Cert),
       notBefore,
       notAfter,
-      isExpired: new Date() > notAfter,
+      isExpired: now > notAfter,
+      isNotYetValid: now < notBefore,
       certPath: "",
     };
+  }
+
+  /**
+   * Describe the public key of a certificate: "ECDSA P-256", "ECDSA P-384", "RSA 2048", ...
+   */
+  _keyTypeOf(x509Cert: crypto.X509Certificate): string {
+    const key = x509Cert.publicKey;
+    const details = key.asymmetricKeyDetails;
+    if (key.asymmetricKeyType === "ec") {
+      const curves: Record<string, string> = { prime256v1: "P-256", secp256r1: "P-256", secp384r1: "P-384", secp521r1: "P-521" };
+      const curve = details?.namedCurve ?? "";
+      return "ECDSA " + (curves[curve] ?? curve);
+    }
+    if (key.asymmetricKeyType === "rsa") {
+      return "RSA " + String(details?.modulusLength ?? "");
+    }
+    return String(key.asymmetricKeyType);
   }
 
   /**

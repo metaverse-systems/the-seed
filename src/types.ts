@@ -135,7 +135,56 @@ export interface CertInfo {
   notBefore: Date;
   notAfter: Date;
   isExpired: boolean;
+  isNotYetValid: boolean; // validity period has not started
   certPath: string;     // absolute path to cert.pem
+}
+
+/** Which kind of signature a verification looked at. */
+export type SignatureForm = "detached" | "windows-program" | "installer" | "mac-program";
+
+export type IntegrityState = "intact" | "invalid" | "not-checked" | "none";
+
+export interface IntegrityResult {
+  state: IntegrityState;
+  reason?: string;           // present for invalid and not-checked
+  checked: string[];         // what was checked
+  unsignedOnly?: string[];   // set only on an invalid Mac result whose sole defect is unsigned slices
+}
+
+export type TrustAnchor =
+  | { source: "scope"; scope: string; fingerprint: string; certPath: string }
+  | { source: "supplied"; path: string; fingerprint: string };
+
+export interface TrustedCertificates {
+  source: "scopes" | "supplied";
+  anchors: TrustAnchor[];
+  warnings: string[];
+}
+
+export type TrustState = "trusted" | "untrusted" | "not-applicable";
+export type UntrustedReason = "unknown-signer" | "no-signer" | "no-trusted-certificates";
+
+export interface TrustResult {
+  state: TrustState;
+  anchor?: TrustAnchor;        // set when trusted
+  reason?: UntrustedReason;    // set when untrusted
+  message?: string;            // the sentence printed for an untrusted result
+}
+
+export interface MachOSliceResult {
+  arch: string;               // "arm64", "x86_64" or "0x<cputype>"
+  cpuType: number;
+  offset: number;             // in the file
+  size: number;
+  state: "intact" | "invalid" | "unsigned" | "not-checked";
+  reason?: string;
+  codeDirectories: Array<{ slot: number; hashType: "sha1" | "sha256" | "sha384"; pages: number; pagesMismatched: number; codeLimit: number }>;
+  adHoc: boolean;             // no CMS signer
+  signerFingerprint?: string;
+}
+
+export interface VerifyOptions {
+  trust?: TrustedCertificates;
 }
 
 export interface SignResult {

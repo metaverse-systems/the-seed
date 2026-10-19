@@ -5,7 +5,7 @@ import Build from "./Build";
 import Signing from "./Signing";
 import Installer from "./Installer";
 import { InstallerConfig } from "./Installer";
-import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, ScriptArgsType, DependencyResultType, BuildStep, CertSubject, CertOptions, CertInfo, SignResult, DirectorySignResult, VerifyStatus, VerifyResult, DirectoryVerifyResult, SigFileFormat, SigningManifestFormat, SigningManifestEntry } from "./types";
+import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, ScriptArgsType, DependencyResultType, BuildStep, CertSubject, CertOptions, CertInfo, SignResult, DirectorySignResult, VerifyStatus, VerifyResult, DirectoryVerifyResult, SigFileFormat, SigningManifestFormat, SigningManifestEntry, SignatureForm, IntegrityState, IntegrityResult, TrustAnchor, TrustedCertificates, TrustState, UntrustedReason, TrustResult, MachOSliceResult, VerifyOptions } from "./types";
 
 export {
   Config,
@@ -36,5 +36,15 @@ export {
   DirectoryVerifyResult,
   SigFileFormat,
   SigningManifestFormat,
-  SigningManifestEntry
+  SigningManifestEntry,
+  SignatureForm,
+  IntegrityState,
+  IntegrityResult,
+  TrustAnchor,
+  TrustedCertificates,
+  TrustState,
+  UntrustedReason,
+  TrustResult,
+  MachOSliceResult,
+  VerifyOptions
 };
