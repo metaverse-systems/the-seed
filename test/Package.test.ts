@@ -904,6 +904,30 @@ describe("test Package", () => {
     });
   });
 
+  describe("run - one output name from two projects", () => {
+    it("refuses two program projects building different files named app before the addon is called", async () => {
+      const dirs = ["one", "two"].map(name => {
+        const projectDir = createProjectDir(tempDir, name, "bin_PROGRAMS = app\napp_SOURCES = app.cpp\n");
+        fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({ name: "@t/" + name, version: "1.0.0" }));
+        installBuildOutput(projectDir, "app", "content of " + name);
+        return projectDir;
+      });
+      const outputDir = path.join(tempDir, "my-release");
+
+      const errorSpy = jest.spyOn(console, "error").mockImplementation();
+      const result = await pkg.run(outputDir, dirs);
+      errorSpy.mockRestore();
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain("Two different files would be packaged as app:");
+      expect(result.message).toContain("build of @t/one");
+      expect(result.message).toContain("build of @t/two");
+      expect(result.message).toContain("Nothing was written.");
+      expect(mockedListDependencies).not.toHaveBeenCalled();
+      expect(fs.existsSync(outputDir)).toBe(false);
+    });
+  });
+
   describe("run - copy failure", () => {
     // The choice for the implementation: files are copied with the default export of
     // fs-extra, through its copyFileSync, so that is the function this case makes fail.

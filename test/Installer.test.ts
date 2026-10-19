@@ -512,5 +512,70 @@ describe("Installer", () => {
       );
       consoleSpy.mockRestore();
     });
+
+    describe("when dist/ is missing and packaging is refused", () => {
+      /** A program project in tempDir with a Makefile.am and, when content is given, a built src/.libs/app. */
+      function writeProgramProject(name: string, dependencies: Record<string, string>, content: string | null): string {
+        const dir = path.join(tempDir, name);
+        fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+        fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({
+          name: "@t/" + name, version: "1.0.0", author: "Dev", dependencies
+        }));
+        fs.writeFileSync(path.join(dir, "src", "Makefile.am"), "bin_PROGRAMS = app\napp_SOURCES = app.cpp\n");
+        if (content !== null) {
+          fs.mkdirSync(path.join(dir, "src", ".libs"), { recursive: true });
+          fs.writeFileSync(path.join(dir, "src", ".libs", "app"), content);
+        }
+        return dir;
+      }
+
+      async function runQuietly(projectDir: string): Promise<{ result: string | null; errors: string[] }> {
+        const logSpy = jest.spyOn(console, "log").mockImplementation();
+        const errorSpy = jest.spyOn(console, "error").mockImplementation();
+        try {
+          const result = await installer.run(projectDir);
+          return { result, errors: errorSpy.mock.calls.map((call) => call.map(String).join(" ")) };
+        } finally {
+          logSpy.mockRestore();
+          errorSpy.mockRestore();
+        }
+      }
+
+      it("stops on a name collision without writing a .wxs or .msi or calling wixl", async () => {
+        mockedListDependencies.mockReset();
+        mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
+        const other = writeProgramProject("other", {}, "content of other");
+        const app = writeProgramProject("app", { "@t/other": "file:../other" }, "content of app");
+
+        const { result, errors } = await runQuietly(app);
+
+        expect(result).toBeNull();
+        const output = errors.join("\n");
+        expect(output).toContain("Two different files would be packaged as app:");
+        expect(output).toContain("build of @t/app");
+        expect(output).toContain("build of @t/other");
+        expect(errors[errors.length - 1]).toBe("Error: Packaging failed; no installer was built.");
+        expect(output).not.toContain("cross-compiled");
+        expect(fs.existsSync(path.join(app, "dist"))).toBe(false);
+        expect(fs.readdirSync(app).filter((entry) => entry.endsWith(".wxs") || entry.endsWith(".msi"))).toEqual([]);
+        expect(fs.readdirSync(other).filter((entry) => entry.endsWith(".wxs") || entry.endsWith(".msi"))).toEqual([]);
+        expect(mockedExecFileSync).not.toHaveBeenCalledWith("wixl", expect.anything(), expect.anything());
+      });
+
+      it("prints the cross-compiling hint only when no installed binaries are found", async () => {
+        mockedListDependencies.mockReset();
+        mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
+        const app = writeProgramProject("app", {}, null);
+
+        const { result, errors } = await runQuietly(app);
+
+        expect(result).toBeNull();
+        const output = errors.join("\n");
+        expect(output).toContain("No installed binaries found for");
+        expect(output).toContain("cross-compiled");
+        expect(errors[errors.length - 1]).toBe("Error: Packaging failed; no installer was built.");
+        expect(mockedExecFileSync).not.toHaveBeenCalledWith("wixl", expect.anything(), expect.anything());
+      });
+    });
   });
 });

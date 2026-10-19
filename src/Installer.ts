@@ -147,7 +147,10 @@ class Installer {
         const pkg = new Package(this.config);
         const result = await pkg.run(distDir, [projectDir]);
         if (!result.success) {
-          console.error("Error: Packaging failed. Ensure the project has been cross-compiled with 'the-seed build windows'.");
+          if (result.message !== null && result.message.startsWith("No installed binaries found for")) {
+            console.error("Ensure the project has been cross-compiled with 'the-seed build windows'.");
+          }
+          console.error("Error: Packaging failed; no installer was built.");
           return false;
         }
       } catch (err) {

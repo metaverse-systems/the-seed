@@ -222,11 +222,19 @@ class Package {
     // Build-tree outputs: the given directories must have some, dependency projects may
     const files: PlannedFile[] = [];
     const planned = new Map<string, PlannedFile>();
-    const register = (file: PlannedFile): void => {
-      if (!planned.has(file.name)) {
+    // Registers a file under its packaged name: the same content twice is kept once (the first
+    // entry and its signature stay), different content under one name is a refusal.
+    const register = (file: PlannedFile): string | null => {
+      const first = planned.get(file.name);
+      if (first === undefined) {
         planned.set(file.name, file);
         files.push(file);
+        return null;
       }
+      if (first.sha256 === file.sha256) {
+        return null;
+      }
+      return this.collisionMessage(first, file);
     };
     const givenByLocation = new Map<string, string>();
     for (const projectDir of projectDirs) {
@@ -267,7 +275,10 @@ class Package {
           signatureDir = libsDir;
         }
         const before = files.length;
-        register(this.plannedFile(packagedName, source, { kind: "project", project: name, location }, signatureDir));
+        const collision = register(this.plannedFile(packagedName, source, { kind: "project", project: name, location }, signatureDir));
+        if (collision !== null) {
+          return refuse(collision);
+        }
         if (files.length > before) {
           binaryPaths.push(source);
         }
@@ -350,7 +361,10 @@ class Package {
             return refuse(error instanceof Error ? error.message : String(error));
           }
         }
-        register(this.plannedFile(packagedName, source, { kind: "search-path", directory }, directory));
+        const collision = register(this.plannedFile(packagedName, source, { kind: "search-path", directory }, directory));
+        if (collision !== null) {
+          return refuse(collision);
+        }
         if (!analyzed.has(source) && !(depPath in libraryErrors)) {
           nextBatch.push(source);
         }
@@ -360,6 +374,33 @@ class Package {
     }
 
     return { ok: true, projects: [...projectNames.keys()], files, notPackaged: [] };
+  };
+
+  /**
+   * The refusal text for two different files that would be written under one name.
+   */
+  private collisionMessage = (first: PlannedFile, second: PlannedFile): string => {
+    const describe = (file: PlannedFile): string =>
+      file.source + " (" + (file.origin.kind === "project"
+        ? "build of " + file.origin.project
+        : "installed in " + file.origin.directory) + ")";
+    const lines = [
+      "Two different files would be packaged as " + first.name + ":",
+      "  " + describe(first),
+      "  " + describe(second),
+    ];
+    const build = [first, second].find((file) => file.origin.kind === "project");
+    const installed = [first, second].find((file) => file.origin.kind === "search-path");
+    if (build !== undefined && installed !== undefined && build.origin.kind === "project" && installed.origin.kind === "search-path") {
+      const directory = installed.origin.directory;
+      const target = Object.keys(targets).find((key) => directory.startsWith(this.config.config.prefix + "/" + targets[key] + "/")) ?? "native";
+      lines.push(
+        "The installed copy differs from the build of " + build.origin.project + "; install it again with \"the-seed build " +
+          target + "\" in " + build.origin.location + ", or remove the stale copy."
+      );
+    }
+    lines.push("Nothing was written.");
+    return lines.join("\n");
   };
 
   /**

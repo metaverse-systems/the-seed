@@ -236,6 +236,16 @@ describe("package layout", () => {
     return installLibrary(prefixLib, real, links);
   }
 
+  /** Two library projects @t/a and @t/b building libfoo.so.1, declared by the program hello. */
+  function writeTwoFooProjects(textA: string, textB: string): { a: string; b: string; libsA: string; libsB: string } {
+    const a = path.join(root, "a");
+    const b = path.join(root, "b");
+    const libsA = writeLibraryProject(a, "@t/a", { libName: "foo", soname: "libfoo.so.1", version: "1.0.0", text: textA });
+    const libsB = writeLibraryProject(b, "@t/b", { libName: "foo", soname: "libfoo.so.1", version: "1.0.0", text: textB });
+    writeProgramProject(helloDir(), { "@t/a": "file:../a", "@t/b": "file:../b" });
+    return { a, b, libsA, libsB };
+  }
+
   it("packages a program with its library declared by local path and not installed, and the package runs on its own", async () => {
     if (!ccAvailable()) return;
     writeLibraryProject(greetDir(), "@t/greet", GREET_SPEC);
@@ -422,6 +432,70 @@ describe("package layout", () => {
     expect(message).toContain(copy);
     expect(message.indexOf(greetDir())).toBeLessThan(message.indexOf(copy));
     expect(errored()).toEqual(["Error: " + message]);
+    expect(fs.existsSync(output)).toBe(false);
+  }, BOUND_TIMEOUT);
+
+  // ── name collisions ───────────────────────────────────────────────────
+
+  it("refuses two projects building different files named libfoo.so.1, naming both sources, and writes nothing", async () => {
+    if (!ccAvailable()) return;
+    const { libsA, libsB } = writeTwoFooProjects("foo from a", "foo from b");
+
+    const result = await packageRun([helloDir()]);
+
+    expect(result.success).toBe(false);
+    const message = result.message ?? "";
+    expect(message).toContain("Two different files would be packaged as libfoo.so.1:");
+    expect(message).toContain(`${path.join(libsA, "libfoo.so.1.0.0")} (build of @t/a)`);
+    expect(message).toContain(`${path.join(libsB, "libfoo.so.1.0.0")} (build of @t/b)`);
+    expect(message.trimEnd().endsWith("Nothing was written.")).toBe(true);
+    expect(errored()).toEqual(["Error: " + message]);
+    expect(fs.existsSync(output)).toBe(false);
+  }, BOUND_TIMEOUT);
+
+  it("packages identical content under one name from two projects once, with the first project's source and signature (guard: no false collision)", async () => {
+    if (!ccAvailable()) return;
+    const a = path.join(root, "a");
+    const b = path.join(root, "b");
+    const spec: LibrarySpec = { libName: "foo", soname: "libfoo.so.1", version: "1.0.0", text: "foo" };
+    const libsA = writeLibraryProject(a, "@t/a", spec);
+    // The second project's .libs is a byte copy of the first's, links included, made before the first is signed
+    const libsB = writeLibraryProject(b, "@t/b", spec);
+    await signLibrary(libsA, "libfoo.so.1.0.0", ["libfoo.so.1", "libfoo.so"]);
+    writeProgramProject(helloDir(), { "@t/a": "file:../a", "@t/b": "file:../b" });
+
+    const plan = await pkg.plan([helloDir()]);
+    const result = await packageRun([helloDir()]);
+
+    expect([result.success, result.message]).toEqual([true, null]);
+    expect(names(output)).toEqual(["hello", "libfoo.so.1", "libfoo.so.1.sig"]);
+    if (!plan.ok) {
+      throw new Error("plan refused: " + plan.message);
+    }
+    const planned = plan.files.filter((file) => file.name === "libfoo.so.1");
+    expect(planned).toHaveLength(1);
+    expect(planned[0].source).toBe(path.join(libsA, "libfoo.so.1.0.0"));
+    expect(planned[0].origin).toEqual({ kind: "project", project: "@t/a", location: a });
+    expect(fs.existsSync(path.join(libsB, "libfoo.so.1.0.0.sig"))).toBe(false);
+    await expectSameProjects(result, [helloDir()]);
+  }, 20000);
+
+  it("refuses a build-tree copy that differs from the installed copy, naming both and the stale installed copy", async () => {
+    if (!ccAvailable()) return;
+    const stale: LibrarySpec = { ...GREET_SPEC, text: "an older greeting" };
+    const libs = writeLibraryProject(greetDir(), "@t/greet", GREET_SPEC);
+    writeProgramProject(helloDir(), { "@t/greet": "file:../greet" }, GREET_SPEC);
+    const installed = installInPrefix(stale, ["libgreet.so.0", "libgreet.so"]);
+
+    const result = await packageRun([helloDir()]);
+
+    expect(result.success).toBe(false);
+    const message = result.message ?? "";
+    expect(message).toContain("Two different files would be packaged as libgreet.so.0:");
+    expect(message).toContain(path.join(libs, "libgreet.so.0.0.0"));
+    expect(message).toContain(installed);
+    expect(message).toContain("The installed copy differs from the build of @t/greet");
+    expect(message.trimEnd().endsWith("Nothing was written.")).toBe(true);
     expect(fs.existsSync(output)).toBe(false);
   }, BOUND_TIMEOUT);
 
