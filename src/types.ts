@@ -218,12 +218,33 @@ export interface VerifyResult {
   notChecked: string[];          // what this verification does not cover: the fixed list first, then file-specific items
 }
 
+/** The result for one manifest entry: the file's verification plus how it relates to the manifest. */
+export interface DirectoryFileResult extends VerifyResult {
+  relativePath: string;                    // the entry's path exactly as written in the manifest
+  signerMatchesManifest: boolean | null;   // null when no signer was established
+  recordedValueMatches: boolean | null;    // embedded: recorded fingerprint; detached: recorded signature; null when not compared
+}
+
 export interface DirectoryVerifyResult {
-  results: VerifyResult[];
-  passed: number;
-  failed: number;
-  notFound: number;
-  overallPass: boolean;
+  directory: string;
+  manifest: {
+    path: string;
+    version: 1 | 2;
+    earlierFormat: boolean;                // version 1
+    signedAt: string;
+    certificate: CertInfo;
+    recordedFingerprint: string;           // the fingerprint the manifest records for its certificate
+    fingerprintConsistent: boolean;
+    trust: TrustResult;
+  };
+  results: DirectoryFileResult[];          // one per manifest entry, in manifest order
+  unlisted: Array<{ relativePath: string; kind: "file" | "link" | "other"; reason: string }>;
+  skipped: Array<{ relativePath: string; present: boolean }>;
+  links: Array<{ relativePath: string; target: string }>;
+  counts: { valid: number; untrusted: number; invalid: number; notFullySigned: number; notChecked: number; missing: number; unlisted: number; skipped: number };
+  status: VerifyStatus;                    // worst of the entries, the manifest checks and the unlisted entries (unlisted counts as INVALID)
+  warnings: string[];
+  notChecked: string[];
 }
 
 /** Structure of a .sig file (JSON) */
@@ -242,14 +263,19 @@ export interface SigningManifestFormat {
   certificate: string;     // PEM-encoded X.509 certificate
   certificateFingerprint: string; // "SHA256:<hex>"
   files: SigningManifestEntry[];
+  skipped?: string[];      // version 2: files directory signing judged not binary and left unsigned (relative paths)
 }
 
 export interface SigningManifestEntry {
   path: string;                     // relative path to signed file
   signatureFile: string | null;     // relative path to .sig file, null when embedded
   algorithm: "SHA256";
-  signature: string;                // base64-encoded signature
-  signatureType: SignatureType;     // "embedded" or "detached"
+  /**
+   * What is recorded for the file: for a detached entry, the base64 signature from its .sig file;
+   * for an embedded entry, the base64 SHA-256 of the signed file (a recorded fingerprint, not a signature).
+   */
+  signature: string;
+  signatureType?: SignatureType;    // "embedded" or "detached"; absent in version 1 manifests (meaning detached)
 }
 
 // ── Recursive Build Types ───────────────────────────────────

@@ -8,7 +8,7 @@ import { pipeline } from "stream/promises";
 import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
 import Config from "./Config";
-import { NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates } from "./Trust";
+import { NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates, worst } from "./Trust";
 import { MachOSliceInfo, checkMachO } from "./MachOVerifier";
 import {
   CertInfo,
@@ -18,6 +18,7 @@ import {
   DirectorySignResult,
   VerifyResult,
   DirectoryVerifyResult,
+  DirectoryFileResult,
   SigFileFormat,
   SigningManifestFormat,
   SigningManifestEntry,
@@ -33,6 +34,7 @@ import {
   MachOSliceResult,
   SignatureForm,
   VerifyOptions,
+  VerifyStatus,
 } from "./types";
 
 // Result of reading an installer signature back from the package
@@ -1134,6 +1136,7 @@ class Signing {
       certificate: certPem,
       certificateFingerprint: certInfo.fingerprint,
       files: manifestEntries,
+      skipped: [...skipped],
     };
 
     const manifestPath = path.join(resolvedDir, ".signatures.json");
@@ -1703,8 +1706,11 @@ class Signing {
   }
 
   /**
-   * Verify all files in a signed directory using .signatures.json manifest.
-   * Handles both v1 (detached only) and v2 (mixed) manifests.
+   * Verify a signed directory against its .signatures.json manifest.
+   * The manifest's certificate must be consistent with its recorded fingerprint and is checked against the trusted
+   * certificates; every listed file must verify and be signed by that certificate; entries whose path leads outside
+   * the directory are refused without opening anything; files and links the manifest does not account for fail the directory.
+   * @throws if there is no manifest, or it is malformed
    */
   async verifyDirectory(dirPath: string, options?: VerifyOptions): Promise<DirectoryVerifyResult> {
     const resolvedDir = path.resolve(dirPath);
@@ -1714,53 +1720,331 @@ class Signing {
       throw new Error(`No .signatures.json manifest found in ${resolvedDir}`);
     }
 
+    const malformed = (detail: string): Error => new Error(`Manifest file .signatures.json is malformed: ${detail}`);
     let manifest: SigningManifestFormat;
     try {
       manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
-    } catch {
-      throw new Error("Manifest file .signatures.json is malformed");
+    } catch (err) {
+      throw malformed(`not valid JSON (${(err as Error).message})`);
+    }
+    if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) {
+      throw malformed("it is not a JSON object");
+    }
+    if (manifest.version !== 1 && manifest.version !== 2) {
+      throw malformed(`unsupported version ${JSON.stringify(manifest.version)}`);
+    }
+    if (!Array.isArray(manifest.files)) {
+      throw malformed("it has no list of files");
+    }
+    for (const entry of manifest.files) {
+      if (entry === null || typeof entry !== "object" || typeof entry.path !== "string" || entry.path === "") {
+        throw malformed("a file entry has no path");
+      }
+    }
+    if (manifest.skipped !== undefined && (!Array.isArray(manifest.skipped) || manifest.skipped.some((name) => typeof name !== "string"))) {
+      throw malformed("the list of skipped files is not a list of paths");
+    }
+    if (typeof manifest.certificate !== "string") {
+      throw malformed("it has no certificate");
+    }
+    let manifestCert: crypto.X509Certificate;
+    try {
+      manifestCert = new crypto.X509Certificate(manifest.certificate);
+    } catch (err) {
+      throw malformed(`its certificate cannot be read (${(err as Error).message})`);
     }
 
-    const resolvedOptions: VerifyOptions = { trust: options?.trust ?? this.loadTrust() };
-    const results: VerifyResult[] = [];
-    let passed = 0;
-    let failed = 0;
-    let notFound = 0;
+    const trust = options?.trust ?? this.loadTrust();
+    const certInfo = this._buildSignerInfo(manifestCert);
+    const recordedFingerprint = typeof manifest.certificateFingerprint === "string" ? manifest.certificateFingerprint : "";
+    const fingerprintConsistent = recordedFingerprint === certInfo.fingerprint;
+    const manifestTrust = evaluateTrust(manifestCert.raw, trust);
+    const earlierFormat = manifest.version === 1;
 
+    const warnings: string[] = [...trust.warnings];
+    if (earlierFormat) {
+      warnings.push("manifest is in the earlier format (version 1); signing the directory again writes the current one");
+    }
+    if (certInfo.isExpired) {
+      warnings.push(`manifest certificate expired on ${certInfo.notAfter.toISOString().slice(0, 10)}; the signing time is not established because timestamps are not checked`);
+    }
+    if (certInfo.isNotYetValid) {
+      warnings.push(`manifest certificate is not valid until ${certInfo.notBefore.toISOString().slice(0, 10)}`);
+    }
+
+    // Each entry is verified with the manifest's certificate as the only trusted one, which checks the signer against it
+    const manifestOnly: TrustedCertificates = {
+      source: "supplied",
+      anchors: [{ source: "supplied", path: manifestPath, fingerprint: certInfo.fingerprint }],
+      warnings: [],
+    };
+
+    const realDir = fs.realpathSync(resolvedDir);
+    const results: DirectoryFileResult[] = [];
+    const listed = new Set<string>();
     for (const entry of manifest.files) {
-      const filePath = path.join(resolvedDir, entry.path);
-
-      // For v2 manifests, use signatureType to determine verification method
-      // For v1 manifests (no signatureType field), default to detached
-      const sigType = (entry as SigningManifestEntry).signatureType || "detached";
-
-      let result: VerifyResult;
-      if (sigType === "embedded") {
-        result = await this.verifyFile(filePath, resolvedOptions);
-      } else {
-        result = await this._verifyFileDetached(filePath, resolvedOptions);
+      const relativePath = entry.path;
+      const normalized = this._normalizeRelative(relativePath);
+      listed.add(normalized);
+      if (entry.signatureFile) {
+        listed.add(this._normalizeRelative(entry.signatureFile));
+      }
+      listed.add(normalized + ".sig");
+      const result = await this._verifyManifestEntry(resolvedDir, realDir, entry, manifestOnly, manifestTrust);
+      for (const warning of result.warnings) {
+        warnings.push(`${relativePath}: ${warning}`);
       }
       results.push(result);
+    }
 
+    // Recorded skipped files
+    const skippedPaths = new Set<string>();
+    const skipped: Array<{ relativePath: string; present: boolean }> = [];
+    for (const name of manifest.skipped ?? []) {
+      const normalized = this._normalizeRelative(name);
+      skippedPaths.add(normalized);
+      let present = false;
+      if (!this._leadsOutside(name)) {
+        try {
+          present = fs.lstatSync(path.join(resolvedDir, name)).isFile();
+        } catch {
+          present = false;
+        }
+      }
+      skipped.push({ relativePath: name, present });
+      if (!present) {
+        warnings.push(`${name} is recorded as skipped when the directory was signed but is no longer present`);
+      }
+    }
+
+    // Everything in the directory that the manifest does not account for
+    const unlisted: DirectoryVerifyResult["unlisted"] = [];
+    const links: DirectoryVerifyResult["links"] = [];
+    const recordsSkipped = manifest.skipped !== undefined;
+    let hintNeeded = false;
+    const walk = async (relativeDir: string): Promise<void> => {
+      const entries = fs.readdirSync(path.join(resolvedDir, relativeDir), { withFileTypes: true });
+      entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+      for (const dirent of entries) {
+        const relative = relativeDir === "" ? dirent.name : relativeDir + "/" + dirent.name;
+        const full = path.join(resolvedDir, relative);
+        if (dirent.isDirectory()) {
+          await walk(relative);
+        } else if (dirent.isFile()) {
+          if (relative === ".signatures.json" || listed.has(relative) || skippedPaths.has(relative)) {
+            continue;
+          }
+          if (!recordsSkipped && !(await this.isBinaryFile(full))) {
+            hintNeeded = true;
+            unlisted.push({ relativePath: relative, kind: "file", reason: "not in the manifest; sign the directory again to record files that are not signed" });
+          } else {
+            unlisted.push({ relativePath: relative, kind: "file", reason: "not in the manifest" });
+          }
+        } else if (dirent.isSymbolicLink()) {
+          let target: string | undefined;
+          try {
+            const real = fs.realpathSync(full);
+            const inside = path.relative(realDir, real);
+            if (inside !== "" && !inside.startsWith("..") && !path.isAbsolute(inside)) {
+              const normalized = this._normalizeRelative(inside);
+              if (listed.has(normalized)) {
+                target = normalized;
+              }
+            }
+          } catch {
+            target = undefined;
+          }
+          if (target !== undefined) {
+            links.push({ relativePath: relative, target });
+          } else {
+            unlisted.push({ relativePath: relative, kind: "link", reason: "not checked (link or special file)" });
+          }
+        } else {
+          unlisted.push({ relativePath: relative, kind: "other", reason: "not checked (link or special file)" });
+        }
+      }
+    };
+    await walk("");
+    if (hintNeeded) {
+      warnings.push("this manifest does not record files that were not signed; sign the directory again to record them");
+    }
+
+    const counts = {
+      valid: 0,
+      untrusted: 0,
+      invalid: 0,
+      notFullySigned: 0,
+      notChecked: 0,
+      missing: 0,
+      unlisted: unlisted.length,
+      skipped: skipped.filter((item) => item.present).length,
+    };
+    for (const result of results) {
       switch (result.status) {
         case "VALID":
-          passed++;
+          counts.valid++;
+          break;
+        case "UNTRUSTED":
+          counts.untrusted++;
+          break;
+        case "NOT_FULLY_SIGNED":
+          counts.notFullySigned++;
+          break;
+        case "NOT_CHECKED":
+          counts.notChecked++;
           break;
         case "NOT_FOUND":
-          notFound++;
+          counts.missing++;
           break;
         default:
-          failed++;
+          counts.invalid++;
       }
+    }
+
+    const statuses: VerifyStatus[] = results.map((result) => result.status);
+    if (!fingerprintConsistent || unlisted.length > 0) {
+      statuses.push("INVALID");
+    }
+    if (manifestTrust.state !== "trusted") {
+      statuses.push("UNTRUSTED");
     }
 
     return {
+      directory: resolvedDir,
+      manifest: {
+        path: manifestPath,
+        version: manifest.version,
+        earlierFormat,
+        signedAt: String(manifest.signedAt ?? ""),
+        certificate: certInfo,
+        recordedFingerprint,
+        fingerprintConsistent,
+        trust: manifestTrust,
+      },
       results,
-      passed,
-      failed,
-      notFound,
-      overallPass: failed === 0 && notFound === 0,
+      unlisted,
+      skipped,
+      links,
+      counts,
+      status: worst(statuses),
+      warnings,
+      notChecked: [...NOT_CHECKED_ALWAYS],
     };
+  }
+
+  /** A relative path with "/" separators and no "." parts, for comparing paths from the manifest with the walk. */
+  _normalizeRelative(relative: string): string {
+    return path.normalize(relative).split(path.sep).join("/");
+  }
+
+  /** Whether a manifest path is absolute, holds a NUL, or climbs out of the directory by its own text. */
+  _leadsOutside(relative: string): boolean {
+    if (relative.includes("\0") || path.isAbsolute(relative) || path.win32.isAbsolute(relative)) {
+      return true;
+    }
+    const normalized = path.normalize(relative);
+    return normalized === ".." || normalized.startsWith(".." + path.sep) || normalized.startsWith("../");
+  }
+
+  /** Whether a file that exists resolves, after following links, to a place outside the directory. */
+  _resolvesOutside(realDir: string, filePath: string): boolean {
+    const inside = path.relative(realDir, fs.realpathSync(filePath));
+    return inside === ".." || inside.startsWith(".." + path.sep) || path.isAbsolute(inside);
+  }
+
+  /** Verify one manifest entry and relate the outcome to the manifest. Nothing outside the directory is opened. */
+  async _verifyManifestEntry(
+    resolvedDir: string,
+    realDir: string,
+    entry: SigningManifestEntry,
+    manifestOnly: TrustedCertificates,
+    manifestTrust: TrustResult
+  ): Promise<DirectoryFileResult> {
+    const relativePath = entry.path;
+    const filePath = path.join(resolvedDir, relativePath);
+    const fail = (status: VerifyStatus, reason: string, integrityState: "invalid" | "none" = "invalid"): DirectoryFileResult => ({
+      filePath,
+      relativePath,
+      status,
+      reason,
+      integrity: { state: integrityState, reason, checked: [] },
+      trust: { state: "not-applicable" },
+      warnings: [],
+      notChecked: [...NOT_CHECKED_ALWAYS],
+      signerMatchesManifest: null,
+      recordedValueMatches: null,
+    });
+
+    const outside = "path leads outside the directory";
+    if (this._leadsOutside(relativePath)) {
+      return fail("INVALID", outside);
+    }
+    const sigPath = filePath + ".sig";
+    try {
+      if (!fs.existsSync(filePath)) {
+        return fail("NOT_FOUND", "the file is missing", "none");
+      }
+      if (this._resolvesOutside(realDir, filePath) || (fs.existsSync(sigPath) && this._resolvesOutside(realDir, sigPath))) {
+        return fail("INVALID", outside);
+      }
+    } catch {
+      return fail("INVALID", outside);
+    }
+
+    const embedded = entry.signatureType === "embedded";
+    const verified = embedded ? await this.verifyFile(filePath, { trust: manifestOnly }) : await this._verifyFileDetached(filePath, { trust: manifestOnly });
+
+    // The signer against the manifest's certificate
+    let signerMatchesManifest: boolean | null = null;
+    if (verified.signer) {
+      signerMatchesManifest = verified.trust.state === "trusted";
+    }
+
+    // The value the manifest recorded for the file
+    let recordedValueMatches: boolean | null = null;
+    let recordedReason = "";
+    if (embedded) {
+      const fingerprint = crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("base64");
+      recordedValueMatches = fingerprint === entry.signature;
+      recordedReason = "the file differs from the fingerprint recorded in the manifest";
+    } else if (fs.existsSync(sigPath)) {
+      try {
+        const sigData: SigFileFormat = JSON.parse(fs.readFileSync(sigPath, "utf-8"));
+        recordedValueMatches = sigData.signature === entry.signature;
+        recordedReason = "the detached signature differs from the one recorded in the manifest";
+      } catch {
+        recordedValueMatches = null;
+      }
+    }
+
+    const result: DirectoryFileResult = { ...verified, relativePath, signerMatchesManifest, recordedValueMatches };
+    if (verified.status === "NOT_FOUND") {
+      const reason = `no signature found, although the manifest lists one (${verified.reason ?? "none present"})`;
+      return { ...result, status: "INVALID", reason, integrity: { state: "invalid", reason, checked: [] } };
+    }
+
+    let reason: string | undefined;
+    if (verified.integrity.state === "intact") {
+      if (signerMatchesManifest === false) {
+        reason = "signer does not match the manifest's certificate";
+      } else if (recordedValueMatches === false) {
+        reason = recordedReason;
+      }
+    }
+    if (reason !== undefined) {
+      return { ...result, status: "INVALID", reason };
+    }
+    // The file's trust is that of the manifest's certificate
+    if (verified.integrity.state === "intact" || signerMatchesManifest !== null) {
+      result.trust = signerMatchesManifest === false ? result.trust : manifestTrust;
+      result.status = outcomeOf(verified.integrity, result.trust);
+      if (result.status === "UNTRUSTED") {
+        result.reason = manifestTrust.message;
+      } else if (result.status === "VALID") {
+        delete result.reason;
+      }
+    }
+    return result;
   }
 }
 

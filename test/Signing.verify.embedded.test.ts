@@ -331,10 +331,13 @@ describe("signDirectory with mixed formats", () => {
     await signing.signDirectory(dir, { scope });
     const result = await signing.verifyDirectory(dir);
 
-    expect(result.overallPass).toBe(true);
-    expect(result.results.length).toBeGreaterThan(0);
-    expect(result.passed).toBe(result.results.length);
-    expect(result.failed).toBe(0);
-    expect(result.notFound).toBe(0);
+    // data.txt is not binary: signing records it as skipped, verification reports it present, not signed
+    expect(result.status).toBe("VALID");
+    expect(result.counts).toMatchObject({ valid: 1, skipped: 1, unlisted: 0 });
+    expect(result.manifest.trust.state).toBe("trusted");
+    expect(result.manifest.trust.anchor).toMatchObject({ source: "scope", scope });
+    expect(result.skipped).toEqual([{ relativePath: "data.txt", present: true }]);
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0].status).toBe("VALID");
   });
 });

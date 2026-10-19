@@ -3,7 +3,7 @@ import inquirer from "inquirer";
 import Signing from "../Signing";
 import Config from "../Config";
 import { exitStatusOf } from "../Trust";
-import { ScriptArgsType } from "../types";
+import { ScriptArgsType, TrustResult } from "../types";
 
 /**
  * Prompt the user to select a scope. If only one scope exists, auto-selects it.
@@ -26,6 +26,18 @@ async function promptForScope(signing: Signing): Promise<string | null> {
     },
   ]);
   return answer.scope;
+}
+
+/** The words after "Trust:" in a report. */
+function describeTrust(trust: TrustResult): string {
+  if (trust.state === "trusted" && trust.anchor) {
+    const anchor = trust.anchor;
+    return anchor.source === "scope" ? `trusted: certificate of scope ${anchor.scope}` : `trusted: supplied certificate ${anchor.path}`;
+  }
+  if (trust.state === "untrusted") {
+    return `not trusted: ${trust.message}`;
+  }
+  return "not applicable";
 }
 
 const SigningCLI = async (scriptConfig: ScriptArgsType) => {
@@ -300,26 +312,66 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
 
         if (stat.isDirectory()) {
           const result = await signing.verifyDirectory(targetPath, { trust });
+          const formLabels: Record<string, string> = {
+            detached: "detached",
+            "windows-program": "Windows program",
+            installer: "installer",
+            "mac-program": "Mac program",
+          };
+          const headlines: Record<string, string> = {
+            VALID: "VALID",
+            UNTRUSTED: "UNTRUSTED",
+            INVALID: "INVALID",
+            NOT_FULLY_SIGNED: "NOT FULLY SIGNED",
+            NOT_CHECKED: "NOT CHECKED",
+            NOT_FOUND: "MISSING",
+          };
+          const row = (word: string, text: string): string => "  " + word.padEnd(17) + text;
+          const manifest = result.manifest;
           console.log(`Verifying directory: ${targetPath}`);
+          if (manifest.earlierFormat) {
+            console.log(`  Manifest:    .signatures.json, earlier format (version ${manifest.version}); signing the directory again writes the current one`);
+          } else {
+            console.log(`  Manifest:    .signatures.json, current format (version ${manifest.version}), signed ${manifest.signedAt}`);
+          }
+          const consistency = manifest.fingerprintConsistent
+            ? "fingerprint matches the manifest"
+            : `fingerprint does NOT match the manifest's recorded fingerprint ${manifest.recordedFingerprint}`;
+          console.log(`  Certificate: ${signing._formatSubject(manifest.certificate.subject)}  ${manifest.certificate.fingerprint}  (${consistency})`);
+          console.log(`  Trust:       ${describeTrust(manifest.trust)}`);
           for (const r of result.results) {
-            const relPath = path.relative(resolvedPath, r.filePath);
-            if (r.status === "VALID") {
-              console.log(`  VALID   ${relPath}`);
-            } else if (r.status === "INVALID") {
-              console.log(`  INVALID ${relPath} — ${r.reason || "Unknown reason"}`);
-            } else if (r.status === "NOT_FOUND") {
-              console.log(`  NOT FOUND ${relPath}`);
+            const word = headlines[r.status] ?? r.status;
+            if (r.status === "NOT_FOUND") {
+              console.log(row(word, r.relativePath));
+            } else if (r.status === "VALID" || r.status === "UNTRUSTED") {
+              console.log(row(word, `${r.relativePath} (${formLabels[r.form ?? "detached"] ?? r.form}; signer matches the manifest)`));
             } else {
-              console.log(`  ${r.status.replace(/_/g, " ")} ${relPath} — ${r.reason || "Unknown reason"}`);
+              console.log(row(word, `${r.relativePath} — ${r.reason || "Unknown reason"}`));
             }
           }
-          console.log("");
-          if (result.overallPass) {
-            console.log(`  Result: PASS (${result.passed} of ${result.results.length} files valid)`);
-          } else {
-            console.log(`  Result: FAIL (${result.failed + result.notFound} of ${result.results.length} files invalid)`);
-            exitStatus = 1;
+          for (const item of result.unlisted) {
+            console.log(row("UNLISTED", `${item.relativePath} — ${item.reason}`));
           }
+          for (const link of result.links) {
+            console.log(row("LINK", `${link.relativePath} -> ${link.target}`));
+          }
+          for (const item of result.skipped) {
+            if (item.present) {
+              console.log(row("SKIPPED", `${item.relativePath} — present, not signed; contents not checked`));
+            }
+          }
+          for (const warning of result.warnings) {
+            console.log(`  Warning: ${warning}`);
+          }
+          console.log(`  Not checked: ${result.notChecked.join(", ")}`);
+          console.log("");
+          const counts = result.counts;
+          const verdict = result.status === "VALID" ? "PASS" : result.status === "UNTRUSTED" ? "NOT TRUSTED" : "FAIL";
+          console.log(
+            `  Result: ${verdict} (valid ${counts.valid}, untrusted ${counts.untrusted}, invalid ${counts.invalid}, not fully signed ${counts.notFullySigned}, ` +
+              `not checked ${counts.notChecked}, missing ${counts.missing}, unlisted ${counts.unlisted}; skipped ${counts.skipped})`
+          );
+          exitStatus = exitStatusOf(result.status);
         } else {
           const result = await signing.verifyFile(targetPath, { trust });
           const headlines: Record<string, string> = {
@@ -335,13 +387,8 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           if (result.status !== "VALID" && result.reason) {
             console.log(`  Reason:      ${result.reason}`);
           }
-          if (result.trust.state === "trusted" && result.trust.anchor) {
-            const anchor = result.trust.anchor;
-            console.log(
-              `  Trust:       trusted: ${anchor.source === "scope" ? `certificate of scope ${anchor.scope}` : `supplied certificate ${anchor.path}`}`
-            );
-          } else if (result.trust.state === "untrusted") {
-            console.log(`  Trust:       not trusted: ${result.trust.message}`);
+          if (result.trust.state !== "not-applicable") {
+            console.log(`  Trust:       ${describeTrust(result.trust)}`);
           }
           if (result.signer) {
             console.log(`  Signer:      ${signing._formatSubject(result.signer.subject)}`);

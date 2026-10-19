@@ -2,6 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import Signing from "../src/Signing";
+import { expectPresent } from "./helpers/Assert";
 import { runVerify } from "./helpers/Command";
 
 // The verify command, run through runCli with a scratch configuration directory and a scratch HOME.
@@ -11,6 +12,14 @@ import { runVerify } from "./helpers/Command";
 //   - a --cert without a value:  "Error: --cert needs a file"  followed by the usage line
 //   - an unknown option:         "Error: Unknown option <option>"  followed by the usage line
 //   - the usage line:            "Usage: the-seed signing verify [--cert <file>]... <path>"
+// Directory report (choices where the contract leaves a form open):
+//   - each per-file line is two spaces, the headline word padded with spaces to 17 characters, then
+//     the text (the contract's example lines have the text starting in the same column)
+//   - the em dash " — " separates a path from its reason
+//   - the "Verifying directory:" line shows the path as given on the command line
+//   - a missing listed file prints "MISSING" and its path with no reason
+//   - the "Certificate:" line is "<subject>  <fingerprint>  (<note>)", the note being
+//     "fingerprint matches the manifest" or "fingerprint does NOT match the manifest's recorded fingerprint <recorded>"
 
 const USAGE = "Usage: the-seed signing verify [--cert <file>]... <path>";
 
@@ -157,5 +166,188 @@ describe("signing verify --cert", () => {
       expect(run.err + run.out).toContain(USAGE);
       expect(run.out).not.toContain("Verification:");
     });
+  });
+});
+
+describe("signing verify <directory>", () => {
+  const NOT_CHECKED_LINE = "  Not checked: certificate chains, revocation, signing time, acceptance by the platform's own verifier";
+  const tiny = path.join(__dirname, "fixtures", "binaries", "tiny.exe");
+  let root: string;
+  let dir: string;
+
+  /** One line of the per-file list: two spaces, the headline padded to 17, the text. */
+  function line(word: string, text: string): string {
+    return "  " + word.padEnd(17) + text;
+  }
+
+  function readManifest(): { version: number; skipped?: string[]; certificateFingerprint: string; certificate?: string; files: Array<{ path: string; signatureFile: string | null; algorithm: string; signature: string; signatureType?: string }> } {
+    return JSON.parse(fs.readFileSync(path.join(dir, ".signatures.json"), "utf-8"));
+  }
+
+  function writeManifest(manifest: unknown): void {
+    fs.writeFileSync(path.join(dir, ".signatures.json"), JSON.stringify(manifest, null, 2));
+  }
+
+  beforeEach(() => {
+    root = tempDir("cli-dir-");
+    dir = path.join(root, "tree");
+    fs.mkdirSync(path.join(dir, "lib"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "a.bin"), Buffer.from([0, ...Array.from({ length: 63 }, (_, index) => (index * 7 + 3) & 0xff)]));
+    fs.writeFileSync(path.join(dir, "lib", "b.bin"), Buffer.from([0, ...Array.from({ length: 79 }, (_, index) => (index * 11 + 5) & 0xff)]));
+    fs.copyFileSync(tiny, path.join(dir, "tiny.exe"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("exits 0 and prints the full report for a directory that is as it was signed", async () => {
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    const run = await runVerify([dir], A.configDir, home);
+
+    expect(run.status).toBe(0);
+    const lines = run.out.split("\n");
+    expect(lines[0]).toBe("Verifying directory: " + dir);
+    expect(run.out).toMatch(/^ {2}Manifest: {4}\.signatures\.json, current format \(version 2\), signed \d{4}-\d{2}-\d{2}T/m);
+    const cert = A.signing.getCertInfo("@ta");
+    expect(run.out).toContain("  Certificate: ");
+    expect(run.out).toContain(expectPresent(cert, "certificate").fingerprint + "  (fingerprint matches the manifest)");
+    expect(run.out).toContain("  Trust:       trusted: certificate of scope @ta");
+    expect(lines).toContain(line("VALID", "a.bin (detached; signer matches the manifest)"));
+    expect(lines).toContain(line("VALID", "lib/b.bin (detached; signer matches the manifest)"));
+    expect(lines).toContain(line("VALID", "tiny.exe (Windows program; signer matches the manifest)"));
+    expect(lines).toContain(NOT_CHECKED_LINE);
+    expect(run.out).toContain("  Result: PASS (valid 3, untrusted 0, invalid 0, not fully signed 0, not checked 0, missing 0, unlisted 0; skipped 0)");
+    expect(run.out).not.toContain("Warning:");
+  });
+
+  it("exits 4 and prints NOT TRUSTED for a directory signed in B, each file still shown as intact", async () => {
+    await B.signing.signDirectory(dir, { scope: "@tb" });
+    const run = await runVerify([dir], A.configDir, home);
+
+    expect(run.status).toBe(4);
+    expect(run.out).toContain("  Trust:       not trusted: signer certificate is not one of the trusted certificates");
+    expect(run.out).toMatch(/^ {2}UNTRUSTED {8}a\.bin/m);
+    expect(run.out).toMatch(/^ {2}UNTRUSTED {8}tiny\.exe/m);
+    expect(run.out).toContain("  Result: NOT TRUSTED (valid 0, untrusted 3, invalid 0, not fully signed 0, not checked 0, missing 0, unlisted 0; skipped 0)");
+
+    const withCert = await runVerify(["--cert", B.certFile, dir], A.configDir, home);
+    expect(withCert.status).toBe(0);
+    expect(withCert.out).toContain("Trust:       trusted: supplied certificate " + B.certFile);
+    expect(withCert.out).toContain("  Result: PASS");
+  });
+
+  it("exits 1 and prints INVALID, MISSING, UNLISTED, LINK and SKIPPED lines with the counts for a directory that has changed", async () => {
+    const outside = path.join(root, "outside.bin");
+    fs.writeFileSync(outside, Buffer.from([0, 1, 2, 3]));
+    fs.writeFileSync(path.join(dir, "notes.txt"), "plain text\n");
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    fs.appendFileSync(path.join(dir, "a.bin"), Buffer.from([0]));
+    fs.rmSync(path.join(dir, "lib", "b.bin"));
+    fs.writeFileSync(path.join(dir, "extra.bin"), Buffer.from([0, 9, 9]));
+    fs.symlinkSync(outside, path.join(dir, "ext-link"));
+    fs.symlinkSync("tiny.exe", path.join(dir, "tiny.link"));
+
+    const run = await runVerify([dir], A.configDir, home);
+    expect(run.status).toBe(1);
+    const lines = run.out.split("\n");
+    expect(lines.some((candidate) => candidate.startsWith(line("INVALID", "a.bin — ")) && /modified/i.test(candidate))).toBe(true);
+    expect(lines).toContain(line("MISSING", "lib/b.bin"));
+    expect(lines).toContain(line("UNLISTED", "extra.bin — not in the manifest"));
+    expect(lines).toContain(line("UNLISTED", "ext-link — not checked (link or special file)"));
+    expect(lines).toContain(line("LINK", "tiny.link -> tiny.exe"));
+    expect(lines).toContain(line("SKIPPED", "notes.txt — present, not signed; contents not checked"));
+    expect(lines).toContain(line("VALID", "tiny.exe (Windows program; signer matches the manifest)"));
+    expect(run.out).toContain("  Result: FAIL (valid 1, untrusted 0, invalid 1, not fully signed 0, not checked 0, missing 1, unlisted 2; skipped 1)");
+  });
+
+  it("prints the earlier-format wording for a version 1 manifest, with the unlisted file and the exit status 1", async () => {
+    fs.rmSync(path.join(dir, "tiny.exe"));
+    const entries = [];
+    for (const name of ["a.bin", "lib/b.bin"]) {
+      const result = await A.signing.signFile(path.join(dir, name), { scope: "@ta", detached: true });
+      const sig = JSON.parse(fs.readFileSync(expectPresent(result.signaturePath, "signaturePath"), "utf-8"));
+      entries.push({ path: name, signatureFile: name + ".sig", algorithm: "SHA256", signature: sig.signature });
+    }
+    writeManifest({
+      version: 1,
+      signedAt: new Date().toISOString(),
+      certificate: fs.readFileSync(expectPresent(A.signing.getCertInfo("@ta"), "certificate").certPath, "utf-8"),
+      certificateFingerprint: expectPresent(A.signing.getCertInfo("@ta"), "certificate").fingerprint,
+      files: entries,
+    });
+    fs.writeFileSync(path.join(dir, "notes.txt"), "plain text\n");
+
+    const run = await runVerify([dir], A.configDir, home);
+    expect(run.status).toBe(1);
+    expect(run.out).toMatch(/^ {2}Manifest: {4}\.signatures\.json, earlier format \(version 1\); signing the directory again writes the current one/m);
+    expect(run.out.split("\n")).toContain(line("VALID", "a.bin (detached; signer matches the manifest)"));
+    expect(run.out).toContain("UNLISTED         notes.txt");
+  });
+
+  it("prints the re-sign warning when a version 2 manifest records no skipped files and a text file is present", async () => {
+    fs.writeFileSync(path.join(dir, "notes.txt"), "plain text\n");
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    const manifest = readManifest();
+    delete manifest.skipped;
+    writeManifest(manifest);
+
+    const run = await runVerify([dir], A.configDir, home);
+    expect(run.status).toBe(1);
+    expect(run.out.split("\n")).toContain("  Warning: this manifest does not record files that were not signed; sign the directory again to record them");
+  });
+
+  it("prints every warning, here the one for a recorded skipped file that is gone, and still exits 0", async () => {
+    fs.writeFileSync(path.join(dir, "notes.txt"), "plain text\n");
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    fs.rmSync(path.join(dir, "notes.txt"));
+
+    const run = await runVerify([dir], A.configDir, home);
+    expect(run.status).toBe(0);
+    expect(run.out).toMatch(/^ {2}Warning: .*notes\.txt/m);
+  });
+
+  it("exits 1 and says the fingerprint does not match when the manifest's recorded fingerprint is wrong", async () => {
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    const manifest = readManifest();
+    const wrong = "SHA256:" + "00".repeat(32);
+    manifest.certificateFingerprint = wrong;
+    writeManifest(manifest);
+
+    const run = await runVerify([dir], A.configDir, home);
+    expect(run.status).toBe(1);
+    expect(run.out).toContain("(fingerprint does NOT match the manifest's recorded fingerprint " + wrong + ")");
+    expect(run.out).toMatch(/^ {2}Result: FAIL/m);
+  });
+
+  it("exits 2 for a directory without a manifest", async () => {
+    const run = await runVerify([dir], A.configDir, home);
+    expect(run.status).toBe(2);
+    expect(run.err).toContain("No .signatures.json manifest found in " + dir);
+    expect(run.out).not.toContain("Result:");
+  });
+
+  it("exits 3 for a malformed manifest, before any file result", async () => {
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    const manifest = readManifest();
+    delete manifest.certificate;
+    writeManifest(manifest);
+
+    const run = await runVerify([dir], A.configDir, home);
+    expect(run.status).toBe(3);
+    expect(run.err).toMatch(/Manifest file \.signatures\.json is malformed: .+/);
+    expect(run.out).not.toContain("Result:");
+    expect(run.out).not.toMatch(/^ {2}VALID/m);
+  });
+
+  it("verifies a directory whose path has spaces and shell-special characters exactly", async () => {
+    const odd = path.join(root, "my dir $(echo x) & 'q' ;`z`");
+    fs.renameSync(dir, odd);
+    await A.signing.signDirectory(odd, { scope: "@ta" });
+
+    const run = await runVerify([odd], A.configDir, home);
+    expect(run.status).toBe(0);
+    expect(run.out.split("\n")[0]).toBe("Verifying directory: " + odd);
+    expect(run.out).toContain("  Result: PASS");
   });
 });

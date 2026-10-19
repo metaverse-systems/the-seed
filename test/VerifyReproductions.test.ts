@@ -308,3 +308,166 @@ describe("cross-signer", () => {
     expect(expectPresent(detachedResult.signer, "signer").fingerprint).toBe(bFingerprint);
   });
 });
+
+describe("directory", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = path.join(tempDir("reproductions-dir-"), "tree");
+    fs.mkdirSync(path.join(dir, "lib"), { recursive: true });
+    // A leading NUL byte makes each file binary for directory signing
+    fs.writeFileSync(path.join(dir, "a.bin"), Buffer.from([0, ...Array.from({ length: 63 }, (_, index) => (index * 7 + 3) & 0xff)]));
+    fs.writeFileSync(path.join(dir, "lib", "b.bin"), Buffer.from([0, ...Array.from({ length: 79 }, (_, index) => (index * 11 + 5) & 0xff)]));
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), path.join(dir, "tiny.exe"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+  });
+
+  function readManifest(): { files: Array<{ path: string; signatureFile: string | null; algorithm: string; signature: string; signatureType?: string }>; certificateFingerprint: string } {
+    return JSON.parse(fs.readFileSync(path.join(dir, ".signatures.json"), "utf-8"));
+  }
+
+  it("a directory signed in B fails trust in A, still reporting each file intact and matching the manifest", async () => {
+    await B.signing.signDirectory(dir, { scope: "@tb" });
+
+    const result = await A.signing.verifyDirectory(dir);
+    expect(result.status).toBe("UNTRUSTED");
+    expect(result.manifest.fingerprintConsistent).toBe(true);
+    expect(result.manifest.trust.state).toBe("untrusted");
+    expect(result.manifest.trust.reason).toBe("unknown-signer");
+    expect(result.unlisted).toEqual([]);
+    expect(result.results.map((entry) => entry.relativePath).sort()).toEqual(["a.bin", "lib/b.bin", "tiny.exe"]);
+    for (const entry of result.results) {
+      expect(entry.integrity.state).toBe("intact");
+      expect(entry.signerMatchesManifest).toBe(true);
+      expect(entry.status).toBe("UNTRUSTED");
+    }
+
+    const command = await runVerify([dir], A.configDir, tempDir("reproductions-dir-home-"));
+    expect(command.status).toBe(4);
+    expect(command.out).toContain("Result: NOT TRUSTED");
+
+    // in B the same directory is valid
+    const fromB = await B.signing.verifyDirectory(dir);
+    expect(fromB.status).toBe("VALID");
+  });
+
+  it("a file added after signing is reported as unlisted and fails the directory", async () => {
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    expect((await A.signing.verifyDirectory(dir)).status).toBe("VALID");
+
+    fs.writeFileSync(path.join(dir, "lib", "added.bin"), Buffer.from([0, 255, 1, 254, 2, 253, 3, 252]));
+
+    const result = await A.signing.verifyDirectory(dir);
+    expect(result.status).toBe("INVALID");
+    expect(result.counts.unlisted).toBe(1);
+    expect(result.unlisted.map((entry) => [entry.relativePath, entry.kind])).toEqual([["lib/added.bin", "file"]]);
+    // every listed file is still fine
+    expect(result.results.every((entry) => entry.status === "VALID")).toBe(true);
+
+    const command = await runVerify([dir], A.configDir, tempDir("reproductions-dir-home-"));
+    expect(command.status).toBe(1);
+    expect(command.out).toContain("UNLISTED");
+    expect(command.out).toContain("lib/added.bin");
+  });
+
+  it("a listed file replaced by a copy signed in B fails with \"signer does not match the manifest's certificate\"", async () => {
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    // Replace a detached file's signature and an embedded file's signature with B's
+    await B.signing.signFile(path.join(dir, "a.bin"), { scope: "@tb" });
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), path.join(dir, "tiny.exe"));
+    await B.signing.signFile(path.join(dir, "tiny.exe"), { scope: "@tb" });
+
+    const result = await A.signing.verifyDirectory(dir);
+    expect(result.status).toBe("INVALID");
+    for (const name of ["a.bin", "tiny.exe"]) {
+      const entry = expectPresent(
+        result.results.find((candidate) => candidate.relativePath === name),
+        name
+      );
+      expect(entry.status).toBe("INVALID");
+      expect(entry.signerMatchesManifest).toBe(false);
+      // Chosen: the signer mismatch is the reason reported, ahead of any recorded-value mismatch
+      expect(entry.reason).toContain("signer does not match the manifest's certificate");
+    }
+    expect(result.results.find((entry) => entry.relativePath === "lib/b.bin")?.status).toBe("VALID");
+  });
+
+  it("a manifest whose recorded fingerprint does not match its certificate fails as inconsistent", async () => {
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+    const manifest = readManifest();
+    manifest.certificateFingerprint = "SHA256:" + "00".repeat(32);
+    fs.writeFileSync(path.join(dir, ".signatures.json"), JSON.stringify(manifest, null, 2));
+
+    const result = await A.signing.verifyDirectory(dir);
+    expect(result.manifest.fingerprintConsistent).toBe(false);
+    expect(result.status).toBe("INVALID");
+    // the files themselves are still individually fine
+    expect(result.results.every((entry) => entry.integrity.state === "intact")).toBe(true);
+
+    const command = await runVerify([dir], A.configDir, tempDir("reproductions-dir-home-"));
+    expect(command.status).toBe(1);
+    expect(command.out).toContain("does NOT match the manifest's recorded fingerprint");
+    expect(command.out).toContain("Result: FAIL");
+  });
+
+  it("an entry whose path leads outside the directory is invalid and the outside file is not opened", async () => {
+    const outside = path.join(path.dirname(dir), "outside.bin");
+    fs.writeFileSync(outside, Buffer.from([9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 255, 128]));
+    await A.signing.signFile(outside, { scope: "@ta" });
+    await A.signing.signDirectory(dir, { scope: "@ta" });
+
+    const manifest = readManifest();
+    const template = manifest.files.find((entry) => entry.path === "a.bin");
+    const sigText = JSON.parse(fs.readFileSync(outside + ".sig", "utf-8")).signature as string;
+    for (const outsidePath of ["../outside.bin", outside]) {
+      manifest.files.push({
+        path: outsidePath,
+        signatureFile: outsidePath + ".sig",
+        algorithm: "SHA256",
+        signature: sigText,
+        signatureType: template?.signatureType,
+      });
+    }
+    fs.writeFileSync(path.join(dir, ".signatures.json"), JSON.stringify(manifest, null, 2));
+
+    // Spy (calling through) on the ways a file can be opened by path
+    const outsideReal = fs.realpathSync(outside);
+    const touched: string[] = [];
+    const record = (target: unknown): void => {
+      if (typeof target === "string" || Buffer.isBuffer(target) || target instanceof URL) {
+        const resolved = path.resolve(target instanceof URL ? target.pathname : target.toString());
+        touched.push(resolved);
+      }
+    };
+    // Choice: a result's relativePath is the entry's path exactly as written in the manifest; the reason contains "path leads outside the directory"
+    const spies = (["openSync", "readFileSync", "createReadStream"] as const).map((name) => {
+      const original = (fs as unknown as Record<string, (...args: unknown[]) => unknown>)[name];
+      return jest.spyOn(fs as never, name as never).mockImplementation(((...args: unknown[]) => {
+        record(args[0]);
+        return original.apply(fs, args);
+      }) as never);
+    });
+    let result: Awaited<ReturnType<Signing["verifyDirectory"]>>;
+    try {
+      result = await A.signing.verifyDirectory(dir);
+    } finally {
+      for (const spy of spies) {
+        spy.mockRestore();
+      }
+    }
+
+    expect(touched.filter((target) => target === outside || target === outsideReal)).toEqual([]);
+    expect(result.status).toBe("INVALID");
+    for (const outsidePath of ["../outside.bin", outside]) {
+      const entry = expectPresent(
+        result.results.find((candidate) => candidate.relativePath === outsidePath),
+        outsidePath
+      );
+      expect(entry.status).toBe("INVALID");
+      expect(entry.reason).toContain("path leads outside the directory");
+    }
+  });
+});
