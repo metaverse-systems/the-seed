@@ -6,6 +6,7 @@ import { buildTreeCopies, groupOutputs, notice, outputKind, placeStaged, readSta
 import Signing from "../src/Signing";
 import { findOnPath } from "../src/ProcessRunner";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { replaceScopeKey } from "./helpers/IndependentCheck";
 import { InstallPhaseOptions, InstallPhaseResult, OutputGroup } from "../src/types";
 
 // Choices made where the behaviour leaves a detail open (the implementation matches these):
@@ -2096,6 +2097,31 @@ describe("runInstallPhase", () => {
 
     expect(failed.message).toBe("signing failed on " + path.join(c.prefix, "bin", "tiny") + ": deliberate signer failure");
     expect(snapshot(c.configPrefix)).toEqual(before);
+    expect(fs.existsSync(path.join(c.configPrefix, ".the-seed-staging"))).toBe(false);
+  });
+
+  // The scope's key is replaced in a copy of the scratch configuration; real signing runs, nothing is built.
+  // The message is the key check's own, wrapped the way every signing failure is.
+  it("fails at sign with the key message when the scope key is an RSA key, installing nothing signed", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    prefixWithOldFile(c);
+    payload(c, "bin/tiny", elfHeader(2, "new tiny"));
+    fakeMake(c);
+    const config = path.join(c.base, "rsa-config");
+    fs.cpSync(certDir, config, { recursive: true });
+    replaceScopeKey(config, scope, "rsa2048");
+    const before = snapshot(c.configPrefix);
+
+    const failed = expectFailedAt(await runInstallPhase(options(c, { configDir: config, release: true })), "sign");
+
+    expect(failed.message).toBe(
+      "signing failed on " +
+        path.join(c.prefix, "bin", "tiny") +
+        ": Cannot sign with scope '@t': its key is RSA (2048-bit); only ECDSA P-256 keys are supported. No file was changed."
+    );
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    expect(fs.existsSync(path.join(c.prefix, "bin", "tiny.sig"))).toBe(false);
     expect(fs.existsSync(path.join(c.configPrefix, ".the-seed-staging"))).toBe(false);
   });
 

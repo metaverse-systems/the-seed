@@ -3,7 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
-import Signing from "../src/Signing";
+import Signing, { UnsupportedSigningKey } from "../src/Signing";
 import * as x509 from "@peculiar/x509";
 import { buildSignatureContainer } from "../src/CmsBuilder";
 import { readSignedData } from "../src/CmsReader";
@@ -11,6 +11,7 @@ import { checkMachO } from "./helpers/MachOChecker";
 import { CfbPackage, loadReference, parsePackage, storedDigest } from "./helpers/CfbChecker";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
 import { makeUniversal } from "./helpers/Universal";
+import { ReplacementKey, replaceScopeKey } from "./helpers/IndependentCheck";
 
 /**
  * Create a temporary directory for test isolation.
@@ -1512,5 +1513,115 @@ describe("machoListSlices (real addon)", () => {
     expect(typeof addon.machoListSlices).toBe("function");
     expect(thrownName(() => addon.machoListSlices())).toBe("TypeError");
     expect(thrownName(() => addon.machoListSlices(42))).toBe("TypeError");
+  });
+});
+
+// ── Scope key checks ─────────────────────────────────────────
+
+// Choices where the contracts leave the shape open:
+//   - UnsupportedSigningKey is a named export of src/Signing (also exported from the package entry)
+//   - each case has its own scratch configuration so a replaced key never leaks into another case
+//   - the files' modification times are first set to a fixed past date, so "same modification time" means the file was not rewritten
+//   - the unreadable-file reason is not fixed: the message is checked for its fixed start and end around the reason
+//   - the detached file is a text file: signing it would write a .sig beside it
+describe("scope keys", () => {
+  const scope = "@test";
+  const PAST = new Date("2020-01-01T00:00:00Z");
+
+  function escaped(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  type KeyCase = { label: string; kind: ReplacementKey | "missing"; message: (keyPath: string) => string | RegExp };
+  const tail = "; only ECDSA P-256 keys are supported. No file was changed.";
+  const cases: KeyCase[] = [
+    { label: "RSA 2048", kind: "rsa2048", message: () => `Cannot sign with scope '${scope}': its key is RSA (2048-bit)${tail}` },
+    { label: "ECDSA P-384", kind: "p384", message: () => `Cannot sign with scope '${scope}': its key is ECDSA P-384${tail}` },
+    { label: "Ed25519", kind: "ed25519", message: () => `Cannot sign with scope '${scope}': its key is Ed25519${tail}` },
+    {
+      label: "a P-256 key that does not match the certificate",
+      kind: "p256-other",
+      message: () =>
+        `Cannot sign with scope '${scope}': its key (ECDSA P-256) does not match the scope's certificate; only an ECDSA P-256 key matching the certificate is supported. No file was changed.`,
+    },
+    {
+      label: "a missing key file",
+      kind: "missing",
+      message: (keyPath) =>
+        new RegExp("^" + escaped(`Cannot sign with scope '${scope}': its key file ${keyPath} cannot be read (`) + ".+" + escaped(")" + tail) + "$"),
+    },
+  ];
+
+  async function prepared(kind: ReplacementKey | "missing"): Promise<{ signing: Signing; keyPath: string; dir: string }> {
+    const { signing, configDir } = await setupSigning();
+    if (kind === "missing") {
+      fs.rmSync(signing.scopeKeyPath(scope));
+    } else {
+      replaceScopeKey(configDir, scope, kind);
+    }
+    return { signing, keyPath: signing.scopeKeyPath(scope), dir: createTempDir() };
+  }
+
+  function snapshotOf(files: string[]): Record<string, { digest: string; mtimeMs: number }> {
+    const out: Record<string, { digest: string; mtimeMs: number }> = {};
+    for (const file of files) {
+      out[file] = { digest: sha256File(file), mtimeMs: fs.statSync(file).mtimeMs };
+    }
+    return out;
+  }
+
+  function expectMessage(error: unknown, expected: string | RegExp): void {
+    expect(error).toBeInstanceOf(UnsupportedSigningKey);
+    expect((error as Error).name).toBe("UnsupportedSigningKey");
+    if (typeof expected === "string") {
+      expect((error as Error).message).toBe(expected);
+    } else {
+      expect((error as Error).message).toMatch(expected);
+    }
+  }
+
+  async function caught(call: () => Promise<unknown>): Promise<unknown> {
+    try {
+      await call();
+    } catch (err) {
+      return err;
+    }
+    throw new Error("expected the call to reject");
+  }
+
+  const files: Array<{ label: string; place: (dir: string) => string }> = [
+    { label: "a program", place: (dir) => copyFixture("tiny.exe", dir) },
+    { label: "an installer", place: (dir) => copyMsi("tiny.msi", dir) },
+    { label: "a Mac program", place: (dir) => copyGenuine("tiny-macho-arm64", dir) },
+    { label: "a detached-signed text file", place: (dir) => copyFixture("plain.txt", dir) },
+  ];
+
+  describe.each(cases)("$label", ({ kind, message }) => {
+    it.each(files)("signFile refuses $label and leaves it unchanged", async ({ place }) => {
+      const { signing, keyPath, dir } = await prepared(kind);
+      const file = place(dir);
+      fs.utimesSync(file, PAST, PAST);
+      const before = snapshotOf([file]);
+
+      expectMessage(await caught(() => signing.signFile(file, { scope })), message(keyPath));
+
+      expect(snapshotOf([file])).toEqual(before);
+      expect(fs.readdirSync(dir)).toEqual([path.basename(file)]);
+    });
+
+    it("signDirectory refuses a directory and leaves every file unchanged, with no manifest", async () => {
+      const { signing, keyPath, dir } = await prepared(kind);
+      const placed = files.map(({ place }) => place(dir));
+      for (const file of placed) {
+        fs.utimesSync(file, PAST, PAST);
+      }
+      const before = snapshotOf(placed);
+
+      expectMessage(await caught(() => signing.signDirectory(dir, { scope })), message(keyPath));
+
+      expect(snapshotOf(placed)).toEqual(before);
+      expect(fs.readdirSync(dir).sort()).toEqual(placed.map((file) => path.basename(file)).sort());
+      expect(fs.existsSync(path.join(dir, ".signatures.json"))).toBe(false);
+    });
   });
 });

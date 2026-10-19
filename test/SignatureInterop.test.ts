@@ -5,7 +5,7 @@ import crypto from "crypto";
 import Signing from "../src/Signing";
 import { OID, readSignedData } from "../src/CmsReader";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
-import { haveOpenssl, haveOsslsigncode, opensslVerifyDetached, osslsigncodeVerify } from "./helpers/IndependentCheck";
+import { edgeCaseScope, haveOpenssl, haveOsslsigncode, opensslVerifyDetached, osslsigncodeVerify } from "./helpers/IndependentCheck";
 import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
 
 // Choices where the contracts leave the shape open:
@@ -16,11 +16,21 @@ import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
 //   - the Mac cases run on both genuine samples (thin arm64 and universal), one scratch copy each, and assert every slice
 //   - the Mac tamper case changes the last byte of the first slice's code directory in the file, then re-reads the slices from the changed file for openssl
 //   - the installer read-back is taken straight from the addon's msiCheckSignature
+//   - edge-case certificates are written with openssl (edgeCaseScope) and imported into the scope @edge of the same configuration; the
+//     expected signer serial bytes are the certificate's serial as Node reports it, with one leading zero byte when its top bit is set
+//   - a signer serial is compared on the bytes of the container read back (Windows program and installer: the extracted container;
+//     Mac program: each slice's container)
+//   - the top-bit serial is 0x8a1b2c3d4e5f6071; the long-name certificate has six 60-character organisational units
+//   - each fresh certificate gets its own scratch configuration; a case collects every failure (with the certificate's serial) and
+//     asserts the list is empty, so a failure names the certificates and nothing is retried
+//   - the tool's verifier is asked only for integrity here (the scopes of the edge-case certificates are not in the configuration, so trust is not asserted)
+//   - tool-independent checks (signer serial bytes, the tool's own verification) run for every fresh certificate even without the external tools
 //   - the changed byte is the first byte of the first section's raw data, found by reading the section table here
 
 const created: string[] = [];
 let savedHome: string | undefined;
 let home: string;
+let configDir: string;
 let signing: Signing;
 let certPath: string;
 
@@ -49,7 +59,7 @@ beforeAll(async () => {
   savedHome = process.env.HOME;
   home = tempDir("interop-home-");
   process.env.HOME = home;
-  const configDir = tempDir("interop-config-");
+  configDir = tempDir("interop-config-");
   fs.writeFileSync(
     path.join(configDir, "config.json"),
     JSON.stringify({ prefix: path.join(configDir, "prefix"), scopes: { "@ti": { author: { name: "Test Interop", email: "ti@example.com", url: "" } } } }, null, 2)
@@ -237,5 +247,126 @@ describe("Mac program", () => {
         expect(opensslVerifyDetached(slice.cms as Buffer, slice.codeDirectory, certPath, tempDir("interop-openssl-")).passed).toBe(false);
       }
     }
+  });
+});
+
+/** The serial number bytes a signer record must carry for a certificate: Node's hex, with a zero byte first when the top bit is set. */
+function expectedSerial(certificatePem: Buffer): Buffer {
+  let hex = new crypto.X509Certificate(certificatePem).serialNumber;
+  if (hex.length % 2 === 1) {
+    hex = "0" + hex;
+  }
+  const bytes = Buffer.from(hex, "hex");
+  return (bytes[0] & 0x80) !== 0 ? Buffer.concat([Buffer.from([0]), bytes]) : bytes;
+}
+
+function signerSerial(container: Buffer): Buffer {
+  const sid = readSignedData(container).signers[0].sid;
+  if (!("serial" in sid)) {
+    throw new Error("signer identified by subject key identifier");
+  }
+  return sid.serial;
+}
+
+/**
+ * Signs a scratch copy of each form with `scope` of `signer`, whose certificate is in `certFile`, and returns what went wrong
+ * (empty when all passed): the signer serial bytes of every container, the tool's own verification, and, where the external
+ * tools exist, their verdicts.
+ */
+async function problemsFor(forms: Array<"program" | "installer" | "mac">, subject: Signing, scope: string, certFile: string): Promise<string[]> {
+  const problems: string[] = [];
+  const expected = expectedSerial(fs.readFileSync(certFile));
+  const serialText = expected.toString("hex");
+  for (const form of forms) {
+    const dir = tempDir("interop-fresh-");
+    if (form === "program") {
+      const file = path.join(dir, "tiny.exe");
+      fs.copyFileSync(fixture("tiny.exe"), file);
+      await subject.signFile(file, { scope });
+      if (!signerSerial(addon.peExtractSignature(file) as Buffer).equals(expected)) problems.push(`program ${serialText}: signer serial bytes differ`);
+      if ((await subject.verifyFile(file)).integrity.state !== "intact") problems.push(`program ${serialText}: the tool does not find the signature intact`);
+      if (haveOsslsigncode() && !osslsigncodeVerify(file, certFile, home).passed) problems.push(`program ${serialText}: osslsigncode fails`);
+    } else if (form === "installer") {
+      const file = path.join(dir, "tiny.msi");
+      fs.copyFileSync(fixture("genuine", "tiny.msi"), file);
+      await subject.signFile(file, { scope });
+      if (!signerSerial(addon.msiExtractSignature(file) as Buffer).equals(expected)) problems.push(`installer ${serialText}: signer serial bytes differ`);
+      if ((addon.msiCheckSignature(file) as { state: string }).state !== "matches") problems.push(`installer ${serialText}: fingerprint does not read back`);
+      if (haveOsslsigncode() && !osslsigncodeVerify(file, certFile, home).passed) problems.push(`installer ${serialText}: osslsigncode fails`);
+    } else {
+      const file = path.join(dir, "tiny-macho-universal");
+      fs.copyFileSync(fixture("genuine", "tiny-macho-universal"), file);
+      await subject.signFile(file, { scope });
+      const slices = sliceSignatureBlobs(fs.readFileSync(file));
+      if (slices.length !== 2) problems.push(`mac ${serialText}: ${slices.length} slices`);
+      for (const slice of slices) {
+        if (slice.cms === null || !signerSerial(slice.cms).equals(expected)) {
+          problems.push(`mac ${serialText}: signer serial bytes differ`);
+        } else if (haveOpenssl() && !opensslVerifyDetached(slice.cms, slice.codeDirectory, certFile, tempDir("interop-openssl-")).passed) {
+          problems.push(`mac ${serialText}: openssl fails`);
+        }
+      }
+      if (checkMachO(fs.readFileSync(file)).problems.length > 0) problems.push(`mac ${serialText}: the independent checker reports problems`);
+      if ((await subject.verifyFile(file)).integrity.state !== "intact") problems.push(`mac ${serialText}: the tool does not find the signature intact`);
+    }
+  }
+  return problems;
+}
+
+describe("edge-case certificates", () => {
+  async function importEdge(options: { serialHex: string; longNames?: boolean }, scope: string): Promise<string> {
+    const made = edgeCaseScope(tempDir("interop-edge-"), options);
+    await signing.importCert(made.certPath, made.keyPath, scope);
+    return signing.scopeCertPath(scope);
+  }
+
+  it("top-bit serial: each form passes its independent check and the signer record carries the certificate's serial", async () => {
+    if (!haveTool() || !haveOpensslTool()) return;
+    const certFile = await importEdge({ serialHex: "8a1b2c3d4e5f6071" }, "@edge");
+    expect(expectedSerial(fs.readFileSync(certFile)).toString("hex")).toBe("008a1b2c3d4e5f6071");
+    expect(await problemsFor(["program", "installer", "mac"], signing, "@edge", certFile)).toEqual([]);
+  });
+
+  it("20-byte serial (0x7f00112233445566778899aabbccddeeff001122) and long names: each form passes; the Mac signature fits", async () => {
+    if (!haveTool() || !haveOpensslTool()) return;
+    const certFile = await importEdge({ serialHex: "7f00112233445566778899aabbccddeeff001122", longNames: true }, "@edge20");
+    expect(expectedSerial(fs.readFileSync(certFile)).toString("hex")).toBe("7f00112233445566778899aabbccddeeff001122");
+    expect(await problemsFor(["program", "installer", "mac"], signing, "@edge20", certFile)).toEqual([]);
+  });
+});
+
+describe("fresh certificates", () => {
+  const COUNT = 20;
+
+  async function fresh(index: number): Promise<{ subject: Signing; certFile: string }> {
+    const dir = tempDir("interop-fresh-config-");
+    fs.writeFileSync(
+      path.join(dir, "config.json"),
+      JSON.stringify({ prefix: path.join(dir, "prefix"), scopes: { "@tf": { author: { name: "Fresh " + index, email: "fresh@example.com", url: "" } } } }, null, 2)
+    );
+    const subject = new Signing(dir);
+    await subject.createCert({ validityDays: 365, scope: "@tf" });
+    return { subject, certFile: subject.scopeCertPath("@tf") };
+  }
+
+  async function allPass(form: "program" | "installer" | "mac"): Promise<string[]> {
+    const failures: string[] = [];
+    for (let index = 0; index < COUNT; index++) {
+      const { subject, certFile } = await fresh(index);
+      failures.push(...(await problemsFor([form], subject, "@tf", certFile)));
+    }
+    return failures;
+  }
+
+  it("20 certificates from createCert: every Windows program signature passes osslsigncode", async () => {
+    expect(await allPass("program")).toEqual([]);
+  });
+
+  it("20 certificates from createCert: every installer signature passes osslsigncode", async () => {
+    expect(await allPass("installer")).toEqual([]);
+  });
+
+  it("20 certificates from createCert: every Mac slice passes openssl", async () => {
+    expect(await allPass("mac")).toEqual([]);
   });
 });

@@ -39,6 +39,14 @@ import {
   VerifyStatus,
 } from "./types";
 
+/** Raised when a scope's key cannot be used for signing; no file has been changed. */
+export class UnsupportedSigningKey extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsupportedSigningKey";
+  }
+}
+
 /** The reason given for a listed file that is not in the directory. */
 export const MISSING_FILE_REASON = "the file is missing";
 
@@ -408,14 +416,68 @@ class Signing {
   }
 
   /**
+   * The scope's private key, checked to be an ECDSA P-256 key matching the scope's certificate.
+   * @throws UnsupportedSigningKey, before anything has been changed
+   */
+  loadSigningKey(scope: string): crypto.KeyObject {
+    const keyPath = this.scopeKeyPath(scope);
+    const refuse = (what: string): never => {
+      throw new UnsupportedSigningKey(`Cannot sign with scope '${scope}': ${what} No file was changed.`);
+    };
+    let key: crypto.KeyObject;
+    try {
+      key = crypto.createPrivateKey(fs.readFileSync(keyPath, "utf-8"));
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return refuse(`its key file ${keyPath} cannot be read (${reason}); only ECDSA P-256 keys are supported.`);
+    }
+
+    const curveNames: Record<string, string> = { prime256v1: "P-256", secp384r1: "P-384", secp521r1: "P-521" };
+    const curve = key.asymmetricKeyDetails?.namedCurve;
+    if (key.asymmetricKeyType !== "ec" || curve !== "prime256v1") {
+      let kind: string;
+      switch (key.asymmetricKeyType) {
+        case "rsa":
+          kind = `RSA (${key.asymmetricKeyDetails?.modulusLength}-bit)`;
+          break;
+        case "ec":
+          kind = `ECDSA ${curveNames[curve ?? ""] ?? curve}`;
+          break;
+        case "ed25519":
+          kind = "Ed25519";
+          break;
+        case "ed448":
+          kind = "Ed448";
+          break;
+        case "dsa":
+          kind = "DSA";
+          break;
+        default:
+          kind = String(key.asymmetricKeyType) === "dh" ? "DH" : String(key.asymmetricKeyType);
+      }
+      return refuse(`its key is ${kind}; only ECDSA P-256 keys are supported.`);
+    }
+
+    const certificate = new crypto.X509Certificate(fs.readFileSync(this.scopeCertPath(scope)));
+    const spki = crypto.createPublicKey(key).export({ type: "spki", format: "der" });
+    const certSpki = certificate.publicKey.export({ type: "spki", format: "der" });
+    if (!Buffer.from(spki).equals(Buffer.from(certSpki))) {
+      return refuse(
+        "its key (ECDSA P-256) does not match the scope's certificate; only an ECDSA P-256 key matching the certificate is supported.",
+      );
+    }
+    return key;
+  }
+
+  /**
    * Sign a PE file by embedding an Authenticode signature.
    * Uses native addon for digest computation and embedding.
    * @throws if file is not a valid PE binary
    */
-  async signFileAuthenticode(filePath: string, scope: string): Promise<SignResult> {
+  async signFileAuthenticode(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
-    const keyPath = this.scopeKeyPath(scope);
+    const privateKey = key ?? this.loadSigningKey(scope);
     const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
@@ -448,8 +510,6 @@ class Signing {
 
     // Build the standard-form container over the file's Authenticode digest
     const certPem = fs.readFileSync(certPath, "utf-8");
-    const keyPem = fs.readFileSync(keyPath, "utf-8");
-    const privateKey = crypto.createPrivateKey(keyPem);
     const certDer = Buffer.from(new x509.X509Certificate(certPem).rawData);
     const pkcs7Der = buildSignatureContainer(
       { kind: "windows-program", fingerprint: Buffer.from(digestResult.digest) },
@@ -481,10 +541,10 @@ class Signing {
    * Handles single-arch and universal (fat) binaries.
    * @throws if file is not a valid Mach-O binary
    */
-  async signFileMachO(filePath: string, scope: string): Promise<SignResult> {
+  async signFileMachO(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
-    const keyPath = this.scopeKeyPath(scope);
+    const privateKey = key ?? this.loadSigningKey(scope);
     const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
@@ -498,9 +558,7 @@ class Signing {
     // Use cert CN as code signing identity
     const identity = certInfo.subject.commonName || "the-seed";
 
-    const keyPem = fs.readFileSync(keyPath, "utf-8");
     const certPem = fs.readFileSync(certPath, "utf-8");
-    const privateKey = crypto.createPrivateKey(keyPem);
 
     // Reserve room for the container of any slice, then let the library compute
     // the CodeDirectory of every slice for the file as it will be after signing
@@ -555,10 +613,10 @@ class Signing {
    * Uses native addon for digest computation and embedding.
    * @throws if file is not a valid MSI/CFBF
    */
-  async signFileMsi(filePath: string, scope: string): Promise<SignResult> {
+  async signFileMsi(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
-    const keyPath = this.scopeKeyPath(scope);
+    const privateKey = key ?? this.loadSigningKey(scope);
     const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
@@ -574,8 +632,6 @@ class Signing {
     const digestResult = addon.msiComputeDigest(resolvedPath);
 
     const certPem = fs.readFileSync(certPath, "utf-8");
-    const keyPem = fs.readFileSync(keyPath, "utf-8");
-    const privateKey = crypto.createPrivateKey(keyPem);
 
     // Build the standard-form container over the package's fingerprint
     const certDer = Buffer.from(new x509.X509Certificate(certPem).rawData);
@@ -638,7 +694,6 @@ class Signing {
     }
     const scope = options.scope;
     const certPath = this.scopeCertPath(scope);
-    const keyPath = this.scopeKeyPath(scope);
     const certInfo = this.getCertInfo(scope);
     if (!certInfo) {
       throw new Error(`No signing certificate found for scope '${scope}'. Run 'the-seed signing create-cert' first.`);
@@ -646,6 +701,7 @@ class Signing {
     if (certInfo.isExpired && !options?.force) {
       throw new Error("Signing certificate is expired. Use --force to sign anyway.");
     }
+    const privateKey = this.loadSigningKey(scope);
 
     const resolvedPath = path.resolve(filePath);
     if (!fs.existsSync(resolvedPath)) {
@@ -670,18 +726,16 @@ class Signing {
     if (strategy === "embedded") {
       const detection = this.detectBinaryFormat(resolvedPath);
       if (detection.format === "pe") {
-        return this.signFileAuthenticode(resolvedPath, scope);
+        return this.signFileAuthenticode(resolvedPath, scope, privateKey);
       } else if (detection.format === "macho") {
-        return this.signFileMachO(resolvedPath, scope);
+        return this.signFileMachO(resolvedPath, scope, privateKey);
       } else if (detection.format === "msi") {
-        return this.signFileMsi(resolvedPath, scope);
+        return this.signFileMsi(resolvedPath, scope, privateKey);
       }
     }
 
     // Detached signing (original behavior)
     const certPem = fs.readFileSync(certPath, "utf-8");
-    const keyPem = fs.readFileSync(keyPath, "utf-8");
-    const privateKey = crypto.createPrivateKey(keyPem);
 
     // Stream file through crypto.createSign
     const sign = crypto.createSign("SHA256");
@@ -729,6 +783,7 @@ class Signing {
     if (certInfo.isExpired && !options?.force) {
       throw new Error("Signing certificate is expired. Use --force to sign anyway.");
     }
+    this.loadSigningKey(scope);
 
     const resolvedDir = path.resolve(dirPath);
     if (!fs.existsSync(resolvedDir) || !fs.statSync(resolvedDir).isDirectory()) {
