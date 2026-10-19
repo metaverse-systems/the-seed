@@ -394,6 +394,52 @@ describe("package layout", () => {
     expect(result.signatures).toBe(1);
   }, 20000);
 
+  it("lists the libraries a program needs that are neither installed nor declared, and prints them", async () => {
+    if (!ccAvailable()) return;
+    writeProgramProject(helloDir(), undefined, GREET_SPEC);
+
+    const result = await packageRun([helloDir()]);
+
+    expect([result.success, result.message]).toEqual([true, null]);
+    expect(names(output)).toEqual(["hello"]);
+    expect(result.notPackaged).toEqual(expect.arrayContaining([{ name: "libgreet.so.0", neededBy: "hello" }]));
+    expect(result.notPackaged.some((library) => library.name === "libc.so.6")).toBe(true);
+    const lines = logged();
+    const heading = lines.indexOf("Not packaged (expected on the target system):");
+    expect(heading).toBeGreaterThanOrEqual(0);
+    expect(lines.slice(heading + 1)).toContain("  libgreet.so.0 (needed by hello)");
+  }, BOUND_TIMEOUT);
+
+  it("prints the not-packaged lines after the summary, sorted by name, and does not list a library declared by local path", async () => {
+    if (!ccAvailable()) return;
+    writeProgramProject(helloDir(), undefined, GREET_SPEC);
+
+    const missing = await packageRun([helloDir()]);
+
+    expect(missing.success).toBe(true);
+    const lines = logged();
+    const summary = lines.findIndex((line) => line.startsWith("Packaged "));
+    const heading = lines.indexOf("Not packaged (expected on the target system):");
+    expect(summary).toBeGreaterThanOrEqual(0);
+    expect(heading).toBeGreaterThan(summary);
+    const listed = lines.slice(heading + 1).filter((line) => /^ {2}\S+ \(needed by /.test(line));
+    expect(listed.length).toBe(missing.notPackaged.length);
+    expect(listed.map((line) => line.trim().split(" ")[0])).toEqual(missing.notPackaged.map((library) => library.name));
+    expect(missing.notPackaged.map((library) => library.name)).toEqual(missing.notPackaged.map((library) => library.name).sort());
+
+    fs.rmSync(output, { recursive: true, force: true });
+    logSpy.mockClear();
+    writeLibraryProject(greetDir(), "@t/greet", GREET_SPEC);
+    writeProgramProject(helloDir(), { "@t/greet": "file:../greet" }, GREET_SPEC);
+
+    const declared = await packageRun([helloDir()]);
+
+    expect([declared.success, declared.message]).toEqual([true, null]);
+    expect(names(output)).toEqual(["hello", "libgreet.so.0"]);
+    expect(declared.notPackaged.some((library) => library.name === "libgreet.so.0")).toBe(false);
+    expect(logged().some((line) => line.includes("libgreet.so.0 (needed by"))).toBe(false);
+  }, BOUND_TIMEOUT);
+
   // ── the same projects as the recursive build ─────────────────────────
 
   it("packages a diamond tree from its root with the shared component once, and the same projects the walker finds", async () => {

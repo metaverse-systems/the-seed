@@ -904,6 +904,77 @@ describe("test Package", () => {
     });
   });
 
+  describe("run - libraries not packaged", () => {
+    // The choice for the implementation: a name the addon returns that is not absolute is a library
+    // that was not found; it is listed under the packaged name of the first input, in the order of
+    // the packaged names, that needs it, and the lines are printed as "  <name> (needed by <input>)".
+    const setup = (): { binary: string; libFoo: string; outputDir: string } => {
+      const projectDir = createProjectDir(tempDir, "myapp", "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      const libFoo = installBuildOutput(projectDir, "libfoo.so", "libfoo-content");
+      return { binary, libFoo, outputDir: path.join(tempDir, "my-release") };
+    };
+
+    it("lists bare names that are not packaged names in name order with the first input that needs them", async () => {
+      const { binary, libFoo, outputDir } = setup();
+      mockedListDependencies
+        .mockReturnValueOnce({
+          dependencies: { [libFoo]: [binary], "libz.so.1": [binary, libFoo], "libc.so.6": [binary] },
+          errors: {}
+        })
+        .mockReturnValue({ dependencies: { "libz.so.1": [libFoo], "libm.so.6": [libFoo] }, errors: {} });
+
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = await pkg.run(outputDir, [path.dirname(path.dirname(path.dirname(binary)))]);
+      const lines = logSpy.mock.calls.map(call => call.map(String).join(" "));
+      logSpy.mockRestore();
+
+      expect(result.success).toBe(true);
+      expect(result.notPackaged).toEqual([
+        { name: "libc.so.6", neededBy: "myapp" },
+        { name: "libm.so.6", neededBy: "libfoo.so" },
+        { name: "libz.so.1", neededBy: "libfoo.so" }
+      ]);
+      const heading = lines.indexOf("Not packaged (expected on the target system):");
+      expect(heading).toBeGreaterThan(lines.findIndex(line => line.startsWith("Packaged ")));
+      expect(lines.slice(heading + 1)).toEqual([
+        "  libc.so.6 (needed by myapp)",
+        "  libm.so.6 (needed by libfoo.so)",
+        "  libz.so.1 (needed by libfoo.so)"
+      ]);
+    });
+
+    it("does not list a bare name equal to a packaged name", async () => {
+      const { binary, libFoo, outputDir } = setup();
+      mockedListDependencies
+        .mockReturnValueOnce({ dependencies: { [libFoo]: [binary], "libfoo.so": [binary], "myapp": [libFoo] }, errors: {} })
+        .mockReturnValue({ dependencies: {}, errors: {} });
+
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = await pkg.run(outputDir, [path.dirname(path.dirname(path.dirname(binary)))]);
+      const lines = logSpy.mock.calls.map(call => call.map(String).join(" "));
+      logSpy.mockRestore();
+
+      expect(result.success).toBe(true);
+      expect(result.notPackaged).toEqual([]);
+      expect(lines).not.toContain("Not packaged (expected on the target system):");
+    });
+
+    it("does not print the heading when the addon returns no bare names", async () => {
+      const { binary, libFoo, outputDir } = setup();
+      mockedListDependencies.mockReturnValue({ dependencies: { [libFoo]: [binary] }, errors: {} });
+
+      const logSpy = jest.spyOn(console, "log").mockImplementation();
+      const result = await pkg.run(outputDir, [path.dirname(path.dirname(path.dirname(binary)))]);
+      const lines = logSpy.mock.calls.map(call => call.map(String).join(" "));
+      logSpy.mockRestore();
+
+      expect(result.success).toBe(true);
+      expect(result.notPackaged).toEqual([]);
+      expect(lines.some(line => line.startsWith("Not packaged"))).toBe(false);
+    });
+  });
+
   describe("run - one output name from two projects", () => {
     it("refuses two program projects building different files named app before the addon is called", async () => {
       const dirs = ["one", "two"].map(name => {

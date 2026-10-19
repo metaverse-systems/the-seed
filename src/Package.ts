@@ -16,6 +16,7 @@ import {
   PackagePlan,
   PackageResult,
   PlannedFile,
+  UnpackagedLibrary,
 } from "./types";
 
 class Package {
@@ -291,6 +292,7 @@ class Package {
     const warnedLibraries = new Set<string>();
     const askedNames = new Map<string, string>();
     const planSources = new Set<string>(files.map((file) => file.source));
+    const missing = new Map<string, string>();
     let toAnalyze = binaryPaths;
 
     while (toAnalyze.length > 0) {
@@ -341,6 +343,32 @@ class Package {
         }
       }
 
+      // Names the search paths did not lead to: remember the first input, by packaged name, that needs each
+      const packagedNameOf = (input: string): string => {
+        const known = files.find((file) => file.source === input);
+        if (known !== undefined) {
+          return known.name;
+        }
+        try {
+          const real = fs.realpathSync(input);
+          return files.find((file) => file.source === real)?.name ?? path.basename(input);
+        } catch {
+          return path.basename(input);
+        }
+      };
+      for (const key of Object.keys(result.dependencies)) {
+        if (path.isAbsolute(key)) {
+          continue;
+        }
+        for (const input of result.dependencies[key]) {
+          const neededBy = packagedNameOf(input);
+          const first = missing.get(key);
+          if (first === undefined || neededBy < first) {
+            missing.set(key, neededBy);
+          }
+        }
+      }
+
       const nextBatch: string[] = [];
       for (const depPath of Object.keys(result.dependencies).sort()) {
         if (!path.isAbsolute(depPath) || !fs.existsSync(depPath)) {
@@ -373,7 +401,12 @@ class Package {
       toAnalyze = nextBatch;
     }
 
-    return { ok: true, projects: [...projectNames.keys()], files, notPackaged: [] };
+    const notPackaged: UnpackagedLibrary[] = [...missing.keys()]
+      .filter((name) => !planned.has(name))
+      .sort()
+      .map((name) => ({ name, neededBy: missing.get(name) as string }));
+
+    return { ok: true, projects: [...projectNames.keys()], files, notPackaged };
   };
 
   /**
@@ -483,6 +516,12 @@ class Package {
       summary += " (" + signatures + " signature" + (signatures > 1 ? "s" : "") + " included)";
     }
     console.log(summary);
+    if (plan.notPackaged.length > 0) {
+      console.log("Not packaged (expected on the target system):");
+      for (const library of plan.notPackaged) {
+        console.log("  " + library.name + " (needed by " + library.neededBy + ")");
+      }
+    }
 
     return {
       success: true,
