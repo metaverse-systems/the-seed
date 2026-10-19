@@ -1053,8 +1053,9 @@ class Signing {
   }
 
   /**
-   * Sign all binary files in a directory. Produces .sig files and .signatures.json manifest.
-   * Uses format-aware signing per file (v2 manifest with signatureType per entry).
+   * Sign all binary files in a directory. Produces .sig files and the .signatures.json manifest.
+   * Uses format-aware signing per file (v2 manifest with signatureType per entry) and records the files judged
+   * not binary and left unsigned in the manifest's `skipped` list, so that verification can account for them.
    * @param scope - The scope whose certificate to use for signing
    * @throws if no certificate or certificate expired (and force=false)
    */
@@ -1428,7 +1429,8 @@ class Signing {
   }
 
   /**
-   * Verify a detached .sig file (original behavior).
+   * Verify a detached .sig file: the signature over the whole file (integrity) and its certificate against the
+   * trusted certificates (trust).
    */
   async _verifyFileDetached(resolvedPath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const trust = options?.trust ?? this.loadTrust();
@@ -1473,7 +1475,8 @@ class Signing {
   }
 
   /**
-   * Verify an embedded Authenticode signature in a PE file.
+   * Verify an embedded Authenticode signature in a PE file: the fingerprint and the signature with the signer's key
+   * (integrity), and the signer against the trusted certificates (trust).
    */
   async verifyFileAuthenticode(filePath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const resolvedPath = path.resolve(filePath);
@@ -1527,7 +1530,8 @@ class Signing {
   }
 
   /**
-   * Verify an embedded Authenticode signature in an MSI file.
+   * Verify an embedded Authenticode signature in an MSI file: the fingerprint against the package and the signature
+   * with the signer's key (integrity), and the signer against the trusted certificates (trust).
    */
   async verifyFileMsi(filePath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const resolvedPath = path.resolve(filePath);

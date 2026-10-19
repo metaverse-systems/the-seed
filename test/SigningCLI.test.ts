@@ -2,6 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import Signing from "../src/Signing";
+import { runCli } from "../src/scripts/Cli";
 import { expectPresent } from "./helpers/Assert";
 import { runVerify } from "./helpers/Command";
 import { makeUniversal } from "./helpers/Universal";
@@ -628,5 +629,55 @@ describe("signing verify <file>", () => {
     const run = await runVerify([odd], A.configDir, home);
     expect(run.status).toBe(0);
     expect(run.out.split("\n")[1]).toBe("  File:        " + odd);
+  });
+});
+
+// The help text, run through runCli with a scratch configuration directory and a scratch HOME.
+// Choices where the contract leaves the form open:
+//   - the paragraph is printed with the line breaks of the contract's example, after the command list;
+//     the test compares it with whitespace collapsed, so only the words and their order are fixed
+//   - the usage line in the "Commands:" list shows "the-seed signing verify [--cert <file>]... <path>"
+describe("signing help", () => {
+  async function runHelp(): Promise<string> {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-help-config-"));
+    const helpHome = fs.mkdtempSync(path.join(os.tmpdir(), "cli-help-home-"));
+    const savedHome = process.env.HOME;
+    const out: string[] = [];
+    const logSpy = jest.spyOn(console, "log").mockImplementation((...parts: unknown[]) => {
+      out.push(parts.map(String).join(" "));
+    });
+    process.env.HOME = helpHome;
+    try {
+      await runCli(["node", "the-seed", "signing", "help"], configDir, "the-seed");
+    } finally {
+      logSpy.mockRestore();
+      if (savedHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = savedHome;
+      }
+      fs.rmSync(configDir, { recursive: true, force: true });
+      fs.rmSync(helpHome, { recursive: true, force: true });
+    }
+    return out.join("\n");
+  }
+
+  it("describes verify", async () => {
+    const text = await runHelp();
+    const lines = text.split("\n");
+
+    const verifyLine = lines.find((line) => /^ {2}verify {8}/.test(line));
+    expect(verifyLine).toBe("  verify        Verify file signature(s): integrity and trust (--cert <file> to trust a given certificate)");
+    expect(lines.some((line) => line.includes("the-seed signing verify") && line.includes("[--cert <file>]..."))).toBe(true);
+
+    const collapsed = text.replace(/\s+/g, " ");
+    const paragraph =
+      "verify checks that a file is unchanged since it was signed and that its signer " +
+      "is one of the certificates of your configured scopes (or of the files named with " +
+      "--cert). Exit status: 0 valid; 4 intact but not trusted; 1 invalid, not fully " +
+      "signed, not checked or no signature; 2 not found or other error; 3 usage or " +
+      "malformed manifest. Certificate chains, revocation, signing time and acceptance " +
+      "by the platform's own verifier are not checked.";
+    expect(collapsed).toContain(paragraph);
   });
 });

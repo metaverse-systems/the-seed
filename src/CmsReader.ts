@@ -1,3 +1,8 @@
+/**
+ * Reads the CMS SignedData of a signature: the signer certificate and the signer's signature over its signed
+ * attributes and content digest. This is the integrity half of trust decisions; whether the signer is trusted is
+ * decided in Trust.ts. Unreadable input throws CmsDamaged, a form not handled throws CmsUnsupported.
+ */
 import crypto from "crypto";
 import * as x509 from "@peculiar/x509";
 

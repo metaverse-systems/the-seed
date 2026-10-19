@@ -142,6 +142,7 @@ export interface CertInfo {
 /** Which kind of signature a verification looked at. */
 export type SignatureForm = "detached" | "windows-program" | "installer" | "mac-program";
 
+/** Integrity: whether the file is unchanged since it was signed. Says nothing about who signed it. */
 export type IntegrityState = "intact" | "invalid" | "not-checked" | "none";
 
 export interface IntegrityResult {
@@ -161,6 +162,7 @@ export interface TrustedCertificates {
   warnings: string[];
 }
 
+/** Trust: whether the signer is one of the trusted certificates (compared by fingerprint). */
 export type TrustState = "trusted" | "untrusted" | "not-applicable";
 export type UntrustedReason = "unknown-signer" | "no-signer" | "no-trusted-certificates";
 
@@ -201,8 +203,10 @@ export interface DirectorySignResult {
   skipped: string[];      // list of skipped (non-binary) files
 }
 
+/** Outcome of a verification: VALID needs both an intact file and a trusted signer; UNTRUSTED is intact with an untrusted signer. */
 export type VerifyStatus = "VALID" | "UNTRUSTED" | "INVALID" | "NOT_FULLY_SIGNED" | "NOT_CHECKED" | "NOT_FOUND";
 
+/** The result of verifying one file: its integrity, its trust, and the status derived from the two. */
 export interface VerifyResult {
   filePath: string;
   status: VerifyStatus;

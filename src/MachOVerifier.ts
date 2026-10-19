@@ -1,3 +1,8 @@
+/**
+ * Verifies the embedded code signature of each slice of a Mac program: every page fingerprint, the special slots
+ * and the signature over the code directory (integrity). The signer is returned for the trust decision made in
+ * Trust.ts; certificate chains, revocation and acceptance by Apple's tools are not checked.
+ */
 import crypto from "crypto";
 import { CmsDamaged, CmsUnsupported, OID, findSignerCertificate, readSignedData, verifySignerSignature } from "./CmsReader";
 import { certificateFingerprint } from "./Trust";

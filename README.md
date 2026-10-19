@@ -481,7 +481,7 @@ Sign and verify project files and directories using ECDSA P-256 certificates.
 | `help` | | Show signing subcommands (default) |
 | `create-cert` | | Create a signing certificate for a scope |
 | `sign` | `<file-or-dir>` | Sign a file or directory |
-| `verify` | `<file-or-dir>` | Verify a signed file or directory |
+| `verify` | `[--cert <file>]... <file-or-dir>` | Check integrity and trust of a signed file or directory |
 | `cert-info` | | Display certificate information for a scope |
 
 **Embedded signatures** are automatically applied when signing PE (`.exe`, `.dll`) and Mach-O binaries and Windows installers (`.msi`). The signature is stored inside the binary itself — no separate `.sig` file is created. For all other file types, a detached `.sig` file is produced.
@@ -492,17 +492,19 @@ Sign and verify project files and directories using ECDSA P-256 certificates.
 * Big-endian or 32-bit programs, or a universal file with such a slice: `<path>: <kind> Mac programs are not supported (supported: 64-bit little-endian arm64 and x86-64, alone or in a universal file)`.
 * Data after the existing signature: the file is refused.
 
+`verify` recomputes every page fingerprint of every slice and the special slots, checks the signature over the code directory, reports each slice, and reports partly signed or unsupported programs as not valid.
+
 What was checked: page fingerprints in a signature produced by this library match the finished file (an independent checker and values recorded from Python's hashlib); the checker accepts the ad-hoc signature written by ld64.lld, a different producer; the structure of signed files parses with llvm-otool, llvm-objdump and llvm-lipo.
 
 Nobody has checked a signature produced by this library with the platform's own verifier (`codesign --verify`) or by running a signed program on a Mac. What was checked is described above. The CMS part of the signature is the minimal one the-seed has always produced and is not known to be accepted by Apple's tools. Programs signed by earlier versions of the-seed are malformed after re-signing and may need to be rebuilt from their unsigned originals: rebuild from the unsigned original, then sign again.
 
 Version 1.10.0 also fixes `_buildMachOCms`, which wrote the signature OCTET STRING length as a single byte; it now uses the DER length encoding, so signatures of 128 bytes or more are no longer malformed. The addon exports `machoComputeCodeDirectory` and `machoEmbedSignature` were removed (they always throw); see `structure.md` for the new exports.
 
-**Windows installers.** `sign` embeds the signature of a `.msi` package into its `\x05DigitalSignature` stream. The package fingerprint is computed by libthe-seed by the rule osslsigncode uses, the signature is written, and the command then reads it back from the finished file: success is reported only when the stored fingerprint equals the package's. A signature whose fingerprint does not belong to the package is refused and the file is left as it was. Signing an already signed installer replaces its signature (the warning "Replaced existing embedded signature" is shown); a stale extended signature stream is dropped. `verify` reports no signature as `NOT_FOUND`, a signature whose fingerprint differs from the package as `INVALID` ("signature present but does not match the package contents"), a signature that cannot be read as `INVALID` ("signature present but could not be read (<detail>)"), and otherwise checks the signature with the certificate it carries.
+**Windows installers.** `sign` embeds the signature of a `.msi` package into its `\x05DigitalSignature` stream. The package fingerprint is computed by libthe-seed by the rule osslsigncode uses, the signature is written, and the command then reads it back from the finished file: success is reported only when the stored fingerprint equals the package's. A signature whose fingerprint does not belong to the package is refused and the file is left as it was. Signing an already signed installer replaces its signature (the warning "Replaced existing embedded signature" is shown); a stale extended signature stream is dropped. `verify` reports no signature as `NOT_FOUND`, a signature whose fingerprint differs from the package as `INVALID` ("signature present but does not match the package contents"), a signature that cannot be read as `INVALID` ("signature present but could not be read (<detail>)"), and otherwise checks the signature and compares its signer with your trusted certificates (see Verification). An extended signature stream is "present, not checked".
 
-What is not checked: whether the certificate is trusted, and the cryptographic check of the-seed's own signature container by standard verifiers. That container has no signed attributes: the ECDSA signature is made over the package fingerprint bytes, not over the DER of signed attributes, so osslsigncode reports a failure for the certificate and signature of a package signed by the-seed even when the fingerprint and structure are right. This is a known limitation; the-seed makes no claim about how Windows or standard verifiers treat its own installer signatures.
+What is not checked: certificate chains and revocation, and the cryptographic check of the-seed's own signature container by standard verifiers. That container has no signed attributes: the ECDSA signature is made over the package fingerprint bytes, not over the DER of signed attributes, so osslsigncode reports a failure for the certificate and signature of a package signed by the-seed even when the fingerprint and structure are right. This is a known limitation; the-seed makes no claim about how Windows or standard verifiers treat its own installer signatures.
 
-What was and was not verified: the fingerprint and the package structure written by libthe-seed were compared with osslsigncode 2.14, with an independent reader written for the tests, and (for stream lookup by name) with Wine 10's structured-storage implementation. They were not checked with Microsoft's signtool, WinVerifyTrust, the Windows Installer service or Microsoft's own storage code, because no Windows machine is part of the test setup. Certificate trust is not checked. Installers signed by earlier versions of the-seed may be damaged; re-sign them from the unsigned original when you have it. (Re-signing the signed file in place repairs the signature itself but cannot restore other damage an earlier version may have caused.)
+What was and was not verified: the fingerprint and the package structure written by libthe-seed were compared with osslsigncode 2.14, with an independent reader written for the tests, and (for stream lookup by name) with Wine 10's structured-storage implementation. They were not checked with Microsoft's signtool, WinVerifyTrust, the Windows Installer service or Microsoft's own storage code, because no Windows machine is part of the test setup. Installers signed by earlier versions of the-seed may be damaged; re-sign them from the unsigned original when you have it. (Re-signing the signed file in place repairs the signature itself but cannot restore other damage an earlier version may have caused.)
 
 Use `--detached` to force detached signatures even for PE and Mach-O files:
 
@@ -519,31 +521,68 @@ the-seed signing sign config.json
 
 **Builds sign automatically.** `the-seed build` signs the programs and libraries it installs with the project's scope certificate; see [What is installed, stripped and signed](#what-is-installed-stripped-and-signed). `verify` works on installed files and on any of a library's link names.
 
-**Verification** auto-detects the signature type. Embedded signatures are checked first; if none is found, the verifier falls back to looking for a detached `.sig` file.
+**Verification** checks two things about a file: integrity (the file is unchanged since it was signed) and trust (the signer is one of your trusted certificates).
+
+**Changed:** Files signed by a certificate that is not one of your scopes' certificates were reported as VALID; they are now reported as intact but not trusted, with exit status 4. Name the signer's exported certificate with `--cert` to trust it.
 
 ```bash
-the-seed signing verify myapp.exe    # checks embedded Authenticode signature
-the-seed signing verify config.json  # checks detached .sig file
+the-seed signing verify myapp.exe                       # embedded signature
+the-seed signing verify config.json                     # detached .sig file
+the-seed signing verify --cert alice.pem myapp.exe      # trust the certificate in alice.pem
 ```
 
-**Directory signing** produces a `signing-manifest.json` (v2 format) with per-file `signatureType` entries:
+What is checked, by form:
+
+* **Detached** (`<file>.sig`): the ECDSA signature over the file with the certificate stored in the `.sig` file.
+* **Windows program**: the fingerprint in the embedded Authenticode signature against the file, and the signature with the signer's key.
+* **Installer** (`.msi`): the fingerprint in the `\x05DigitalSignature` stream against the package, and the signature with the signer's key.
+* **Mac program**: every page fingerprint of every slice and the special slots, and the signature over the code directory, with a line for each slice.
+
+When a file has both an embedded and a detached signature, both are checked and the worse result is the headline.
+
+**Trusted certificates.** By default the trusted certificates are the certificates of your configured scopes. `--cert <file>` (PEM with one or more certificates, or DER; may be repeated) replaces them with the certificates in the named files. A signer is trusted when its SHA-256 fingerprint equals that of a trusted certificate. Without any trusted certificate nothing is trusted, and the report says to create one with `the-seed signing create-cert` or to name one with `--cert`.
+
+| Status | Meaning | Exit status |
+|--------|---------|-------------|
+| `VALID` | intact and signed by a trusted certificate | 0 |
+| `UNTRUSTED` | intact, but the signer is not trusted (or there is no signer) | 4 |
+| `INVALID` | the file or signature does not check out | 1 |
+| `NOT_FULLY_SIGNED` | some slices of a Mac program are unsigned | 1 |
+| `NOT_CHECKED` | a signature is present but this version cannot check it | 1 |
+| `NOT_FOUND` | no signature | 1 |
+
+Exit status 2 means the path or a `--cert` file was not found or another error occurred; 3 means a usage error, a malformed manifest, or a `.sig` file or `.signatures.json` given instead of the file or directory.
+
+**Expiry.** A signer certificate that is expired (or not yet valid) produces a warning, not a failure: the signing time is not established because timestamps are not checked.
+
+**Not checked.** Every report ends with `Not checked: certificate chains, revocation, signing time, acceptance by the platform's own verifier`, followed by anything file-specific.
+
+**Signatures made by other tools.** The standard signed-attribute form of a CMS signature is read. A form this version cannot read is reported as `NOT_CHECKED` with the reason, never as valid.
+
+**Directory signing** produces a `.signatures.json` manifest (version 2 format) with one entry per signed binary:
 
 ```bash
 the-seed signing sign ./dist
 the-seed signing verify ./dist
 ```
 
-Manifest v2 example:
+Manifest version 2 example:
 
 ```json
 {
   "version": 2,
-  "entries": [
-    { "file": "myapp.exe", "signatureType": "embedded", "signatureFile": null, "signature": "SHA256:..." },
-    { "file": "readme.txt", "signatureType": "detached", "signatureFile": "readme.txt.sig", "signature": "SHA256:..." }
-  ]
+  "signedAt": "2026-10-18T12:00:00.000Z",
+  "certificate": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+  "certificateFingerprint": "SHA256:...",
+  "files": [
+    { "path": "myapp.exe", "signatureFile": null, "algorithm": "SHA256", "signature": "...", "signatureType": "embedded" },
+    { "path": "lib/libx.so", "signatureFile": "lib/libx.so.sig", "algorithm": "SHA256", "signature": "...", "signatureType": "detached" }
+  ],
+  "skipped": ["README.txt"]
 }
 ```
+
+`skipped` lists files that were judged not to be binaries and left unsigned. Directory verification checks that the manifest's certificate is trusted and matches the fingerprint the manifest records, that each file's signer equals it, the recorded fingerprint for embedded entries, that every listed file is present and valid, that files not in the manifest fail (links inside the directory that point to listed files are reported, not failed; skipped files are reported as present but not signed, with contents not checked), and that the result is the worst of these. Manifests written by earlier versions (version 1) still verify and are reported as the earlier format.
 
 ### installer
 
@@ -688,10 +727,12 @@ constructor(configDir?: string)
 | `signFileAuthenticode(filePath: string, scope: string)` | `Promise<SignResult>` | Embed an Authenticode signature in a PE binary |
 | `signFileMachO(filePath: string, scope: string)` | `Promise<SignResult>` | Embed a code signature in a Mach-O binary (prepare, sign each CodeDirectory, complete; see "Mac programs" above for what is and is not verified) |
 | `signDirectory(dirPath: string, options?: SignOptions)` | `Promise<DirectorySignResult>` | Sign all files and produce a v2 manifest |
-| `verifyFile(filePath: string)` | `Promise<VerifyResult>` | Verify a file (checks embedded first, then detached) |
-| `verifyFileAuthenticode(filePath: string)` | `Promise<VerifyResult>` | Verify an embedded Authenticode signature |
-| `verifyFileMachO(filePath: string)` | `Promise<VerifyResult>` | Verify an embedded Mach-O code signature |
-| `verifyDirectory(dirPath: string)` | `Promise<DirectoryVerifyResult>` | Verify a directory against its signing manifest |
+| `loadTrust(certificatePaths?: string[])` | `TrustedCertificates` | The certificates signatures are trusted against: the configured scopes' certificates, or those in the given files |
+| `verifyFile(filePath: string, options?: VerifyOptions)` | `Promise<VerifyResult>` | Verify a file: integrity and trust of the embedded and detached signatures |
+| `verifyFileAuthenticode(filePath: string, options?: VerifyOptions)` | `Promise<VerifyResult>` | Verify an embedded Authenticode signature |
+| `verifyFileMachO(filePath: string, options?: VerifyOptions)` | `Promise<VerifyResult>` | Verify an embedded Mach-O code signature |
+| `verifyFileMsi(filePath: string, options?: VerifyOptions)` | `Promise<VerifyResult>` | Verify an embedded installer signature |
+| `verifyDirectory(dirPath: string, options?: VerifyOptions)` | `Promise<DirectoryVerifyResult>` | Verify a directory against its signing manifest: integrity, trust and unlisted files |
 
 ### Types
 
@@ -780,13 +821,50 @@ interface SignResult {
   warnings: string[];
 }
 
+type VerifyStatus = "VALID" | "UNTRUSTED" | "INVALID" | "NOT_FULLY_SIGNED" | "NOT_CHECKED" | "NOT_FOUND";
+
+interface IntegrityResult {
+  state: "intact" | "invalid" | "not-checked" | "none";
+  reason?: string;
+  checked: string[];
+}
+
+interface TrustResult {
+  state: "trusted" | "untrusted" | "not-applicable";
+  anchor?: TrustAnchor;   // set when trusted
+  message?: string;       // set when untrusted
+}
+
+interface VerifyOptions {
+  trust?: TrustedCertificates;   // from loadTrust(); default: the configured scopes' certificates
+}
+
 interface VerifyResult {
-  valid: boolean;
   filePath: string;
-  error?: string;
-  fingerprint?: string;
+  status: VerifyStatus;
+  reason?: string;
+  form?: "detached" | "windows-program" | "installer" | "mac-program";
   signatureType?: SignatureType;
-  warnings?: string[];
+  integrity: IntegrityResult;
+  trust: TrustResult;
+  signer?: CertInfo;
+  slices?: MachOSliceResult[];   // Mac programs
+  signatures?: VerifyResult[];   // both kinds present: [embedded, detached]
+  warnings: string[];
+  notChecked: string[];
+}
+
+interface DirectoryVerifyResult {
+  directory: string;
+  manifest: { path: string; version: 1 | 2; earlierFormat: boolean; signedAt: string; certificate: CertInfo; recordedFingerprint: string; fingerprintConsistent: boolean; trust: TrustResult };
+  results: DirectoryFileResult[];   // a VerifyResult per manifest entry plus relativePath and signerMatchesManifest
+  unlisted: Array<{ relativePath: string; kind: "file" | "link" | "other"; reason: string }>;
+  skipped: Array<{ relativePath: string; present: boolean }>;
+  links: Array<{ relativePath: string; target: string }>;
+  counts: { valid: number; untrusted: number; invalid: number; notFullySigned: number; notChecked: number; missing: number; unlisted: number; skipped: number };
+  status: VerifyStatus;
+  warnings: string[];
+  notChecked: string[];
 }
 ```
 
@@ -813,7 +891,10 @@ import {
   FormatDetectionResult,
   SignOptions,
   SignResult,
-  VerifyResult
+  VerifyResult,
+  VerifyStatus,
+  VerifyOptions,
+  DirectoryVerifyResult
 } from "@metaverse-systems/the-seed";
 
 // Initialize configuration
@@ -834,7 +915,7 @@ console.log(result.signatureType); // "embedded"
 
 // Verify a signed file
 const verify = await signing.verifyFile("./dist/myapp.exe");
-console.log(verify.valid, verify.signatureType); // true "embedded"
+console.log(verify.status, verify.integrity.state, verify.trust.state); // "VALID" "intact" "trusted"
 ```
 
 ## Running the checks

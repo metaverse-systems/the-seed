@@ -1,3 +1,8 @@
+/**
+ * Trust decisions for signatures: the certificates a signer is compared with (by SHA-256 fingerprint), the status
+ * derived from a file's integrity and trust, and the exit status of the verify command. Integrity itself is
+ * checked elsewhere; certificate chains and revocation are not considered.
+ */
 import crypto from "crypto";
 import fs from "fs";
 import { IntegrityResult, TrustedCertificates, TrustResult, VerifyStatus } from "./types";

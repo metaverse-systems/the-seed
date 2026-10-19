@@ -577,7 +577,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
       console.log("  create-cert   Generate a self-signed ECDSA P-256 certificate");
       console.log("  import-cert   Import an existing PEM certificate and private key");
       console.log("  sign          Sign one or more binary files");
-      console.log("  verify        Verify file signature(s)");
+      console.log("  verify        Verify file signature(s): integrity and trust (--cert <file> to trust a given certificate)");
       console.log("  cert-info     Display current certificate details");
       console.log("  export-cert   Export public certificate to a file");
       console.log("\nCommands:");
@@ -585,9 +585,16 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
       console.log("  the-seed signing create-cert   Generate a new signing certificate");
       console.log("  the-seed signing import-cert   Import an existing certificate");
       console.log("  the-seed signing sign          Sign file(s) or directory");
-      console.log("  the-seed signing verify        Verify file or directory signatures");
+      console.log("  the-seed signing verify [--cert <file>]... <file-or-directory>");
+      console.log("                                 Verify file or directory signatures");
       console.log("  the-seed signing cert-info     Show certificate information");
       console.log("  the-seed signing export-cert   Export public certificate");
+      console.log("\nverify checks that a file is unchanged since it was signed and that its signer");
+      console.log("is one of the certificates of your configured scopes (or of the files named with");
+      console.log("--cert). Exit status: 0 valid; 4 intact but not trusted; 1 invalid, not fully");
+      console.log("signed, not checked or no signature; 2 not found or other error; 3 usage or");
+      console.log("malformed manifest. Certificate chains, revocation, signing time and acceptance");
+      console.log("by the platform's own verifier are not checked.");
       break;
   }
 };
