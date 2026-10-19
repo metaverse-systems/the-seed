@@ -316,11 +316,13 @@ describe("a Windows program signed by osslsigncode with an ECDSA certificate", (
     }
   }
 
-  function makeCertificate(dir: string, name: string): { cert: string; key: string } {
+  /** An ECDSA certificate and key made by openssl; `plain` leaves out the extensions, which makes the certificate shorter. */
+  function makeCertificate(dir: string, name: string, plain = false): { cert: string; key: string } {
     const key = path.join(dir, name + "-key.pem");
     const cert = path.join(dir, name + "-cert.pem");
     run(dir, "openssl", ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key]);
-    run(dir, "openssl", ["req", "-new", "-x509", "-key", key, "-subj", "/CN=" + name, "-days", "30", "-out", cert, "-addext", "keyUsage=digitalSignature", "-addext", "extendedKeyUsage=codeSigning"]);
+    const extensions = plain ? [] : ["-addext", "keyUsage=digitalSignature", "-addext", "extendedKeyUsage=codeSigning"];
+    run(dir, "openssl", ["req", "-new", "-x509", "-key", key, "-subj", "/CN=" + name, "-days", "30", "-out", cert, ...extensions]);
     return { cert, key };
   }
 
@@ -366,22 +368,12 @@ describe("a Windows program signed by osslsigncode with an ECDSA certificate", (
     const out = path.join(dir, "signed.exe");
 
     // The certificate list is a DER SET OF, so osslsigncode orders it by encoding whatever order the
-    // certificates are given in, and a shorter certificate sorts first: give the extra one a short name.
-    let extraDer: Buffer | null = null;
-    for (let attempt = 0; attempt < 16 && extraDer === null; attempt++) {
-      const extra = makeCertificate(dir, "x" + attempt);
-      const chain = path.join(dir, "chain-" + attempt + ".pem");
-      fs.writeFileSync(chain, fs.readFileSync(extra.cert, "utf-8") + fs.readFileSync(signer.cert, "utf-8"));
-      fs.rmSync(out, { force: true });
-      signWith(dir, chain, signer.key, out);
-      const candidate = Buffer.from(new crypto.X509Certificate(fs.readFileSync(extra.cert)).raw);
-      const listed = readSignedData(addon.peExtractSignature(out) as Buffer).certificates;
-      if (listed.length === 2 && listed[0].equals(candidate)) {
-        extraDer = candidate;
-      }
-    }
-    expect(extraDer).not.toBeNull();
-    const extra = extraDer as Buffer;
+    // certificates are given in, and a shorter certificate sorts first: the extra one has a short name and no extensions.
+    const extraCert = makeCertificate(dir, "x", true);
+    const chain = path.join(dir, "chain.pem");
+    fs.writeFileSync(chain, fs.readFileSync(extraCert.cert, "utf-8") + fs.readFileSync(signer.cert, "utf-8"));
+    signWith(dir, chain, signer.key, out);
+    const extra = Buffer.from(new crypto.X509Certificate(fs.readFileSync(extraCert.cert)).raw);
     const info = readSignedData(addon.peExtractSignature(out) as Buffer);
     // The container lists the extra certificate first, which is what makes "first certificate" wrong
     expect(info.certificates).toHaveLength(2);

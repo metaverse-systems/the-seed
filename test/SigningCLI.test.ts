@@ -427,6 +427,23 @@ describe("signing verify <file>", () => {
       expect(run.out).toMatch(/^ {2}Slice x86_64: +unsigned$/m);
     });
 
+    it("exits 1 for an installer whose signature is not checked, printing the headline and the reason", async () => {
+      const run = await runVerify([copyTo("tiny-osslsig-dse.msi")], A.configDir, home);
+      expect(run.status).toBe(1);
+      expect(run.out).toContain("Verification: SIGNATURE NOT CHECKED ✗");
+      expect(run.out).toMatch(/^ {2}Integrity: {3}not checked: .*extended signature stream/m);
+      expect(run.out).toContain("  Trust:       not applicable");
+    });
+
+    it("exits 4 for an ad-hoc signed program, printing that the signature has no signer", async () => {
+      const run = await runVerify([copyTo("tiny-macho-arm64-adhoc")], A.configDir, home);
+      expect(run.status).toBe(4);
+      expect(run.out).toContain("Verification: INTACT, NOT TRUSTED ✗");
+      expect(run.out).toContain("  Trust:       not trusted: the signature has no signer (ad-hoc)");
+      expect(run.out).toMatch(/^ {2}Slice arm64: +ad-hoc \(no signer\)$/m);
+      expect(run.out).not.toContain("Signer:");
+    });
+
     it("exits 1 for a file with no signature", async () => {
       const run = await runVerify([copyTo("tiny-macho-arm64")], A.configDir, home);
       expect(run.status).toBe(1);

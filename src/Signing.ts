@@ -10,6 +10,7 @@ import * as x509 from "@peculiar/x509";
 import Config from "./Config";
 import { NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates, worst } from "./Trust";
 import { MachOSliceInfo, checkMachO } from "./MachOVerifier";
+import { CmsDamaged, CmsUnsupported, OID, findSignerCertificate, readSignedData, readSpcDigest, verifySignerSignature } from "./CmsReader";
 import {
   CertInfo,
   CertOptions,
@@ -1489,28 +1490,8 @@ class Signing {
         return this._buildNotFoundResult(resolvedPath, "No embedded Authenticode signature found", trust);
       }
 
-      // Parse CMS to extract certificate and signature
-      const cmsInfo = this._parseCmsSignedData(pkcs7Der);
-      if (!cmsInfo) {
-        return failed("Embedded Authenticode signature has invalid CMS structure");
-      }
-
-      // Recompute the Authenticode digest
       const digestResult = addon.peComputeDigest(resolvedPath);
-
-      // Verify the ECDSA signature over the digest
-      const x509Cert = new crypto.X509Certificate(cmsInfo.certPem);
-      const publicKey = x509Cert.publicKey;
-
-      const verify = crypto.createVerify("SHA256");
-      verify.update(digestResult.digest);
-      const isValid = verify.verify(publicKey, cmsInfo.signature);
-
-      const checked = ["signature over the program's fingerprint"];
-      const integrity: IntegrityResult = isValid
-        ? { state: "intact", checked }
-        : { state: "invalid", reason: "Embedded signature invalid: digest mismatch — file may have been modified after signing", checked };
-      return this._buildVerifyResult(resolvedPath, "windows-program", "embedded", integrity, x509Cert.raw, trust);
+      return this._verifyAuthenticodeSignature(resolvedPath, "windows-program", pkcs7Der, digestResult.digest, trust, false);
     } catch (err) {
       return failed(`Failed to verify Authenticode signature: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -1562,9 +1543,6 @@ class Signing {
       if (check.state === "none") {
         return this._buildNotFoundResult(resolvedPath, "No embedded MSI Authenticode signature found", trust);
       }
-      if (check.state === "mismatch") {
-        return failed("signature present but does not match the package contents; the package may have been modified after signing");
-      }
       if (check.state === "unreadable") {
         return failed(`signature present but could not be read (${check.detail})`);
       }
@@ -1575,155 +1553,92 @@ class Signing {
         return this._buildNotFoundResult(resolvedPath, "No embedded MSI Authenticode signature found", trust);
       }
 
-      // Parse CMS to extract certificate and signature
-      const cmsInfo = this._parseCmsSignedData(pkcs7Der);
-      if (!cmsInfo) {
-        return failed("Embedded MSI Authenticode signature has invalid CMS structure");
-      }
-
-      // Recompute the MSI Authenticode digest
       const digestResult = addon.msiComputeDigest(resolvedPath);
-
-      // Verify the ECDSA signature over the digest
-      const x509Cert = new crypto.X509Certificate(cmsInfo.certPem);
-      const publicKey = x509Cert.publicKey;
-
-      const verify = crypto.createVerify("SHA256");
-      verify.update(digestResult.digest);
-      const isValid = verify.verify(publicKey, cmsInfo.signature);
-
-      const checked = ["the package's fingerprint against the signed one", "signature over the package's fingerprint"];
-      const integrity: IntegrityResult = isValid
-        ? { state: "intact", checked }
-        : { state: "invalid", reason: "Embedded MSI signature invalid: digest mismatch — file may have been modified after signing", checked };
-      return this._buildVerifyResult(resolvedPath, "installer", "embedded", integrity, x509Cert.raw, trust);
+      const extended = fs.readFileSync(resolvedPath).includes(Buffer.from("\u0005MsiDigitalSignatureEx", "utf16le"));
+      return this._verifyAuthenticodeSignature(resolvedPath, "installer", pkcs7Der, digestResult.digest, trust, extended);
     } catch (err) {
       return failed(`Failed to verify MSI Authenticode signature: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   /**
-   * Parse a CMS/PKCS#7 SignedData blob to extract the certificate and signature.
-   * Returns null if parsing fails.
+   * Check the signature of a Windows program or installer held in `pkcs7Der` against the fingerprint the
+   * native component computed for the file. The stored fingerprint is compared first, so a changed file is
+   * reported as changed whatever the signature's form; then the signature itself is checked, in the tool's
+   * form (over the fingerprint), or the standard form with or without signed attributes.
+   * `extendedStream` is set for an installer that holds an extended signature stream, which is not checked.
    */
-  _parseCmsSignedData(der: Buffer): { certPem: string; signature: Buffer } | null {
+  _verifyAuthenticodeSignature(
+    resolvedPath: string,
+    form: SignatureForm,
+    pkcs7Der: Buffer,
+    computed: Buffer,
+    trust: TrustedCertificates,
+    extendedStream: boolean
+  ): VerifyResult {
+    const what = form === "installer" ? "package" : "program";
+    const build = (integrity: IntegrityResult, signerDer?: Buffer): VerifyResult =>
+      this._buildVerifyResult(resolvedPath, form, "embedded", integrity, signerDer, trust);
+
+    let info;
+    let stored: { algorithm: string; digest: Buffer };
     try {
-      // Basic ASN.1 DER parsing for CMS ContentInfo → SignedData
-      let offset = 0;
-
-      // Outer SEQUENCE (ContentInfo)
-      if (der[offset] !== 0x30) return null;
-      offset++;
-      const { length: ciLen, bytesRead: ciLenBytes } = this._asn1ReadLength(der, offset);
-      offset += ciLenBytes;
-
-      // OID (should be signedData 1.2.840.113549.1.7.2)
-      if (der[offset] !== 0x06) return null;
-      const oidLen = der[offset + 1];
-      offset += 2 + oidLen;
-
-      // [0] EXPLICIT containing SignedData
-      if ((der[offset] & 0xF0) !== 0xA0) return null;
-      offset++;
-      const { length: sdWrapLen, bytesRead: sdWrapLenBytes } = this._asn1ReadLength(der, offset);
-      offset += sdWrapLenBytes;
-
-      // SignedData SEQUENCE
-      if (der[offset] !== 0x30) return null;
-      offset++;
-      const { length: sdLen, bytesRead: sdLenBytes } = this._asn1ReadLength(der, offset);
-      offset += sdLenBytes;
-
-      // version INTEGER
-      if (der[offset] !== 0x02) return null;
-      offset += 2 + der[offset + 1];
-
-      // digestAlgorithms SET
-      if (der[offset] !== 0x31) return null;
-      offset++;
-      const { length: daLen, bytesRead: daLenBytes } = this._asn1ReadLength(der, offset);
-      offset += daLenBytes + daLen;
-
-      // contentInfo SEQUENCE
-      if (der[offset] !== 0x30) return null;
-      offset++;
-      const { length: encapLen, bytesRead: encapLenBytes } = this._asn1ReadLength(der, offset);
-      offset += encapLenBytes + encapLen;
-
-      // certificates [0] IMPLICIT
-      if ((der[offset] & 0xF0) !== 0xA0) return null;
-      offset++;
-      const { length: certsLen, bytesRead: certsLenBytes } = this._asn1ReadLength(der, offset);
-      offset += certsLenBytes;
-
-      // First certificate within the SET wrapper
-      const certSetStart = offset;
-      // The first element should be a SET containing the cert
-      if (der[offset] === 0x31) {
-        offset++;
-        const { bytesRead: setLenBytes } = this._asn1ReadLength(der, offset);
-        offset += setLenBytes;
+      info = readSignedData(pkcs7Der);
+      if (info.contentType !== OID.spcIndirectData || info.content === undefined) {
+        return build({ state: "not-checked", reason: "the signature is not of the Authenticode kind this tool checks", checked: [] });
       }
-
-      // Certificate SEQUENCE
-      const certStart = offset;
-      if (der[offset] !== 0x30) return null;
-      offset++;
-      const { length: certLen, bytesRead: certLenBytes } = this._asn1ReadLength(der, offset);
-      offset += certLenBytes;
-      const certEnd = offset + certLen;
-
-      const certDer = der.subarray(certStart, certEnd);
-      const certPem = `-----BEGIN CERTIFICATE-----\n${certDer.toString("base64").match(/.{1,64}/g)!.join("\n")}\n-----END CERTIFICATE-----\n`;
-
-      // Skip to signerInfos SET (after certificates)
-      offset = certSetStart + certsLen;
-
-      // signerInfos SET
-      if (der[offset] !== 0x31) return null;
-      offset++;
-      const { length: siSetLen, bytesRead: siSetLenBytes } = this._asn1ReadLength(der, offset);
-      offset += siSetLenBytes;
-
-      // SignerInfo SEQUENCE
-      if (der[offset] !== 0x30) return null;
-      offset++;
-      const { length: siLen, bytesRead: siLenBytes } = this._asn1ReadLength(der, offset);
-      offset += siLenBytes;
-
-      // version INTEGER
-      if (der[offset] !== 0x02) return null;
-      offset += 2 + der[offset + 1];
-
-      // issuerAndSerialNumber SEQUENCE
-      if (der[offset] !== 0x30) return null;
-      offset++;
-      const { length: isnLen, bytesRead: isnLenBytes } = this._asn1ReadLength(der, offset);
-      offset += isnLenBytes + isnLen;
-
-      // digestAlgorithm SEQUENCE
-      if (der[offset] !== 0x30) return null;
-      offset++;
-      const { length: daAlgLen, bytesRead: daAlgLenBytes } = this._asn1ReadLength(der, offset);
-      offset += daAlgLenBytes + daAlgLen;
-
-      // signatureAlgorithm SEQUENCE
-      if (der[offset] !== 0x30) return null;
-      offset++;
-      const { length: saLen, bytesRead: saLenBytes } = this._asn1ReadLength(der, offset);
-      offset += saLenBytes + saLen;
-
-      // signature OCTET STRING
-      if (der[offset] !== 0x04) return null;
-      offset++;
-      const { length: sigLen, bytesRead: sigLenBytes } = this._asn1ReadLength(der, offset);
-      offset += sigLenBytes;
-      const signature = der.subarray(offset, offset + sigLen);
-
-      return { certPem, signature: Buffer.from(signature) };
-    } catch {
-      return null;
+      stored = readSpcDigest(info.content);
+    } catch (err) {
+      if (err instanceof CmsUnsupported) {
+        return build({ state: "not-checked", reason: err.message, checked: [] });
+      }
+      if (err instanceof CmsDamaged) {
+        return build({ state: "invalid", reason: "signature data is damaged", checked: [] });
+      }
+      throw err;
     }
+    const signer = info.signers[0];
+    const certificate = findSignerCertificate(info, signer);
+    const signerDer = certificate ?? undefined;
+    const warnings = signer.hasNestedSignature ? ["The file holds a second, nested signature, which is not checked"] : [];
+    const withWarnings = (result: VerifyResult): VerifyResult => {
+      result.warnings = [...result.warnings, ...warnings];
+      return result;
+    };
+
+    if (stored.algorithm !== OID.sha256) {
+      return withWarnings(build({ state: "not-checked", reason: "the signature fingerprints the file with an algorithm other than SHA-256, which is not checked", checked: [] }, signerDer));
+    }
+    if (!stored.digest.equals(computed)) {
+      if (extendedStream) {
+        return withWarnings(
+          build({ state: "not-checked", reason: "the installer holds an extended signature stream (MsiDigitalSignatureEx), which is not supported", checked: [] }, signerDer)
+        );
+      }
+      const reason = "the file was changed after signing: its fingerprint differs from the one in the signature";
+      return withWarnings(build({ state: "invalid", reason, checked: [`the ${what}'s fingerprint against the signed one`] }, signerDer));
+    }
+
+    const checked = [`the ${what}'s fingerprint against the signed one`, `signature over the ${what}'s fingerprint`];
+    if (certificate === null) {
+      return withWarnings(build({ state: "invalid", reason: "the signer's certificate is not in the signature", checked: [checked[0]] }));
+    }
+    if (signer.signedAttributes?.contentType !== undefined && signer.signedAttributes.contentType !== OID.spcIndirectData) {
+      return withWarnings(build({ state: "invalid", reason: "the signed content type is not the one an Authenticode signature holds", checked: [checked[0]] }, certificate));
+    }
+
+    // Without signed attributes the tool's own form signs the fingerprint itself and the standard form signs the content
+    let outcome = verifySignerSignature(signer, certificate, signer.signedAttributes === undefined ? computed : info.content);
+    if (outcome === "failed" && signer.signedAttributes === undefined) {
+      outcome = verifySignerSignature(signer, certificate, info.content);
+    }
+    if (outcome === "unsupported") {
+      return withWarnings(build({ state: "not-checked", reason: `unsupported signature algorithm ${signer.signatureAlgorithm}`, checked: [checked[0]] }, certificate));
+    }
+    if (outcome === "failed") {
+      return withWarnings(build({ state: "invalid", reason: `the signature over the ${what}'s fingerprint does not verify`, checked }, certificate));
+    }
+    return withWarnings(build({ state: "intact", checked }, certificate));
   }
 
   /**

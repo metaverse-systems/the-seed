@@ -173,6 +173,25 @@ describe("Mac program", () => {
       ["x86_64", "unsigned"],
     ]);
   });
+
+  it("an ad-hoc signed program is intact with no signer, so not trusted", async () => {
+    for (const name of ["tiny-macho-arm64-adhoc", "tiny-macho-universal-adhoc"]) {
+      const file = copyGenuine(name, dir);
+      const result = await A.signing.verifyFile(file);
+      expect(result.status).toBe("UNTRUSTED");
+      expect(result.form).toBe("mac-program");
+      expect(result.integrity.state).toBe("intact");
+      expect(result.trust.state).toBe("untrusted");
+      expect(result.trust.reason).toBe("no-signer");
+      expect(result.signer).toBeUndefined();
+      const slices = expectPresent(result.slices, "slices");
+      expect(slices).toHaveLength(name === "tiny-macho-universal-adhoc" ? 2 : 1);
+      for (const slice of slices) {
+        expect(slice.adHoc).toBe(true);
+        expect(slice.state).toBe("intact");
+      }
+    }
+  });
 });
 
 describe("cross-signer", () => {

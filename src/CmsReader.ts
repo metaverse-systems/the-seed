@@ -399,3 +399,34 @@ export function verifySignerSignature(signer: SignerRecord, certificate: Buffer,
     return "failed";
   }
 }
+
+// ── Authenticode content ─────────────────────────────────────
+
+/**
+ * Reads the digest an Authenticode signature holds: the DigestInfo of its SpcIndirectDataContent.
+ * `content` is the value bytes of the encapsulated content (`SignedDataInfo.content`).
+ */
+export function readSpcDigest(content: Buffer): { algorithm: string; digest: Buffer } {
+  try {
+    const parts: Element[] = [];
+    let at = 0;
+    while (at < content.length) {
+      const child = readElement(content, at);
+      parts.push(child);
+      at += child.full.length;
+    }
+    if (parts.length < 2) {
+      throw new CmsDamaged("the signed content is missing parts");
+    }
+    const digestInfo = childrenOf(expectTag(parts[1], 0x30, "the digest"));
+    return {
+      algorithm: algorithmOid(digestInfo[0]),
+      digest: Buffer.from(expectTag(digestInfo[1], 0x04, "a digest").value),
+    };
+  } catch (err) {
+    if (err instanceof CmsDamaged || err instanceof CmsUnsupported) {
+      throw err;
+    }
+    throw new CmsDamaged(`signature data cannot be read: ${(err as Error).message}`);
+  }
+}

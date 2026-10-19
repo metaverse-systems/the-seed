@@ -10,7 +10,7 @@ export const NOT_CHECKED_ALWAYS: readonly string[] = ["certificate chains", "rev
 
 const NO_ANCHORS_MESSAGE = "no trusted certificates are available; create one with 'the-seed signing create-cert' or name one with --cert <file>";
 const UNKNOWN_SIGNER_MESSAGE = "signer certificate is not one of the trusted certificates";
-const NO_SIGNER_MESSAGE = "the file has no signer certificate, so nothing can be trusted";
+const NO_SIGNER_MESSAGE = "the signature has no signer (ad-hoc)";
 
 /** SHA-256 fingerprint of a DER certificate in the form the tool prints: "SHA256:<lowercase hex>". */
 export function certificateFingerprint(der: Buffer): string {

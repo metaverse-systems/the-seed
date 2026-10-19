@@ -2,12 +2,14 @@ import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
 import { checkMachO } from "../src/MachOVerifier";
 import type { MachOCheck, MachOSliceInfo } from "../src/MachOVerifier";
 import { checkMachO as checkWithIndependentChecker } from "./helpers/MachOChecker";
 import { expectPresent } from "./helpers/Assert";
 import { makeUniversal } from "./helpers/Universal";
+import { optionalExternalCheck } from "./helpers/ExternalTools";
 
 // Cases for the pure Mach-O verification function: it is given the bytes of a file and the slice
 // table (as the addon's machoListSlices returns it) and nothing else. Signed inputs are copies of the
@@ -502,5 +504,98 @@ describe("agreement with the independent checker", () => {
     for (const specifier of specifiers) {
       expect(specifier).not.toMatch(/(^|\/)src(\/|$)/);
     }
+  });
+});
+
+describe("standard signed-attribute signatures made by openssl", () => {
+  // The CodeDirectory of the arm64 sample is prepared with the library (capacity 4096), signed by
+  // `openssl cms -sign -binary -md sha256` (DER, detached, with signed attributes), and the result is put in
+  // with machoCompleteSignature. Choices where the contracts leave the wording open (the implementation matches these):
+  //   - a signature algorithm the verifier does not implement (RSA-PSS): the program's integrity is `not-checked`
+  //     with a reason containing "unsupported signature algorithm"; the slice is `not-checked` too
+  const haveOpenssl = (): boolean => spawnSync("openssl", ["version"]).status === 0;
+
+  function run(dir: string, args: string[]): void {
+    const result = spawnSync("openssl", args, {
+      cwd: dir,
+      encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: dir, LC_ALL: "C", TZ: "UTC" },
+    });
+    if (result.status !== 0) {
+      throw new Error("openssl " + args.join(" ") + " failed: " + result.stdout + result.stderr);
+    }
+  }
+
+  /** Signs a copy of the genuine arm64 program with openssl; returns the file's bytes and the signer certificate. */
+  function signWithOpenssl(kind: "ecdsa" | "rsa-pss"): { bytes: Buffer; certificate: Buffer } {
+    const dir = tempDir("machoverifier-openssl-");
+    const key = path.join(dir, "key.pem");
+    const cert = path.join(dir, "cert.pem");
+    const keyArgs = kind === "ecdsa" ? ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", key] : ["genrsa", "-out", key, "2048"];
+    run(dir, keyArgs);
+    run(dir, ["req", "-new", "-x509", "-key", key, "-subj", "/CN=openssl-" + kind, "-days", "30", "-out", cert]);
+
+    const file = path.join(dir, "program");
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "genuine", "tiny-macho-arm64"), file);
+    // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
+    const addon = require("../native/build/Release/dependency_lister.node");
+    const prepared = addon.machoPrepareSignature(file, "openssl-test", 4096);
+    const signatures = prepared.slices.map((slice: { codeDirectory: Buffer }, index: number) => {
+      const content = path.join(dir, `cd-${index}`);
+      const out = path.join(dir, `cms-${index}`);
+      fs.writeFileSync(content, slice.codeDirectory);
+      const options = kind === "rsa-pss" ? ["-keyopt", "rsa_padding_mode:pss"] : [];
+      run(dir, ["cms", "-sign", "-binary", "-md", "sha256", "-in", content, "-signer", cert, "-inkey", key, ...options, "-outform", "DER", "-out", out]);
+      return fs.readFileSync(out);
+    });
+    addon.machoCompleteSignature(file, prepared, signatures);
+    return { bytes: fs.readFileSync(file), certificate: Buffer.from(new crypto.X509Certificate(fs.readFileSync(cert)).raw) };
+  }
+
+  it("is intact with the openssl certificate as signer, and the independent checker reads the same pages", () => {
+    if (!optionalExternalCheck("openssl", haveOpenssl(), "openssl not found")) {
+      return;
+    }
+    const { bytes, certificate } = signWithOpenssl("ecdsa");
+    const slices = tableOf(bytes);
+    const check = checkMachO(bytes, slices);
+    expect(check.integrity.state).toBe("intact");
+    expect(check.signerCertificate).toEqual(certificate);
+    expect(check.slices[0].adHoc).toBe(false);
+
+    const report = checkWithIndependentChecker(bytes);
+    expect(report.problems).toEqual([]);
+    expect(check.slices[0].codeDirectories[0].pages).toBe(report.slices[0].pagesChecked);
+    expect(check.slices[0].codeDirectories[0].pagesMismatched).toBe(report.slices[0].pagesMismatched);
+  });
+
+  it("with one byte changed is invalid, and the independent checker lists a problem too", () => {
+    if (!optionalExternalCheck("openssl", haveOpenssl(), "openssl not found")) {
+      return;
+    }
+    const { bytes } = signWithOpenssl("ecdsa");
+    const changed = Buffer.from(bytes);
+    changed[2 * PAGE + 10] ^= 0xff;
+    const check = checkMachO(changed, tableOf(changed));
+    expect(check.integrity.state).toBe("invalid");
+    expect(check.integrity.reason).toMatch(/slice arm64: page 2/);
+
+    const report = checkWithIndependentChecker(changed);
+    expect(report.problems.length).toBeGreaterThan(0);
+    expect(report.slices[0].pagesMismatched).toBe(check.slices[0].codeDirectories[0].pagesMismatched);
+  });
+
+  it("signed with RSA-PSS is not checked: unsupported signature algorithm, and never intact", () => {
+    if (!optionalExternalCheck("openssl", haveOpenssl(), "openssl not found")) {
+      return;
+    }
+    const { bytes } = signWithOpenssl("rsa-pss");
+    const check = checkMachO(bytes, tableOf(bytes));
+    expect(check.integrity.state).toBe("not-checked");
+    expect(check.integrity.reason).toMatch(/unsupported signature algorithm/);
+    expect(check.slices[0].state).toBe("not-checked");
+
+    // The pages themselves are fine, which the independent checker confirms
+    expect(checkWithIndependentChecker(bytes).problems).toEqual([]);
   });
 });
