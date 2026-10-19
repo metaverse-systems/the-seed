@@ -691,6 +691,24 @@ describe("signing help", () => {
       "by the platform's own verifier are not checked.";
     expect(collapsed).toContain(paragraph);
   });
+
+  // Choice: the paragraph is compared with whitespace collapsed, so only its words and their order are fixed,
+  // and it must come after the verify paragraph.
+  it("says what sign writes and what it was checked with", async () => {
+    const collapsed = (await runHelp()).replace(/\s+/g, " ");
+    const verifyEnd = "by the platform's own verifier are not checked.";
+    const paragraph =
+      "sign writes standard signature containers (signed attributes, the signer's " +
+      "certificate). Checked with independent tools, the signer's certificate given " +
+      "as the trusted root: Windows programs and installers pass osslsigncode; each " +
+      "slice of a Mac program passes openssl's signed-data check over its code " +
+      "directory. Not checked with the platforms' own tools (signtool, WinVerifyTrust, " +
+      "the Windows Installer service, codesign, Gatekeeper), which may still refuse " +
+      "the certificate. Files signed by earlier versions should be signed again.";
+    expect(collapsed).toContain(paragraph);
+    expect(collapsed.indexOf(verifyEnd)).toBeGreaterThanOrEqual(0);
+    expect(collapsed.indexOf(paragraph)).toBeGreaterThan(collapsed.indexOf(verifyEnd));
+  });
 });
 
 // `sign` with a scope key the tool cannot use, run through runCli with a scratch configuration and HOME.
