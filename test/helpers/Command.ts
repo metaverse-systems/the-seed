@@ -22,6 +22,15 @@ class ExitSignal extends Error {
  * is captured. Nothing is printed and the process is never ended.
  */
 export async function runVerify(args: string[], configDir: string, home: string): Promise<CommandRun> {
+  return runSigningCommand("verify", args, configDir, home);
+}
+
+/** Runs `the-seed signing sign <args>` the same way as `runVerify`. */
+export async function runSign(args: string[], configDir: string, home: string): Promise<CommandRun> {
+  return runSigningCommand("sign", args, configDir, home);
+}
+
+async function runSigningCommand(command: string, args: string[], configDir: string, home: string): Promise<CommandRun> {
   const savedHome = process.env.HOME;
   const codes: number[] = [];
   const out: string[] = [];
@@ -38,7 +47,7 @@ export async function runVerify(args: string[], configDir: string, home: string)
   });
   process.env.HOME = home;
   try {
-    await runCli(["node", "the-seed", "signing", "verify", ...args], configDir, "the-seed");
+    await runCli(["node", "the-seed", "signing", command, ...args], configDir, "the-seed");
   } catch (error) {
     if (!(error instanceof ExitSignal)) {
       throw error;

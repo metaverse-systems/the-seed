@@ -272,3 +272,72 @@ export function checkMachO(data: Buffer): MachOReport {
   }
   return { form, slices, problems };
 }
+
+export interface SliceSignatureBlobs {
+  cputype: number;
+  codeDirectory: Buffer;
+  cms: Buffer | null;
+}
+
+const CSSLOT_CMS_SIGNATURE = 0x10000;
+
+/**
+ * The signature blobs of every slice that has a code signature, in slice-table
+ * order: the code directory (slot 0, whole blob) and the CMS container (slot
+ * 0x10000 without its 8-byte header), or null when the slice has no CMS blob or
+ * only an empty one. A slice without a code signature gives no entry.
+ */
+export function sliceSignatureBlobs(data: Buffer): SliceSignatureBlobs[] {
+  const { entries } = readContainers(data);
+  const result: SliceSignatureBlobs[] = [];
+  for (const entry of entries) {
+    const b = data.subarray(entry.offset, entry.offset + entry.size);
+    if (b.length < 32) {
+      continue;
+    }
+    const ncmds = b.readUInt32LE(16);
+    let at = 32;
+    let dataoff = -1;
+    let datasize = 0;
+    for (let i = 0; i < ncmds && at + 8 <= b.length; i++) {
+      const cmd = b.readUInt32LE(at);
+      const size = b.readUInt32LE(at + 4);
+      if (size < 8) {
+        break;
+      }
+      if (cmd === LC_CODE_SIGNATURE && size >= 16) {
+        dataoff = b.readUInt32LE(at + 8);
+        datasize = b.readUInt32LE(at + 12);
+        break;
+      }
+      at += size;
+    }
+    if (dataoff < 0 || dataoff + datasize > b.length) {
+      continue;
+    }
+    const blob = b.subarray(dataoff, dataoff + datasize);
+    if (blob.length < 12 || blob.readUInt32BE(0) !== CSMAGIC_EMBEDDED_SIGNATURE) {
+      continue;
+    }
+    const count = blob.readUInt32BE(8);
+    const slots = new Map<number, number>();
+    for (let i = 0; i < count; i++) {
+      slots.set(blob.readUInt32BE(12 + 8 * i), blob.readUInt32BE(16 + 8 * i));
+    }
+    const cdOff = slots.get(CSSLOT_CODEDIRECTORY);
+    if (cdOff === undefined) {
+      continue;
+    }
+    const codeDirectory = blob.subarray(cdOff, cdOff + blob.readUInt32BE(cdOff + 4));
+    let cms: Buffer | null = null;
+    const cmsOff = slots.get(CSSLOT_CMS_SIGNATURE);
+    if (cmsOff !== undefined) {
+      const length = blob.readUInt32BE(cmsOff + 4);
+      if (length > 8) {
+        cms = blob.subarray(cmsOff + 8, cmsOff + length);
+      }
+    }
+    result.push({ cputype: entry.cputype, codeDirectory, cms });
+  }
+  return result;
+}

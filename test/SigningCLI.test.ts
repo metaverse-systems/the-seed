@@ -4,7 +4,8 @@ import path from "path";
 import Signing from "../src/Signing";
 import { runCli } from "../src/scripts/Cli";
 import { expectPresent } from "./helpers/Assert";
-import { runVerify } from "./helpers/Command";
+import { runSign, runVerify } from "./helpers/Command";
+import { replaceScopeKey } from "./helpers/IndependentCheck";
 import { makeUniversal } from "./helpers/Universal";
 
 // The verify command, run through runCli with a scratch configuration directory and a scratch HOME.
@@ -689,5 +690,48 @@ describe("signing help", () => {
       "malformed manifest. Certificate chains, revocation, signing time and acceptance " +
       "by the platform's own verifier are not checked.";
     expect(collapsed).toContain(paragraph);
+  });
+
+  // Choice: the paragraph is compared with whitespace collapsed, so only its words and their order are fixed,
+  // and it must come after the verify paragraph.
+  it("says what sign writes and what it was checked with", async () => {
+    const collapsed = (await runHelp()).replace(/\s+/g, " ");
+    const verifyEnd = "by the platform's own verifier are not checked.";
+    const paragraph =
+      "sign writes standard signature containers (signed attributes, the signer's " +
+      "certificate). Checked with independent tools, the signer's certificate given " +
+      "as the trusted root: Windows programs and installers pass osslsigncode; each " +
+      "slice of a Mac program passes openssl's signed-data check over its code " +
+      "directory. Not checked with the platforms' own tools (signtool, WinVerifyTrust, " +
+      "the Windows Installer service, codesign, Gatekeeper), which may still refuse " +
+      "the certificate. Files signed by earlier versions should be signed again.";
+    expect(collapsed).toContain(paragraph);
+    expect(collapsed.indexOf(verifyEnd)).toBeGreaterThanOrEqual(0);
+    expect(collapsed.indexOf(paragraph)).toBeGreaterThan(collapsed.indexOf(verifyEnd));
+  });
+});
+
+// `sign` with a scope key the tool cannot use, run through runCli with a scratch configuration and HOME.
+// Choices: the configuration has one scope so no prompt appears; the file is a copy of the arm64 Mac sample
+// whose modification time is first set to a fixed past date; the message is the key check's own, after "Error: ".
+describe("signing sign with an unsupported scope key", () => {
+  it("prints the message on stderr, exits 3 and leaves the file byte-for-byte unchanged with the same modification time", async () => {
+    const config = await makeConfiguration("@tk");
+    replaceScopeKey(config.configDir, "@tk", "rsa2048");
+    const file = path.join(tempDir("cli-sign-file-"), "tiny-macho-arm64");
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "genuine", "tiny-macho-arm64"), file);
+    const past = new Date("2020-01-01T00:00:00Z");
+    fs.utimesSync(file, past, past);
+    const before = fs.readFileSync(file);
+    const mtimeBefore = fs.statSync(file).mtimeMs;
+
+    const run = await runSign([file], config.configDir, home);
+
+    expect(run.status).toBe(3);
+    expect(run.err).toBe("Error: Cannot sign with scope '@tk': its key is RSA (2048-bit); only ECDSA P-256 keys are supported. No file was changed.");
+    expect(run.out).not.toContain("Signed:");
+    expect(fs.readFileSync(file).equals(before)).toBe(true);
+    expect(fs.statSync(file).mtimeMs).toBe(mtimeBefore);
+    expect(fs.readdirSync(path.dirname(file))).toEqual(["tiny-macho-arm64"]);
   });
 });

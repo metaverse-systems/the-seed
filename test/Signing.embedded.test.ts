@@ -3,12 +3,15 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
-import Signing from "../src/Signing";
+import Signing, { UnsupportedSigningKey } from "../src/Signing";
+import * as x509 from "@peculiar/x509";
+import { buildSignatureContainer } from "../src/CmsBuilder";
 import { readSignedData } from "../src/CmsReader";
 import { checkMachO } from "./helpers/MachOChecker";
 import { CfbPackage, loadReference, parsePackage, storedDigest } from "./helpers/CfbChecker";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
 import { makeUniversal } from "./helpers/Universal";
+import { ReplacementKey, replaceScopeKey } from "./helpers/IndependentCheck";
 
 /**
  * Create a temporary directory for test isolation.
@@ -334,69 +337,6 @@ describe("signFileMachO", () => {
 
     expect(result.signatureType).toBe("embedded");
     expect(result.signaturePath).toBeNull();
-  });
-});
-
-describe("_buildMachOCms signature length", () => {
-  let signing: Signing;
-  let scope: string;
-  let certPem: string;
-
-  beforeAll(async () => {
-    const setup = await setupSigning();
-    signing = setup.signing;
-    scope = setup.scope;
-    certPem = fs.readFileSync(signing.scopeCertPath(scope), "utf-8");
-  });
-
-  /** Read one DER header at offset: tag, content length, header size. */
-  function readHeader(buf: Buffer, offset: number): { tag: number; length: number; header: number } {
-    const tag = buf[offset];
-    const first = buf[offset + 1];
-    if (first < 0x80) {
-      return { tag, length: first, header: 2 };
-    }
-    const count = first & 0x7f;
-    let length = 0;
-    for (let i = 0; i < count; i++) {
-      length = length * 256 + buf[offset + 2 + i];
-    }
-    return { tag, length, header: 2 + count };
-  }
-
-  /** Walk the whole DER value and check every length stays inside its parent. */
-  function checkNesting(buf: Buffer, start: number, end: number): void {
-    let at = start;
-    while (at < end) {
-      const h = readHeader(buf, at);
-      const next = at + h.header + h.length;
-      expect(next).toBeLessThanOrEqual(end);
-      if (h.tag & 0x20) {
-        checkNesting(buf, at + h.header, next);
-      }
-      at = next;
-    }
-    expect(at).toBe(end);
-  }
-
-  it("writes a 70-byte signature with the one-byte length and a 200-byte one with the long form", () => {
-    const cd = Buffer.alloc(32, 7);
-
-    for (const size of [70, 200]) {
-      const signature = Buffer.alloc(size, 0xab);
-      const cms = signing._buildMachOCms(cd, signature, certPem);
-
-      // The whole value is one well-formed DER tree
-      const top = readHeader(cms, 0);
-      expect(top.header + top.length).toBe(cms.length);
-      checkNesting(cms, 0, cms.length);
-
-      const expectedHeader = size < 128 ? Buffer.from([0x04, size]) : Buffer.from([0x04, 0x81, size]);
-      const at = cms.indexOf(Buffer.concat([expectedHeader, signature]));
-      expect(at).toBeGreaterThan(0);
-      // The signature is the last element of the SignerInfo, so it ends the CMS
-      expect(at + expectedHeader.length + size).toBe(cms.length);
-    }
   });
 });
 
@@ -769,6 +709,8 @@ describe("signFileMsi on installer samples (real addon)", () => {
     expect(pkg.findSignatureEx()).toBeNull();
     expect(pkg.listing()).toEqual(before.listing());
     expect(result.warnings.join(" ")).not.toMatch(/windows (accepts|accepted)/i);
+    expect(result.warnings).toContain("Installer signature was read back: its fingerprint matches the package");
+    expect(result.warnings.filter((warning: string) => /trust/i.test(warning))).toEqual([]);
 
     const verify = await signing.verifyFileMsi(file);
     expect(verify.status).toBe("VALID");
@@ -779,6 +721,13 @@ describe("signFileMsi on installer samples (real addon)", () => {
     const { pkg, before } = await signAndCheck("tiny.msi");
     expect(pkg.version).toBe(3);
     expect(before.findSignature()).toBeNull();
+  });
+
+  it("the warnings from signing an installer say only what signing checked and never mention trust", async () => {
+    const file = copyMsi("tiny.msi", tempDir);
+    const result = await signing.signFileMsi(file, scope);
+    expect(result.warnings).toContain("Installer signature was read back: its fingerprint matches the package");
+    expect(result.warnings.filter((warning: string) => /trust/i.test(warning))).toEqual([]);
   });
 
   it("signs an unsigned version 4 package and keeps its version", async () => {
@@ -837,7 +786,8 @@ describe("signFileMsi on installer samples (real addon)", () => {
     const once = fs.statSync(file).size;
     await signing.signFileMsi(file, scope);
     await signing.signFileMsi(file, scope);
-    expect(fs.statSync(file).size).toBe(once);
+    // A DER ECDSA signature is 70 to 72 bytes, so a new signature may move the stream by one 512-byte sector
+    expect(Math.abs(fs.statSync(file).size - once)).toBeLessThanOrEqual(512);
     expect(parsePackage(fs.readFileSync(file)).fingerprint()).toBe(msiReference.fingerprint.get("tiny.msi"));
     expect((await signing.verifyFileMsi(file)).status).toBe("VALID");
   });
@@ -861,33 +811,55 @@ describe("signature sizes around the 4,096-byte threshold (real addon)", () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  /** A P-256 certificate with the fixed serial 01 followed by fifteen 0x11 bytes (no sign byte) and a common name of the given length. */
+  async function makeSigner(nameLength: number): Promise<{ signing: Signing; scope: string; probe: number }> {
+    const webcrypto = crypto.webcrypto as unknown as Crypto;
+    x509.cryptoProvider.set(webcrypto);
+    const keys = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
+    const certificate = await x509.X509CertificateGenerator.createSelfSigned({
+      serialNumber: "01" + "11".repeat(15),
+      name: "CN=" + "N".repeat(nameLength),
+      notBefore: new Date("2026-01-01T00:00:00Z"),
+      notAfter: new Date("2036-01-01T00:00:00Z"),
+      keys,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
+    });
+    const keyObject = crypto.createPrivateKey({ key: Buffer.from(await webcrypto.subtle.exportKey("pkcs8", keys.privateKey)), format: "der", type: "pkcs8" });
+
+    const dir = createTempDir();
+    const certPath = path.join(dir, "cert.pem");
+    const keyPath = path.join(dir, "key.pem");
+    fs.writeFileSync(certPath, certificate.toString("pem"));
+    fs.writeFileSync(keyPath, keyObject.export({ type: "pkcs8", format: "pem" }));
+
+    const configDir = createTempDir();
+    writeConfig(configDir, { scope: "@test", name: "Test User", email: "test@test.com" });
+    const signing = new Signing(configDir);
+    await signing.importCert(certPath, keyPath, "@test");
+
+    // The size the container has with the longest P-256 signature (72 bytes)
+    const probe = buildSignatureContainer({ kind: "installer", fingerprint: Buffer.alloc(32, 1) }, Buffer.from(certificate.rawData), () => Buffer.alloc(72, 2)).length;
+    return { signing, scope: "@test", probe };
+  }
+
   /**
-   * A signer whose certificate carries a long name, so that the signature the
-   * command builds is about `target` bytes. The size is measured on the
-   * container the command builds, not assumed.
+   * A signer whose container is close to `centre` bytes without repeating anything: one certificate with a
+   * name of the reference length gives its probe size, the name occurs three times (subject, issuer and
+   * the signer's issuer), and a second certificate has the name length that moves the probe to `centre`.
    */
-  async function signerWithSignatureNear(target: number): Promise<{ signing: Signing; scope: string; size: number }> {
-    let length = Math.max(1, Math.floor((target - 700) / 3));
-    for (let attempt = 0; attempt < 8; attempt++) {
-      const configDir = createTempDir();
-      writeConfig(configDir, { scope: "@test", name: "N".repeat(length), email: "test@test.com" });
-      const signing = new Signing(configDir);
-      await signing.createCert({ validityDays: 365, scope: "@test" });
-      const certPem = fs.readFileSync(signing.scopeCertPath("@test"), "utf-8");
-      const size = signing._buildMsiCms(Buffer.alloc(32, 1), Buffer.alloc(71, 2), certPem).length;
-      if (Math.abs(size - target) <= 4) {
-        return { signing, scope: "@test", size };
-      }
-      length = Math.max(1, length + Math.round((target - size) / 3));
-    }
-    throw new Error(`could not build a signature near ${target} bytes`);
+  async function signerNear(centre: number): Promise<{ signing: Signing; scope: string; probe: number }> {
+    const referenceLength = 300;
+    const reference = await makeSigner(referenceLength);
+    return makeSigner(referenceLength + Math.round((centre - reference.probe) / 3));
   }
 
   it.each([
-    ["just below the threshold", 4090, true],
-    ["just above the threshold", 4102, false],
-  ])("signs and reads back a signature %s", async (_label, target, small) => {
-    const { signing, scope } = await signerWithSignatureNear(target as number);
+    ["just below the threshold", 4087, 4080, 4094, true],
+    ["just above the threshold", 4112, 4104, 4120, false],
+  ])("signs and reads back a signature %s", async (_label, centre, low, high, small) => {
+    const { signing, scope, probe } = await signerNear(centre as number);
+    expect(probe).toBeGreaterThanOrEqual(low as number);
+    expect(probe).toBeLessThanOrEqual(high as number);
     const file = copyMsi("tiny.msi", tempDir);
     await signing.signFileMsi(file, scope);
 
@@ -895,7 +867,9 @@ describe("signature sizes around the 4,096-byte threshold (real addon)", () => {
     const found = pkg.findSignature();
     expect(found).not.toBeNull();
     const stored = found as NonNullable<typeof found>;
-    expect(Math.abs(stored.size - (target as number))).toBeLessThanOrEqual(4);
+    // The probe uses the longest P-256 signature (72 bytes); the real one is at most that and at least 8 bytes shorter
+    expect(stored.size).toBeGreaterThanOrEqual(probe - 8);
+    expect(stored.size).toBeLessThanOrEqual(probe);
     expect(stored.size < 4096).toBe(small);
     expect(pkg.inMiniStream(stored)).toBe(small);
     expect(storedDigest(pkg.read(stored))).toBe(msiReference.fingerprint.get("tiny.msi"));
@@ -1539,5 +1513,115 @@ describe("machoListSlices (real addon)", () => {
     expect(typeof addon.machoListSlices).toBe("function");
     expect(thrownName(() => addon.machoListSlices())).toBe("TypeError");
     expect(thrownName(() => addon.machoListSlices(42))).toBe("TypeError");
+  });
+});
+
+// ── Scope key checks ─────────────────────────────────────────
+
+// Choices where the contracts leave the shape open:
+//   - UnsupportedSigningKey is a named export of src/Signing (also exported from the package entry)
+//   - each case has its own scratch configuration so a replaced key never leaks into another case
+//   - the files' modification times are first set to a fixed past date, so "same modification time" means the file was not rewritten
+//   - the unreadable-file reason is not fixed: the message is checked for its fixed start and end around the reason
+//   - the detached file is a text file: signing it would write a .sig beside it
+describe("scope keys", () => {
+  const scope = "@test";
+  const PAST = new Date("2020-01-01T00:00:00Z");
+
+  function escaped(text: string): string {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  type KeyCase = { label: string; kind: ReplacementKey | "missing"; message: (keyPath: string) => string | RegExp };
+  const tail = "; only ECDSA P-256 keys are supported. No file was changed.";
+  const cases: KeyCase[] = [
+    { label: "RSA 2048", kind: "rsa2048", message: () => `Cannot sign with scope '${scope}': its key is RSA (2048-bit)${tail}` },
+    { label: "ECDSA P-384", kind: "p384", message: () => `Cannot sign with scope '${scope}': its key is ECDSA P-384${tail}` },
+    { label: "Ed25519", kind: "ed25519", message: () => `Cannot sign with scope '${scope}': its key is Ed25519${tail}` },
+    {
+      label: "a P-256 key that does not match the certificate",
+      kind: "p256-other",
+      message: () =>
+        `Cannot sign with scope '${scope}': its key (ECDSA P-256) does not match the scope's certificate; only an ECDSA P-256 key matching the certificate is supported. No file was changed.`,
+    },
+    {
+      label: "a missing key file",
+      kind: "missing",
+      message: (keyPath) =>
+        new RegExp("^" + escaped(`Cannot sign with scope '${scope}': its key file ${keyPath} cannot be read (`) + ".+" + escaped(")" + tail) + "$"),
+    },
+  ];
+
+  async function prepared(kind: ReplacementKey | "missing"): Promise<{ signing: Signing; keyPath: string; dir: string }> {
+    const { signing, configDir } = await setupSigning();
+    if (kind === "missing") {
+      fs.rmSync(signing.scopeKeyPath(scope));
+    } else {
+      replaceScopeKey(configDir, scope, kind);
+    }
+    return { signing, keyPath: signing.scopeKeyPath(scope), dir: createTempDir() };
+  }
+
+  function snapshotOf(files: string[]): Record<string, { digest: string; mtimeMs: number }> {
+    const out: Record<string, { digest: string; mtimeMs: number }> = {};
+    for (const file of files) {
+      out[file] = { digest: sha256File(file), mtimeMs: fs.statSync(file).mtimeMs };
+    }
+    return out;
+  }
+
+  function expectMessage(error: unknown, expected: string | RegExp): void {
+    expect(error).toBeInstanceOf(UnsupportedSigningKey);
+    expect((error as Error).name).toBe("UnsupportedSigningKey");
+    if (typeof expected === "string") {
+      expect((error as Error).message).toBe(expected);
+    } else {
+      expect((error as Error).message).toMatch(expected);
+    }
+  }
+
+  async function caught(call: () => Promise<unknown>): Promise<unknown> {
+    try {
+      await call();
+    } catch (err) {
+      return err;
+    }
+    throw new Error("expected the call to reject");
+  }
+
+  const files: Array<{ label: string; place: (dir: string) => string }> = [
+    { label: "a program", place: (dir) => copyFixture("tiny.exe", dir) },
+    { label: "an installer", place: (dir) => copyMsi("tiny.msi", dir) },
+    { label: "a Mac program", place: (dir) => copyGenuine("tiny-macho-arm64", dir) },
+    { label: "a detached-signed text file", place: (dir) => copyFixture("plain.txt", dir) },
+  ];
+
+  describe.each(cases)("$label", ({ kind, message }) => {
+    it.each(files)("signFile refuses $label and leaves it unchanged", async ({ place }) => {
+      const { signing, keyPath, dir } = await prepared(kind);
+      const file = place(dir);
+      fs.utimesSync(file, PAST, PAST);
+      const before = snapshotOf([file]);
+
+      expectMessage(await caught(() => signing.signFile(file, { scope })), message(keyPath));
+
+      expect(snapshotOf([file])).toEqual(before);
+      expect(fs.readdirSync(dir)).toEqual([path.basename(file)]);
+    });
+
+    it("signDirectory refuses a directory and leaves every file unchanged, with no manifest", async () => {
+      const { signing, keyPath, dir } = await prepared(kind);
+      const placed = files.map(({ place }) => place(dir));
+      for (const file of placed) {
+        fs.utimesSync(file, PAST, PAST);
+      }
+      const before = snapshotOf(placed);
+
+      expectMessage(await caught(() => signing.signDirectory(dir, { scope })), message(keyPath));
+
+      expect(snapshotOf(placed)).toEqual(before);
+      expect(fs.readdirSync(dir).sort()).toEqual(placed.map((file) => path.basename(file)).sort());
+      expect(fs.existsSync(path.join(dir, ".signatures.json"))).toBe(false);
+    });
   });
 });

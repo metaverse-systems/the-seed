@@ -13,6 +13,18 @@ const SEVERITY: VerifyStatus[] = ["VALID", "UNTRUSTED", "NOT_FOUND", "NOT_CHECKE
 /** What a check never covers, whatever the file. */
 export const NOT_CHECKED_ALWAYS: readonly string[] = ["certificate chains", "revocation", "signing time", "acceptance by the platform's own verifier"];
 
+/** Added to the warnings of a Windows program or installer signed in the earlier form (no signed attributes, signature over the fingerprint). */
+export const EARLIER_FORM_NOTICE_WINDOWS =
+  "The signature is in the earlier form written by the-seed (no signed attributes), which other verifiers reject; sign the file again with 'the-seed signing sign' to replace it";
+
+/**
+ * Added once to the warnings of a Mac program whose slot-0 container has no signed attributes. A container
+ * without signed attributes made by another tool (for example `openssl cms -sign -noattr`) cannot be told apart
+ * from the earlier form and gets the same notice; codesign always writes signed attributes.
+ */
+export const EARLIER_FORM_NOTICE_MAC =
+  "The signature is in the earlier form written by the-seed (no signed attributes), which Apple's tools are not known to accept; sign the file again with 'the-seed signing sign' to replace it";
+
 const NO_ANCHORS_MESSAGE = "no trusted certificates are available; create one with 'the-seed signing create-cert' or name one with --cert <file>";
 const UNKNOWN_SIGNER_MESSAGE = "signer certificate is not one of the trusted certificates";
 const NO_SIGNER_MESSAGE = "the signature has no signer (ad-hoc)";

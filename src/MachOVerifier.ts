@@ -1,11 +1,12 @@
 /**
  * Verifies the embedded code signature of each slice of a Mac program: every page fingerprint, the special slots
  * and the signature over the code directory (integrity). The signer is returned for the trust decision made in
- * Trust.ts; certificate chains, revocation and acceptance by Apple's tools are not checked.
+ * Trust.ts; certificate chains, revocation and acceptance by Apple's tools are not checked. Containers are read with
+ * CmsReader, in the standard form (signed attributes) or the earlier form, which gets a notice.
  */
 import crypto from "crypto";
 import { CmsDamaged, CmsUnsupported, OID, findSignerCertificate, readSignedData, verifySignerSignature } from "./CmsReader";
-import { certificateFingerprint } from "./Trust";
+import { EARLIER_FORM_NOTICE_MAC, certificateFingerprint } from "./Trust";
 import { IntegrityResult, MachOSliceResult } from "./types";
 
 /** One entry of a Mach-O file's slice table, as the native component lists it (`machoListSlices`). */
@@ -105,6 +106,8 @@ interface SliceFinding {
   checked: string[];
   warnings: string[];
   notChecked: string[];
+  /** The slot-0 container has no signed attributes (the earlier form, or another tool's attribute-less container). */
+  earlierForm?: boolean;
 }
 
 /** Reads the SuperBlob's index and checks that every blob lies inside it. */
@@ -362,6 +365,7 @@ function checkSignature(file: Buffer, blobs: Blob[], start: number, primary: Cod
     throw err;
   }
   const signer = info.signers[0];
+  finding.earlierForm = signer.signedAttributes === undefined;
   const certificate = findSignerCertificate(info, signer);
   if (certificate === null) {
     problems.push(`${label}: the signer's certificate is not in the signature`);
@@ -418,6 +422,9 @@ export function checkMachO(file: Buffer, slices: MachOSliceInfo[]): MachOCheck {
 
   const results = [...findings.map((finding) => finding.result)];
   const warnings = [...findings.flatMap((finding) => finding.warnings)];
+  if (findings.some((finding) => finding.earlierForm === true)) {
+    warnings.push(EARLIER_FORM_NOTICE_MAC);
+  }
   const notChecked = [...findings.flatMap((finding) => finding.notChecked)];
   const checked = [...findings.flatMap((finding) => finding.checked)];
 

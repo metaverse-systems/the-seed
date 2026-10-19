@@ -4,8 +4,9 @@ import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
-import { CmsDamaged, CmsUnsupported, findSignerCertificate, OID, readSignedData, verifySignerSignature } from "../src/CmsReader";
+import { CmsDamaged, CmsUnsupported, findSignerCertificate, OID, readSignedData, readSpcDigest, verifySignerSignature } from "../src/CmsReader";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { sliceSignatureBlobs } from "./helpers/MachOChecker";
 
 const created: string[] = [];
 let savedHome: string | undefined;
@@ -121,8 +122,9 @@ function withSignatureAlgorithm(container: Buffer, oidContent: Buffer): Buffer {
   const signerSet = parts[parts.length - 1];
   const signerInfo = children(signerSet)[0];
   const fields = children(signerInfo).map((field) => field.full);
-  // version, issuerAndSerialNumber, digestAlgorithm, signatureAlgorithm, signature: the algorithm is the fourth
-  fields[3] = tlv(0x30, tlv(0x06, oidContent), Buffer.from([0x05, 0x00]));
+  // version, signer id, digestAlgorithm, [signedAttrs], signatureAlgorithm, signature: the algorithm follows the signed attributes when there are any
+  const index = fields[3][0] === 0xa0 ? 4 : 3;
+  fields[index] = tlv(0x30, tlv(0x06, oidContent), Buffer.from([0x05, 0x00]));
   return withSigners(container, [tlv(0x30, ...fields)]);
 }
 
@@ -130,9 +132,12 @@ function withSignatureAlgorithm(container: Buffer, oidContent: Buffer): Buffer {
 
 interface Sample {
   name: string;
+  kind: "program" | "installer" | "mac";
   der: Buffer;
-  /** What the signature covers when there are no signed attributes (the tool's own forms). */
+  /** What the signature covers: the message digest's input when there are signed attributes, the signed bytes otherwise. */
   signedMessage: Buffer;
+  /** The file's fingerprint (programs and installers), computed by the addon's own digest functions. */
+  fingerprint: Buffer | null;
 }
 
 function slot(superBlob: Buffer, type: number): Buffer | null {
@@ -146,6 +151,21 @@ function slot(superBlob: Buffer, type: number): Buffer | null {
     }
   }
   return null;
+}
+
+/** The value bytes of the encapsulated content, found with this file's own reader of DER (not the code under test). */
+function contentValue(container: Buffer): Buffer {
+  const { parts } = pieces(container);
+  // SignedData: version, digest algorithms, encapsulated content info { oid, [0] { content } }
+  const encapsulated = children(parts[2]);
+  return children(encapsulated[1])[0].value;
+}
+
+/** The serial number value bytes and the issuer element of a certificate, as its DER holds them. */
+function certificateNames(certificate: Buffer): { serial: Buffer; issuer: Buffer } {
+  const fields = children(children(readElement(certificate, 0))[0]);
+  const at = fields[0].tag === 0xa0 ? 1 : 0;
+  return { serial: fields[at].value, issuer: fields[at + 2].full };
 }
 
 async function ownSamples(): Promise<Sample[]> {
@@ -165,82 +185,178 @@ async function ownSamples(): Promise<Sample[]> {
   const cms = slot(superBlob, 0x10000) as Buffer;
   const codeDirectory = slot(superBlob, 0) as Buffer;
 
+  const programDer = addon.peExtractSignature(exe) as Buffer;
+  const installerDer = addon.msiExtractSignature(msi) as Buffer;
+  // The standard form signs signed attributes whose message digest covers the content value bytes (or the code directory)
   return [
-    { name: "Windows program", der: addon.peExtractSignature(exe) as Buffer, signedMessage: (addon.peComputeDigest(exe) as { digest: Buffer }).digest },
-    { name: "installer", der: addon.msiExtractSignature(msi) as Buffer, signedMessage: (addon.msiComputeDigest(msi) as { digest: Buffer }).digest },
+    { name: "Windows program", kind: "program", der: programDer, signedMessage: contentValue(programDer), fingerprint: (addon.peComputeDigest(exe) as { digest: Buffer }).digest },
+    { name: "installer", kind: "installer", der: installerDer, signedMessage: contentValue(installerDer), fingerprint: (addon.msiComputeDigest(msi) as { digest: Buffer }).digest },
     // A CMS blob is an 8-byte header (magic, length) followed by the DER
-    { name: "Mac program", der: cms.subarray(8), signedMessage: codeDirectory },
+    { name: "Mac program", kind: "mac", der: cms.subarray(8), signedMessage: codeDirectory, fingerprint: null },
   ];
 }
 
-describe("the tool's own signature containers", () => {
-  let samples: Sample[];
+/** The committed samples signed before the standard form: the Windows program, the installer and each slice of the universal Mac program. */
+function earlierFormSamples(): Sample[] {
+  const dir = binaries("earlier-form");
+  const exe = path.join(dir, "tiny.exe");
+  const msi = path.join(dir, "tiny.msi");
+  const universal = path.join(dir, "tiny-macho-universal");
+  const samples: Sample[] = [
+    { name: "Windows program", kind: "program", der: addon.peExtractSignature(exe) as Buffer, signedMessage: (addon.peComputeDigest(exe) as { digest: Buffer }).digest, fingerprint: (addon.peComputeDigest(exe) as { digest: Buffer }).digest },
+    { name: "installer", kind: "installer", der: addon.msiExtractSignature(msi) as Buffer, signedMessage: (addon.msiComputeDigest(msi) as { digest: Buffer }).digest, fingerprint: (addon.msiComputeDigest(msi) as { digest: Buffer }).digest },
+  ];
+  for (const blobs of sliceSignatureBlobs(fs.readFileSync(universal))) {
+    samples.push({ name: "Mac program slice " + blobs.cputype.toString(16), kind: "mac", der: blobs.cms as Buffer, signedMessage: blobs.codeDirectory, fingerprint: null });
+  }
+  return samples;
+}
 
-  beforeAll(async () => {
-    samples = await ownSamples();
-  });
+const STANDARD_FORM_KINDS: Sample["kind"][] = ["program", "installer", "mac"];
 
-  it("finds the signing certificate inside the certificate list wrapper, for each form", () => {
-    for (const sample of samples) {
-      const info = readSignedData(sample.der);
-      expect(info.certificates.length).toBe(1);
-      expect(info.certificates[0].equals(scopeCertDer)).toBe(true);
-      expect(info.signers).toHaveLength(1);
+function describeOwnContainers(title: string, load: () => Promise<Sample[]> | Sample[], expectedCertificate: () => Buffer, standardForm: boolean): void {
+  describe(title, () => {
+    let samples: Sample[];
+
+    beforeAll(async () => {
+      samples = await load();
+    });
+
+    // The freshly signed samples are all in the standard form; the earlier-form set is not filtered.
+    const covered = (): Sample[] => (standardForm ? samples.filter((sample) => STANDARD_FORM_KINDS.includes(sample.kind)) : samples);
+
+    it("finds the signing certificate in the certificate list, for each form", () => {
+      for (const sample of samples) {
+        const info = readSignedData(sample.der);
+        expect(info.certificates.length).toBe(1);
+        expect(info.certificates[0].equals(expectedCertificate())).toBe(true);
+        expect(info.signers).toHaveLength(1);
+      }
+    });
+
+    it("matches the signer record to the certificate with findSignerCertificate, for each form", () => {
+      for (const sample of samples) {
+        const info = readSignedData(sample.der);
+        const found = findSignerCertificate(info, info.signers[0]);
+        expect(found).not.toBeNull();
+        expect((found as Buffer).equals(expectedCertificate())).toBe(true);
+      }
+    });
+
+    it("verifies the signature over what each form signs", () => {
+      for (const sample of covered()) {
+        const info = readSignedData(sample.der);
+        const certificate = findSignerCertificate(info, info.signers[0]) as Buffer;
+        expect(verifySignerSignature(info.signers[0], certificate, sample.signedMessage)).toBe("verified");
+      }
+    });
+
+    it("does not verify the signature over something else", () => {
+      for (const sample of samples) {
+        const info = readSignedData(sample.der);
+        const certificate = findSignerCertificate(info, info.signers[0]) as Buffer;
+        const other = Buffer.from(sample.signedMessage);
+        other[0] ^= 0xff;
+        expect(verifySignerSignature(info.signers[0], certificate, other)).toBe("failed");
+      }
+    });
+
+    it("reads the content types: Authenticode content for programs and installers, none for the Mac program", () => {
+      expect(samples.some((sample) => sample.kind === "mac")).toBe(true);
+      for (const sample of samples) {
+        const info = readSignedData(sample.der);
+        if (sample.kind === "mac") {
+          expect(info.contentType).toBe(OID.data);
+          expect(info.content).toBeUndefined();
+        } else {
+          expect(info.contentType).toBe(OID.spcIndirectData);
+        }
+      }
+    });
+
+    it("gives the Authenticode content value bytes: they start with the content's first element and hold the stored digest", () => {
+      for (const sample of samples.filter((candidate) => candidate.kind !== "mac")) {
+        const info = readSignedData(sample.der);
+        expect(info.content).toBeDefined();
+        expect((info.content as Buffer).includes(sample.fingerprint as Buffer)).toBe(true);
+        // The digest read from the content is the file's fingerprint
+        const stored = readSpcDigest(info.content as Buffer);
+        expect(stored.algorithm).toBe(OID.sha256);
+        expect(stored.digest.equals(sample.fingerprint as Buffer)).toBe(true);
+        // contentDer is the element as encoded, so it is the value behind a tag and a length
+        expect((info.contentDer as Buffer).length).toBeGreaterThan((info.content as Buffer).length);
+        expect((info.contentDer as Buffer).subarray(-(info.content as Buffer).length).equals(info.content as Buffer)).toBe(true);
+      }
+    });
+
+    if (standardForm) {
+      it("reads signed attributes whose content type is the container's and whose message digest covers what the form signs", () => {
+        for (const sample of covered()) {
+          const info = readSignedData(sample.der);
+          const attributes = info.signers[0].signedAttributes;
+          expect(attributes).toBeDefined();
+          const found = attributes as NonNullable<typeof attributes>;
+          expect(found.contentType).toBe(sample.kind === "mac" ? OID.data : OID.spcIndirectData);
+          expect(found.messageDigest).toBeDefined();
+          expect((found.messageDigest as Buffer).equals(crypto.createHash("sha256").update(sample.signedMessage).digest())).toBe(true);
+          if (sample.kind !== "mac") {
+            expect(sample.signedMessage.equals(info.content as Buffer)).toBe(true);
+          }
+        }
+      });
+
+      it("names the signer by the certificate's own issuer and serial bytes, for each form", () => {
+        for (const sample of covered()) {
+          const info = readSignedData(sample.der);
+          const sid = info.signers[0].sid as { issuer: Buffer; serial: Buffer };
+          const names = certificateNames(expectedCertificate());
+          expect(sid.serial.equals(names.serial)).toBe(true);
+          expect(sid.issuer.equals(names.issuer)).toBe(true);
+        }
+      });
+    } else {
+      it("has no signed attributes", () => {
+        for (const sample of samples) {
+          expect(readSignedData(sample.der).signers[0].signedAttributes).toBeUndefined();
+        }
+      });
     }
-  });
 
-  it("matches the signer record to the certificate with findSignerCertificate, for each form", () => {
+    it("ignores bytes after the outer element, such as the zero padding of a PE certificate table", () => {
+      for (const sample of samples) {
+        const plain = readSignedData(sample.der);
+        const padded = readSignedData(Buffer.concat([sample.der, Buffer.alloc(7)]));
+        expect(padded.certificates.map((c: Buffer) => c.toString("hex"))).toEqual(plain.certificates.map((c: Buffer) => c.toString("hex")));
+        expect(padded.signers).toHaveLength(1);
+      }
+    });
+  });
+}
+
+describeOwnContainers("the tool's own signature containers, freshly signed", ownSamples, () => scopeCertDer, true);
+
+describeOwnContainers("the tool's own signature containers, earlier form", earlierFormSamples, () => {
+  // The certificate that signed the committed samples, not the scope certificate of this file
+  const pem = fs.readFileSync(binaries("earlier-form", "cert.pem"), "utf-8");
+  return Buffer.from(new crypto.X509Certificate(pem).raw);
+}, false);
+
+describe("the tool's own signature containers, earlier form: the serial number", () => {
+  it("finds the signer certificate although its serial was written without the leading zero", () => {
+    const certificate = Buffer.from(new crypto.X509Certificate(fs.readFileSync(binaries("earlier-form", "cert.pem"), "utf-8")).raw);
+    const samples = earlierFormSamples();
+    expect(samples.length).toBeGreaterThanOrEqual(4);
     for (const sample of samples) {
       const info = readSignedData(sample.der);
+      const sid = info.signers[0].sid;
+      expect("serial" in sid).toBe(true);
+      const serial = (sid as { serial: Buffer }).serial;
+      // The certificate's serial has its top bit set and so starts with a zero byte; the earlier signer record does not
+      expect(serial.length).toBe(16);
+      expect(serial[0] & 0x80).toBe(0x80);
       const found = findSignerCertificate(info, info.signers[0]);
       expect(found).not.toBeNull();
-      expect((found as Buffer).equals(scopeCertDer)).toBe(true);
-    }
-  });
-
-  it("verifies the signature over what each form signs", () => {
-    for (const sample of samples) {
-      const info = readSignedData(sample.der);
-      const certificate = findSignerCertificate(info, info.signers[0]) as Buffer;
-      expect(verifySignerSignature(info.signers[0], certificate, sample.signedMessage)).toBe("verified");
-    }
-  });
-
-  it("does not verify the signature over something else", () => {
-    for (const sample of samples) {
-      const info = readSignedData(sample.der);
-      const certificate = findSignerCertificate(info, info.signers[0]) as Buffer;
-      const other = Buffer.from(sample.signedMessage);
-      other[0] ^= 0xff;
-      expect(verifySignerSignature(info.signers[0], certificate, other)).toBe("failed");
-    }
-  });
-
-  it("reads the content types: Authenticode content for programs and installers, none for the Mac program", () => {
-    expect(readSignedData(samples[0].der).contentType).toBe(OID.spcIndirectData);
-    expect(readSignedData(samples[1].der).contentType).toBe(OID.spcIndirectData);
-    const mac = readSignedData(samples[2].der);
-    expect(mac.contentType).toBe(OID.data);
-    expect(mac.content).toBeUndefined();
-  });
-
-  it("gives the Authenticode content value bytes: they start with the content's first element and hold the stored digest", () => {
-    for (const sample of samples.slice(0, 2)) {
-      const info = readSignedData(sample.der);
-      expect(info.content).toBeDefined();
-      expect((info.content as Buffer).includes(sample.signedMessage)).toBe(true);
-      // contentDer is the element as encoded, so it is the value behind a tag and a length
-      expect((info.contentDer as Buffer).length).toBeGreaterThan((info.content as Buffer).length);
-      expect((info.contentDer as Buffer).subarray(-(info.content as Buffer).length).equals(info.content as Buffer)).toBe(true);
-    }
-  });
-
-  it("ignores bytes after the outer element, such as the zero padding of a PE certificate table", () => {
-    for (const sample of samples) {
-      const plain = readSignedData(sample.der);
-      const padded = readSignedData(Buffer.concat([sample.der, Buffer.alloc(7)]));
-      expect(padded.certificates.map((c: Buffer) => c.toString("hex"))).toEqual(plain.certificates.map((c: Buffer) => c.toString("hex")));
-      expect(padded.signers).toHaveLength(1);
+      expect((found as Buffer).equals(certificate)).toBe(true);
     }
   });
 });

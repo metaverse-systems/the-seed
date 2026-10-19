@@ -44,8 +44,16 @@ Windows installer exports:
 | `msiCheckSignature(filePath)` | Read back: `{ state: "none" \| "matches" \| "mismatch" \| "unreadable", storedDigest, computedDigest, detail }` |
 | `msiStripSignature(filePath)` | Remove the signature; true when something was removed |
 
+## Signature containers
+
+* `src/CmsBuilder.ts` builds the standard signature container (CMS SignedData with signed attributes) for Windows programs, installers and Mac programs from a certificate and a signing function; it reads nothing from files.
+* `src/CmsReader.ts` reads a container (standard or earlier form) and checks the signer's signature; `src/MachOVerifier.ts` applies it to each slice of a Mac program.
+
 ## Test helpers and fixtures
 
 * `test/helpers/CfbChecker.ts` is an independent TypeScript walker of the installer container (Node `crypto` SHA-256, children sorted by raw name bytes, signature streams excluded). It shares no code with `src/` and reads the values recorded in `test/fixtures/binaries/genuine/msi-reference.txt`.
 * `test/helpers/Universal.ts` assembles universal Mac programs from given slices (a 32-bit big-endian table, slices at `2^align` boundaries) for tests that need a partly signed or unsupported-slice program. `test/helpers/Command.ts` runs `signing verify` through `runCli` with a scratch configuration directory and a scratch `HOME`, capturing its output and exit status. Neither shares code with `src/`.
 * `test/fixtures/binaries/genuine/` holds the installer samples (`tiny.msi`, `tiny-v4.msi`, `tiny-osslsig-*.msi`, `nested.msi`, `legacy-the-seed-0.6.0.msi`) with their SHA-256 values in its `README.md`.
+* `test/helpers/IndependentCheck.ts` runs osslsigncode and openssl on signed files with an explicit child environment and writes edge-case certificates with openssl; it shares no code with `src/` and each check is skipped (and reported) when its tool is missing.
+* `test/CmsBuilder.test.ts` checks the container builder on buffers only; `test/SignatureInterop.test.ts` signs files with the tool and checks them with osslsigncode and openssl, including edge-case and fresh certificates and re-signing.
+* `test/fixtures/binaries/earlier-form/` holds a program, an installer and a universal Mac program signed in the earlier form, with the certificate that signed them and a `README.md` of how they were made and their SHA-256 values; the private key is not kept.

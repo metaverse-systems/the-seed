@@ -5,6 +5,7 @@ import path from "path";
 import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
 import { checkMachO } from "../src/MachOVerifier";
+import { EARLIER_FORM_NOTICE_MAC } from "../src/Trust";
 import type { MachOCheck, MachOSliceInfo } from "../src/MachOVerifier";
 import { checkMachO as checkWithIndependentChecker } from "./helpers/MachOChecker";
 import { expectPresent } from "./helpers/Assert";
@@ -374,9 +375,9 @@ describe("damage to the signature structure", () => {
     // Rebuild the SuperBlob with an additional entitlements blob (slot 5); the code directory has only
     // two special slots, so nothing covers it
     const blobs = layout.slots.map((s) => ({ type: s.type, data: signedArm64.subarray(layout.signature + s.offset, layout.signature + s.offset + s.length) }));
-    const extra = Buffer.alloc(12);
+    const extra = Buffer.alloc(8);
     extra.writeUInt32BE(0xfade7171, 0);
-    extra.writeUInt32BE(12, 4);
+    extra.writeUInt32BE(8, 4);
     blobs.push({ type: 5, data: extra });
     const headerSize = 12 + 8 * blobs.length;
     const total = headerSize + blobs.reduce((sum, blob) => sum + blob.data.length, 0);
@@ -569,6 +570,16 @@ describe("standard signed-attribute signatures made by openssl", () => {
     expect(check.slices[0].codeDirectories[0].pagesMismatched).toBe(report.slices[0].pagesMismatched);
   });
 
+  it("standard signed attributes made by another tool give no earlier-form notice", () => {
+    if (!optionalExternalCheck("openssl", haveOpenssl(), "openssl not found")) {
+      return;
+    }
+    const { bytes } = signWithOpenssl("ecdsa");
+    const check = checkMachO(bytes, tableOf(bytes));
+    expect(check.integrity.state).toBe("intact");
+    expect(check.warnings.filter((warning) => warning === EARLIER_FORM_NOTICE_MAC || /earlier form/i.test(warning))).toEqual([]);
+  });
+
   it("with one byte changed is invalid, and the independent checker lists a problem too", () => {
     if (!optionalExternalCheck("openssl", haveOpenssl(), "openssl not found")) {
       return;
@@ -597,5 +608,27 @@ describe("standard signed-attribute signatures made by openssl", () => {
 
     // The pages themselves are fine, which the independent checker confirms
     expect(checkWithIndependentChecker(bytes).problems).toEqual([]);
+  });
+});
+
+describe("the earlier form written by the tool", () => {
+  // The notice is a warning of the program as a whole: a universal program with two earlier-form slices gets it once.
+  it("the earlier-form universal fixture gives the notice exactly once", () => {
+    const bytes = fs.readFileSync(path.join(__dirname, "fixtures", "binaries", "earlier-form", "tiny-macho-universal"));
+    const slices = tableOf(bytes);
+    expect(slices).toHaveLength(2);
+    const check = checkMachO(bytes, slices);
+    expect(check.integrity.state).toBe("intact");
+    expect(check.warnings.filter((warning) => warning === EARLIER_FORM_NOTICE_MAC)).toHaveLength(1);
+    expect(check.warnings.filter((warning) => /earlier form/i.test(warning))).toHaveLength(1);
+  });
+
+  it("a program signed by the tool now gives no notice", async () => {
+    const scope = "@fresh";
+    const signing = await makeConfiguration("machoverifier-fresh-", scope);
+    const bytes = await signedCopy(signing, scope, "tiny-macho-universal");
+    const check = checkMachO(bytes, tableOf(bytes));
+    expect(check.integrity.state).toBe("intact");
+    expect(check.warnings.filter((warning) => /earlier form/i.test(warning))).toEqual([]);
   });
 });

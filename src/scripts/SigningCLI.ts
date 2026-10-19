@@ -595,6 +595,13 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
       console.log("signed, not checked or no signature; 2 not found or other error; 3 usage or");
       console.log("malformed manifest. Certificate chains, revocation, signing time and acceptance");
       console.log("by the platform's own verifier are not checked.");
+      console.log("\nsign writes standard signature containers (signed attributes, the signer's");
+      console.log("certificate). Checked with independent tools, the signer's certificate given");
+      console.log("as the trusted root: Windows programs and installers pass osslsigncode; each");
+      console.log("slice of a Mac program passes openssl's signed-data check over its code");
+      console.log("directory. Not checked with the platforms' own tools (signtool, WinVerifyTrust,");
+      console.log("the Windows Installer service, codesign, Gatekeeper), which may still refuse");
+      console.log("the certificate. Files signed by earlier versions should be signed again.");
       break;
   }
 };

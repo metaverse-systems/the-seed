@@ -1,10 +1,15 @@
 /**
- * Reads the CMS SignedData of a signature: the signer certificate and the signer's signature over its signed
- * attributes and content digest. This is the integrity half of trust decisions; whether the signer is trusted is
- * decided in Trust.ts. Unreadable input throws CmsDamaged, a form not handled throws CmsUnsupported.
+ * Reads the CMS SignedData of a signature with the @peculiar ASN.1 libraries: the signer certificate and the signer's
+ * signature over its signed attributes and content digest. Containers in the standard form and the earlier form
+ * (no signed attributes) are both read. This is the integrity half of trust decisions; whether the signer is trusted
+ * is decided in Trust.ts. Unreadable input throws CmsDamaged, a form not handled throws CmsUnsupported.
  */
 import crypto from "crypto";
+import * as asn1js from "asn1js";
 import * as x509 from "@peculiar/x509";
+import { AsnConvert, OctetString } from "@peculiar/asn1-schema";
+import { ContentInfo, SignedData, SignerInfo } from "@peculiar/asn1-cms";
+import { AlgorithmIdentifier, Certificate } from "@peculiar/asn1-x509";
 
 /** The bytes are not readable as the structure they should hold: truncated, wrong tags, lengths past the end. */
 export class CmsDamaged extends Error {
@@ -66,96 +71,63 @@ export interface SignedDataInfo {
   signers: SignerRecord[];
 }
 
-// ── DER reading ──────────────────────────────────────────────
+// ── exact bytes from the asn1js tree ─────────────────────────
 
-interface Element {
-  tag: number;
-  /** The element as encoded: tag, length and value. */
-  full: Buffer;
-  /** The value bytes. */
-  value: Buffer;
+/** The part of an asn1js element this reader uses: its tag, its encoding as read and its value block. */
+interface Node {
+  idBlock: { tagClass: number; tagNumber: number; blockLength: number };
+  lenBlock: { isIndefiniteForm: boolean; blockLength: number };
+  valueBeforeDecodeView: Uint8Array;
+  valueBlock: { value?: unknown };
 }
 
-/** Reads the element starting at `at` in `buffer`; every read is checked against the end of the buffer. */
-function readElement(buffer: Buffer, at: number): Element {
-  if (at < 0 || at + 2 > buffer.length) {
-    throw new CmsDamaged("signature data ends inside an element header");
-  }
-  const tag = buffer[at];
-  if ((tag & 0x1f) === 0x1f) {
-    throw new CmsDamaged("signature data holds a tag number that is not valid here");
-  }
-  const first = buffer[at + 1];
-  let length: number;
-  let header: number;
-  if (first < 0x80) {
-    length = first;
-    header = 2;
-  } else if (first === 0x80) {
-    throw new CmsUnsupported("signature data uses an indefinite length");
-  } else {
-    const count = first & 0x7f;
-    if (count > 6) {
-      throw new CmsDamaged("signature data holds a length that is too large");
-    }
-    if (at + 2 + count > buffer.length) {
-      throw new CmsDamaged("signature data ends inside a length");
-    }
-    length = 0;
-    for (let i = 0; i < count; i++) {
-      length = length * 256 + buffer[at + 2 + i];
-    }
-    header = 2 + count;
-  }
-  const end = at + header + length;
-  if (end > buffer.length) {
-    throw new CmsDamaged("signature data holds a length that runs past the end");
-  }
-  return { tag, full: buffer.subarray(at, end), value: buffer.subarray(at + header, end) };
+const TAG_CLASS_UNIVERSAL = 1;
+const TAG_CLASS_CONTEXT = 3;
+
+function childrenOf(node: Node): Node[] {
+  return node instanceof asn1js.Constructed ? (node.valueBlock.value as unknown as Node[]) : [];
 }
 
-function childrenOf(element: Element): Element[] {
-  const result: Element[] = [];
-  let at = 0;
-  while (at < element.value.length) {
-    const child = readElement(element.value, at);
-    result.push(child);
-    at += child.full.length;
-  }
-  return result;
+/** The element as encoded: tag, length and value. */
+function fullBytes(node: Node): Buffer {
+  return Buffer.from(node.valueBeforeDecodeView);
 }
 
-function expectTag(element: Element | undefined, tag: number, what: string): Element {
-  if (element === undefined || element.tag !== tag) {
-    throw new CmsDamaged(`signature data does not hold ${what} where it should`);
-  }
-  return element;
+/** The value bytes of an element, without tag and length. */
+function valueBytes(node: Node): Buffer {
+  return fullBytes(node).subarray(node.idBlock.blockLength + node.lenBlock.blockLength);
 }
 
-function decodeOid(element: Element): string {
-  const bytes = expectTag(element, 0x06, "an object identifier").value;
-  if (bytes.length === 0) {
-    throw new CmsDamaged("signature data holds an empty object identifier");
-  }
-  const parts: string[] = [];
-  let value = 0;
-  for (let i = 0; i < bytes.length; i++) {
-    value = value * 128 + (bytes[i] & 0x7f);
-    if ((bytes[i] & 0x80) === 0) {
-      if (parts.length === 0) {
-        const head = Math.min(Math.floor(value / 40), 2);
-        parts.push(String(head), String(value - head * 40));
-      } else {
-        parts.push(String(value));
-      }
-      value = 0;
-    }
-  }
-  return parts.join(".");
+function isContext(node: Node | undefined, tagNumber: number): node is Node {
+  return node !== undefined && node.idBlock.tagClass === TAG_CLASS_CONTEXT && node.idBlock.tagNumber === tagNumber;
 }
 
-function algorithmOid(element: Element | undefined): string {
-  return decodeOid(childrenOf(expectTag(element, 0x30, "an algorithm"))[0]);
+function findIndefinite(node: Node): boolean {
+  if (node.lenBlock.isIndefiniteForm) {
+    return true;
+  }
+  return childrenOf(node).some(findIndefinite);
+}
+
+function toArrayBuffer(bytes: Buffer): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length) as ArrayBuffer;
+}
+
+/** Decodes the first element of `bytes`; the decoder's failures are CmsDamaged. */
+function decodeElement(bytes: Buffer): { node: Node; length: number } {
+  const decoded = asn1js.fromBER(toArrayBuffer(bytes));
+  if (decoded.offset === -1) {
+    throw new CmsDamaged(`signature data cannot be decoded: ${decoded.result.error || "invalid encoding"}`);
+  }
+  return { node: decoded.result as unknown as Node, length: decoded.offset };
+}
+
+function parseTyped<T>(bytes: Buffer | ArrayBuffer, type: new () => T, what: string): T {
+  try {
+    return AsnConvert.parse(bytes, type);
+  } catch (err) {
+    throw new CmsDamaged(`signature data does not hold ${what} where it should: ${(err as Error).message}`);
+  }
 }
 
 // ── reading SignedData ───────────────────────────────────────
@@ -176,64 +148,59 @@ export function readSignedData(der: Buffer): SignedDataInfo {
 }
 
 function parseSignedData(der: Buffer): SignedDataInfo {
-  const contentInfo = expectTag(readElement(der, 0), 0x30, "a sequence");
-  const contentInfoParts = childrenOf(contentInfo);
-  if (decodeOid(contentInfoParts[0]) !== OID.signedData) {
+  const { node: root, length } = decodeElement(der);
+  if (findIndefinite(root)) {
+    throw new CmsUnsupported("signature data uses an indefinite length");
+  }
+  if (root.idBlock.tagClass !== TAG_CLASS_UNIVERSAL || root.idBlock.tagNumber !== 16) {
+    throw new CmsDamaged("signature data does not hold a sequence where it should");
+  }
+  const contentInfo = parseTyped(fullBytes(root).subarray(0, length), ContentInfo, "the content info");
+  if (contentInfo.contentType !== OID.signedData) {
     throw new CmsUnsupported("signature data is not of the signed-data type");
   }
-  const explicit = expectTag(contentInfoParts[1], 0xa0, "the signed data wrapper");
-  const signedData = expectTag(childrenOf(explicit)[0], 0x30, "the signed data");
-  const parts = childrenOf(signedData);
-  if (parts.length < 4) {
-    throw new CmsDamaged("signed data is missing parts");
-  }
-  expectTag(parts[0], 0x02, "a version");
-  expectTag(parts[1], 0x31, "the digest algorithms");
+  const signedData = parseTyped(contentInfo.content, SignedData, "the signed data");
 
-  const encapsulated = childrenOf(expectTag(parts[2], 0x30, "the encapsulated content"));
-  const info: SignedDataInfo = { contentType: decodeOid(encapsulated[0]), certificates: [], signers: [] };
-  if (encapsulated.length > 1) {
-    const wrapper = expectTag(encapsulated[1], 0xa0, "the content wrapper");
-    const element = childrenOf(wrapper)[0];
-    if (element !== undefined) {
-      info.content = Buffer.from(element.value);
-      info.contentDer = Buffer.from(element.full);
-    }
+  // The tree gives the bytes that must not be re-encoded
+  const signedDataNode = childrenOf(childrenOf(root)[1])[0];
+  const parts = childrenOf(signedDataNode);
+  const info: SignedDataInfo = { contentType: signedData.encapContentInfo.eContentType, certificates: [], signers: [] };
+
+  const wrapper = childrenOf(parts[2])[1];
+  const content = wrapper === undefined ? undefined : childrenOf(wrapper)[0];
+  if (content !== undefined) {
+    info.contentDer = fullBytes(content);
+    info.content = valueBytes(content);
+  }
+  const list = parts.find((part) => isContext(part, 0));
+  if (list !== undefined) {
+    info.certificates = readCertificateList(list);
   }
 
-  let index = 3;
-  while (index < parts.length - 1) {
-    const part = parts[index];
-    if (part.tag === 0xa0) {
-      info.certificates = readCertificateList(part);
-    } else if (part.tag !== 0xa1) {
-      throw new CmsDamaged("signed data holds an element that is not valid here");
-    }
-    index++;
-  }
-
-  const signerSet = expectTag(parts[parts.length - 1], 0x31, "the signer records");
-  const records = childrenOf(signerSet);
-  if (records.length === 0) {
+  const signerNodes = childrenOf(parts[parts.length - 1]);
+  if (signedData.signerInfos.length === 0) {
     throw new CmsUnsupported("signature data holds no signer record");
   }
-  if (records.length > 1) {
+  if (signedData.signerInfos.length > 1) {
     throw new CmsUnsupported("signature data holds more than one signer record");
   }
-  info.signers = records.map(readSignerRecord);
+  info.signers = [readSignerRecord(signedData.signerInfos[0], signerNodes[0])];
   return info;
 }
 
 /** The list is a [0] IMPLICIT SET OF certificate, or the tool's earlier form where the list is wrapped in a SET. */
-function readCertificateList(list: Element): Buffer[] {
+function readCertificateList(list: Node): Buffer[] {
   const certificates: Buffer[] = [];
   for (const child of childrenOf(list)) {
-    if (child.tag === 0x30) {
-      certificates.push(Buffer.from(child.full));
-    } else if (child.tag === 0x31) {
+    if (child.idBlock.tagClass !== TAG_CLASS_UNIVERSAL) {
+      continue;
+    }
+    if (child.idBlock.tagNumber === 16) {
+      certificates.push(fullBytes(child));
+    } else if (child.idBlock.tagNumber === 17) {
       for (const inner of childrenOf(child)) {
-        if (inner.tag === 0x30) {
-          certificates.push(Buffer.from(inner.full));
+        if (inner.idBlock.tagClass === TAG_CLASS_UNIVERSAL && inner.idBlock.tagNumber === 16) {
+          certificates.push(fullBytes(inner));
         }
       }
     }
@@ -241,60 +208,51 @@ function readCertificateList(list: Element): Buffer[] {
   return certificates;
 }
 
-function readSignerRecord(record: Element): SignerRecord {
-  const fields = childrenOf(expectTag(record, 0x30, "a signer record"));
-  if (fields.length < 5) {
-    throw new CmsDamaged("a signer record is missing parts");
-  }
-  expectTag(fields[0], 0x02, "a version");
-
+function readSignerRecord(record: SignerInfo, node: Node): SignerRecord {
+  const fields = childrenOf(node);
   let sid: SignerRecord["sid"];
-  if (fields[1].tag === 0x30) {
-    const issuerAndSerial = childrenOf(fields[1]);
-    sid = { issuer: Buffer.from(expectTag(issuerAndSerial[0], 0x30, "an issuer").full), serial: Buffer.from(expectTag(issuerAndSerial[1], 0x02, "a serial number").value) };
-  } else if (fields[1].tag === 0x80) {
-    sid = { subjectKeyIdentifier: Buffer.from(fields[1].value) };
+  if (record.sid.issuerAndSerialNumber !== undefined) {
+    const [issuer, serial] = childrenOf(fields[1]);
+    sid = { issuer: fullBytes(issuer), serial: valueBytes(serial) };
+  } else if (record.sid.subjectKeyIdentifier !== undefined) {
+    sid = { subjectKeyIdentifier: Buffer.from(record.sid.subjectKeyIdentifier.buffer) };
   } else {
     throw new CmsDamaged("a signer record holds an identifier that is not valid");
   }
 
-  let next = 2;
-  const digestAlgorithm = algorithmOid(fields[next++]);
-
   let signedAttributes: SignerRecord["signedAttributes"];
-  if (fields[next] !== undefined && fields[next].tag === 0xa0) {
-    signedAttributes = readSignedAttributes(fields[next]);
-    next++;
-  }
-  const signatureAlgorithm = algorithmOid(fields[next++]);
-  const signature = Buffer.from(expectTag(fields[next++], 0x04, "a signature").value);
-
-  let hasNestedSignature = false;
-  if (fields[next] !== undefined && fields[next].tag === 0xa1) {
-    for (const attribute of childrenOf(fields[next])) {
-      const attributeParts = childrenOf(expectTag(attribute, 0x30, "an attribute"));
-      if (decodeOid(attributeParts[0]) === OID.nestedSignature) {
-        hasNestedSignature = true;
+  if (record.signedAttrs !== undefined) {
+    const rawNode = fields.find((field) => isContext(field, 0));
+    if (rawNode === undefined) {
+      throw new CmsDamaged("a signer record holds signed attributes that cannot be located");
+    }
+    signedAttributes = { raw: fullBytes(rawNode) };
+    for (const attribute of record.signedAttrs) {
+      const value = attribute.attrValues[0];
+      if (value === undefined) {
+        continue;
+      }
+      if (attribute.attrType === OID.contentType) {
+        const oid = decodeElement(Buffer.from(value)).node as unknown;
+        if (!(oid instanceof asn1js.ObjectIdentifier)) {
+          throw new CmsDamaged("signature data does not hold an object identifier where it should");
+        }
+        signedAttributes.contentType = oid.valueBlock.toString();
+      } else if (attribute.attrType === OID.messageDigest) {
+        signedAttributes.messageDigest = Buffer.from(parseTyped(Buffer.from(value), OctetString, "a message digest").buffer);
       }
     }
   }
 
-  return { sid, digestAlgorithm, signedAttributes, signatureAlgorithm, signature, hasNestedSignature };
-}
-
-function readSignedAttributes(element: Element): NonNullable<SignerRecord["signedAttributes"]> {
-  const result: NonNullable<SignerRecord["signedAttributes"]> = { raw: Buffer.from(element.full) };
-  for (const attribute of childrenOf(element)) {
-    const attributeParts = childrenOf(expectTag(attribute, 0x30, "an attribute"));
-    const oid = decodeOid(attributeParts[0]);
-    const values = childrenOf(expectTag(attributeParts[1], 0x31, "attribute values"));
-    if (oid === OID.contentType && values.length > 0) {
-      result.contentType = decodeOid(values[0]);
-    } else if (oid === OID.messageDigest && values.length > 0) {
-      result.messageDigest = Buffer.from(expectTag(values[0], 0x04, "a message digest").value);
-    }
-  }
-  return result;
+  const hasNestedSignature = (record.unsignedAttrs ?? []).some((attribute) => attribute.attrType === OID.nestedSignature);
+  return {
+    sid,
+    digestAlgorithm: record.digestAlgorithm.algorithm,
+    signedAttributes,
+    signatureAlgorithm: record.signatureAlgorithm.algorithm,
+    signature: Buffer.from(record.signature.buffer),
+    hasNestedSignature,
+  };
 }
 
 // ── finding the signer's certificate ─────────────────────────
@@ -307,20 +265,20 @@ function stripLeadingZeros(bytes: Buffer): string {
   return bytes.subarray(start).toString("hex");
 }
 
-/** The issuer element and serial number value of a certificate, as encoded. */
-function issuerAndSerialOf(certificate: Buffer): { issuer: Buffer; serial: Buffer } | null {
-  const tbs = childrenOf(expectTag(readElement(certificate, 0), 0x30, "a certificate"))[0];
-  const fields = childrenOf(expectTag(tbs, 0x30, "the certificate body"));
-  let index = 0;
-  if (fields[index] !== undefined && fields[index].tag === 0xa0) {
-    index++;
-  }
-  const serial = fields[index];
-  const issuer = fields[index + 2];
-  if (serial === undefined || serial.tag !== 0x02 || issuer === undefined || issuer.tag !== 0x30) {
+/** The issuer element and serial number value of a certificate, as encoded; null when the certificate has neither. */
+export function issuerAndSerialOf(certificate: Buffer): { issuer: Buffer; serial: Buffer } | null {
+  const parsed = AsnConvert.parse(certificate, Certificate);
+  if (parsed.tbsCertificateRaw === undefined) {
     return null;
   }
-  return { issuer: issuer.full, serial: serial.value };
+  const fields = childrenOf(decodeElement(Buffer.from(parsed.tbsCertificateRaw)).node);
+  const index = isContext(fields[0], 0) ? 1 : 0;
+  const serial = fields[index];
+  const issuer = fields[index + 2];
+  if (serial === undefined || issuer === undefined) {
+    return null;
+  }
+  return { issuer: fullBytes(issuer), serial: valueBytes(serial) };
 }
 
 /** The certificate the signer record names, wherever it is in the list; null when none matches. */
@@ -413,20 +371,23 @@ export function verifySignerSignature(signer: SignerRecord, certificate: Buffer,
  */
 export function readSpcDigest(content: Buffer): { algorithm: string; digest: Buffer } {
   try {
-    const parts: Element[] = [];
+    const parts: Node[] = [];
     let at = 0;
     while (at < content.length) {
-      const child = readElement(content, at);
-      parts.push(child);
-      at += child.full.length;
+      const { node, length } = decodeElement(content.subarray(at));
+      parts.push(node);
+      at += length;
     }
     if (parts.length < 2) {
       throw new CmsDamaged("the signed content is missing parts");
     }
-    const digestInfo = childrenOf(expectTag(parts[1], 0x30, "the digest"));
+    const [algorithm, digest] = childrenOf(parts[1]);
+    if (algorithm === undefined || digest === undefined || !(digest instanceof asn1js.OctetString)) {
+      throw new CmsDamaged("signature data does not hold a digest where it should");
+    }
     return {
-      algorithm: algorithmOid(digestInfo[0]),
-      digest: Buffer.from(expectTag(digestInfo[1], 0x04, "a digest").value),
+      algorithm: parseTyped(fullBytes(algorithm), AlgorithmIdentifier, "an algorithm").algorithm,
+      digest: valueBytes(digest),
     };
   } catch (err) {
     if (err instanceof CmsDamaged || err instanceof CmsUnsupported) {
