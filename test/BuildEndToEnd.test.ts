@@ -78,14 +78,87 @@ class TriggerSink extends TailSink {
     if (this.fired) {
       return;
     }
-    // A marker may be split between two chunks
-    this.seen = (this.seen + chunk.toString()).slice(-4096);
-    if (this.seen.includes(this.marker)) {
+    // The marker may be anywhere in the chunk or split between two chunks: search the
+    // end of the earlier output together with the whole chunk, then keep only the end
+    const text = this.seen + chunk.toString();
+    if (text.includes(this.marker)) {
       this.fired = true;
       this.onLine();
+      return;
     }
+    this.seen = text.slice(-4096);
   }
 }
+
+/** Every path under `dir` with its type, size, mode, SHA-256 of the contents and link text. */
+function prefixSnapshot(dir: string): string[] {
+  const out: string[] = [];
+  const walk = (current: string): void => {
+    const st = fs.lstatSync(current);
+    const rel = path.relative(dir, current);
+    if (st.isSymbolicLink()) {
+      out.push(`${rel} link ${fs.readlinkSync(current)}`);
+    } else if (st.isDirectory()) {
+      out.push(`${rel} dir ${(st.mode & 0o7777).toString(8)}`);
+      for (const name of fs.readdirSync(current).sort()) {
+        walk(path.join(current, name));
+      }
+    } else {
+      const digest = crypto.createHash("sha256").update(fs.readFileSync(current)).digest("hex");
+      out.push(`${rel} file ${st.size} ${(st.mode & 0o7777).toString(8)} ${digest}`);
+    }
+  };
+  if (fs.existsSync(dir)) {
+    walk(dir);
+  }
+  return out;
+}
+
+describe("TriggerSink", () => {
+  const marker = "libtool: install:";
+
+  it("fires on a marker near the start of a chunk larger than 4096 characters", () => {
+    let fired = 0;
+    const sink = new TriggerSink(marker, () => fired++);
+
+    sink.stdout(Buffer.from(marker + " cp a b\n" + "x".repeat(10000)));
+
+    expect(fired).toBe(1);
+  });
+
+  it("fires on a marker split between two chunks, and only once", () => {
+    let fired = 0;
+    const sink = new TriggerSink(marker, () => fired++);
+
+    sink.stderr(Buffer.from("noise libtool: ins"));
+    expect(fired).toBe(0);
+    sink.stderr(Buffer.from("tall: cp a b\n"));
+    sink.stdout(Buffer.from(marker));
+
+    expect(fired).toBe(1);
+  });
+});
+
+describe("prefixSnapshot", () => {
+  it("tells a file from a same-length, same-mode replacement and records link targets", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "snapshot-test-"));
+    try {
+      const file = path.join(dir, "tiny");
+      fs.writeFileSync(file, "aaaa", { mode: 0o755 });
+      fs.symlinkSync("tiny", path.join(dir, "link"));
+      const before = prefixSnapshot(dir);
+
+      fs.writeFileSync(file, "bbbb");
+      const after = prefixSnapshot(dir);
+
+      expect(after).not.toEqual(before);
+      expect(prefixSnapshot(dir)).toEqual(after);
+      expect(after.join("\n")).toContain("link tiny");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("BuildEndToEnd", () => {
   let root: string;
@@ -1038,29 +1111,6 @@ describe("BuildEndToEnd", () => {
         output: new TailSink(),
         log: (line) => lines.push(line),
       });
-    }
-
-    /** Every path under `dir` with its type, size, mode and link text. */
-    function prefixSnapshot(dir: string): string[] {
-      const out: string[] = [];
-      const walk = (current: string): void => {
-        const st = fs.lstatSync(current);
-        const rel = path.relative(dir, current);
-        if (st.isSymbolicLink()) {
-          out.push(`${rel} link ${fs.readlinkSync(current)}`);
-        } else if (st.isDirectory()) {
-          out.push(`${rel} dir ${(st.mode & 0o7777).toString(8)}`);
-          for (const name of fs.readdirSync(current).sort()) {
-            walk(path.join(current, name));
-          }
-        } else {
-          out.push(`${rel} file ${st.size} ${(st.mode & 0o7777).toString(8)}`);
-        }
-      };
-      if (fs.existsSync(dir)) {
-        walk(dir);
-      }
-      return out;
     }
 
     it("an unreadable key fails the build at sign and leaves the prefix unchanged", async () => {

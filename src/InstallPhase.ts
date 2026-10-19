@@ -381,8 +381,25 @@ function temporaryName(dest: string): string {
   return path.join(path.dirname(dest), "." + path.basename(dest) + ".the-seed-" + random);
 }
 
-/** Creates `dest` with exactly `mode` when missing; an existing directory keeps its mode. */
-function ensureDirectory(dest: string, mode: number): void {
+/** What placement did in the prefix, so a failure can put every part back. */
+interface PlacementJournal {
+  /** Undo steps in the order they were recorded */
+  undo: PlacementUndo[];
+  /** Directories created by this placement, parents before children, with the staged mode to apply last */
+  created: { dest: string; mode: number | null }[];
+}
+
+type PlacementUndo =
+  | { kind: "restore"; backup: string; dest: string }
+  | { kind: "remove"; dest: string }
+  | { kind: "rmdir"; dest: string };
+
+/**
+ * Creates `dest` when missing, owner-writable so its children can be placed;
+ * the staged mode is applied after the children are in. An existing directory
+ * keeps its mode. Missing ancestors are created and recorded too.
+ */
+function ensureDirectory(dest: string, mode: number, journal: PlacementJournal): void {
   const existing = lstatOrNull(dest);
   if (existing !== null) {
     if (existing.isDirectory() || (existing.isSymbolicLink() && isDirectory(dest))) {
@@ -390,12 +407,83 @@ function ensureDirectory(dest: string, mode: number): void {
     }
     throw placeError(dest, "it exists and is not a directory");
   }
+  const missing: string[] = [];
+  for (let current = dest; lstatOrNull(current) === null; current = path.dirname(current)) {
+    missing.unshift(current);
+  }
+  for (const dir of missing) {
+    try {
+      fs.mkdirSync(dir);
+      journal.undo.push({ kind: "rmdir", dest: dir });
+      if (dir === dest) {
+        fs.chmodSync(dir, (mode & 0o7777) | 0o700);
+      }
+    } catch (err) {
+      throw placeError(dir, err);
+    }
+    journal.created.push({ dest: dir, mode: dir === dest ? mode & 0o7777 : null });
+  }
+}
+
+/**
+ * Keeps what is at `dest` before it is replaced or removed: a second name for
+ * it (or, when the file system cannot link, the file moved aside) in the same
+ * directory. A missing `dest` is recorded so a failure removes what replaces it.
+ */
+function keepOriginal(dest: string, journal: PlacementJournal): void {
+  const existing = lstatOrNull(dest);
+  if (existing === null) {
+    journal.undo.push({ kind: "remove", dest });
+    return;
+  }
+  if (existing.isDirectory()) {
+    throw placeError(dest, "it exists and is a directory");
+  }
+  const backup = temporaryName(dest);
   try {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.mkdirSync(dest);
-    fs.chmodSync(dest, mode & 0o7777);
+    try {
+      fs.linkSync(dest, backup);
+    } catch {
+      fs.renameSync(dest, backup);
+    }
   } catch (err) {
     throw placeError(dest, err);
+  }
+  journal.undo.push({ kind: "restore", backup, dest });
+}
+
+/** Puts the prefix back as it was: originals restored, new entries removed, last change first. */
+function rollbackPlacement(journal: PlacementJournal): void {
+  for (const dir of journal.created) {
+    try {
+      fs.chmodSync(dir.dest, (fs.lstatSync(dir.dest).mode & 0o7777) | 0o700);
+    } catch {
+      // Already gone
+    }
+  }
+  for (const step of journal.undo.slice().reverse()) {
+    try {
+      if (step.kind === "restore") {
+        fs.renameSync(step.backup, step.dest);
+        // Renaming one name of a file onto another name of the same file does nothing
+        fs.rmSync(step.backup, { force: true });
+      } else if (step.kind === "remove") {
+        fs.rmSync(step.dest, { force: true });
+      } else {
+        fs.rmdirSync(step.dest);
+      }
+    } catch {
+      // Best effort: the remaining steps still run
+    }
+  }
+}
+
+/** The placement completed: the kept originals are not needed. */
+function discardOriginals(journal: PlacementJournal): void {
+  for (const step of journal.undo) {
+    if (step.kind === "restore") {
+      fs.rmSync(step.backup, { force: true });
+    }
   }
 }
 
@@ -472,16 +560,39 @@ function checkPlacement(tree: StagedTree, prefixPath: (relPath: string) => strin
 }
 
 /**
- * Places the staged tree into the prefix: directories are created with their
- * staged mode when missing, files and links are moved over what is there,
- * hard-link groups stay hard links, and the signature files written into the
- * stage after it was read are placed beside the names they belong to. A
- * signature file the stage no longer has for a name is removed from the
- * prefix. Files in the prefix that the stage does not contain are left alone.
- * Returns the number of files and links placed. Errors read
- * `cannot place <path>: <reason>`.
+ * Places the staged tree into the prefix: directories are created when
+ * missing, files and links are moved over what is there, hard-link groups stay
+ * hard links, and the signature files in the stage beside the names of the
+ * groups are placed with them. A signature file the stage has no longer for a
+ * name is removed from the prefix. Files in the prefix that the stage does not
+ * contain are left alone. The staged mode of a created directory is applied
+ * once its contents are in. When any step fails, everything placed is undone
+ * and the prefix is as it was. Returns the number of files and links placed.
+ * Errors read `cannot place <path>: <reason>`.
  */
 export function placeStaged(tree: StagedTree, groups: OutputGroup[]): number {
+  checkPlacement(tree, (relPath) => path.join(tree.prefix, relPath));
+  const journal: PlacementJournal = { undo: [], created: [] };
+  try {
+    const placed = placeEntries(tree, groups, journal);
+    for (const dir of journal.created.slice().reverse()) {
+      if (dir.mode !== null) {
+        try {
+          fs.chmodSync(dir.dest, dir.mode);
+        } catch (err) {
+          throw placeError(dir.dest, err);
+        }
+      }
+    }
+    discardOriginals(journal);
+    return placed;
+  } catch (err) {
+    rollbackPlacement(journal);
+    throw err;
+  }
+}
+
+function placeEntries(tree: StagedTree, groups: OutputGroup[], journal: PlacementJournal): number {
   const stagePath = (relPath: string) => path.join(tree.root, relPath);
   const prefixPath = (relPath: string) => path.join(tree.prefix, relPath);
 
@@ -495,17 +606,24 @@ export function placeStaged(tree: StagedTree, groups: OutputGroup[]): number {
   const stagedPaths = new Set(tree.entries.map((entry) => entry.relPath));
   let placed = 0;
 
-  checkPlacement(tree, prefixPath);
   const rootStat = fs.lstatSync(tree.root);
-  ensureDirectory(tree.prefix, rootStat.mode);
+  // Files cannot be moved out of a staged directory the owner may not write
+  for (const dir of [{ relPath: "", mode: rootStat.mode }, ...tree.entries.filter((entry) => entry.type === "dir")]) {
+    const full = dir.relPath === "" ? tree.root : stagePath(dir.relPath);
+    if ((dir.mode & 0o700) !== 0o700) {
+      fs.chmodSync(full, (dir.mode & 0o7777) | 0o700);
+    }
+  }
+  ensureDirectory(tree.prefix, rootStat.mode, journal);
 
   for (const entry of tree.entries) {
     const source = stagePath(entry.relPath);
     const dest = prefixPath(entry.relPath);
     if (entry.type === "dir") {
-      ensureDirectory(dest, entry.mode);
+      ensureDirectory(dest, entry.mode, journal);
       continue;
     }
+    keepOriginal(dest, journal);
     const group = entry.type === "file" ? groupByName.get(source) : undefined;
     const first = group === undefined ? undefined : placedHardLink.get(group);
     if (group !== undefined && first !== undefined) {
@@ -524,23 +642,25 @@ export function placeStaged(tree: StagedTree, groups: OutputGroup[]): number {
     for (const name of group.names) {
       const sigSource = name + ".sig";
       if (stagedPaths.has(path.relative(tree.root, sigSource))) {
-        // The install step staged this signature itself and the entry loop placed it
+        // The stage lists this signature and the entry loop placed it
         continue;
       }
       const sigDest = path.join(tree.prefix, path.relative(tree.root, sigSource));
       const sigStat = lstatOrNull(sigSource);
       if (sigStat !== null) {
+        keepOriginal(sigDest, journal);
         moveEntry(sigSource, sigDest, { type: sigStat.isSymbolicLink() ? "symlink" : "file", mode: sigStat.mode });
         placed++;
         continue;
       }
-      try {
-        const stale = lstatOrNull(sigDest);
-        if (stale !== null && !stale.isDirectory()) {
-          fs.unlinkSync(sigDest);
+      const stale = lstatOrNull(sigDest);
+      if (stale !== null && !stale.isDirectory()) {
+        keepOriginal(sigDest, journal);
+        try {
+          fs.rmSync(sigDest, { force: true });
+        } catch (err) {
+          throw placeError(sigDest, err);
         }
-      } catch (err) {
-        throw placeError(sigDest, err);
       }
     }
   }
@@ -810,6 +930,33 @@ function removeStaleSignatures(groups: OutputGroup[]): void {
   }
 }
 
+/**
+ * Removes the embedded signature of every Windows output of the groups, for a
+ * build that is not signed: an unchanged incremental build can hold files
+ * that an earlier signed build signed, and an unsigned build must not ship
+ * them as signed. Hard-link names are made links again when the file was replaced.
+ */
+function removeEmbeddedSignatures(groups: OutputGroup[]): void {
+  const signing = new Signing();
+  for (const group of groups) {
+    const mode = fs.statSync(group.file).mode & 0o7777;
+    const changed = (mode & 0o200) === 0;
+    if (changed) {
+      fs.chmodSync(group.file, mode | 0o200);
+    }
+    try {
+      signing.removeEmbeddedSignature(group.file);
+    } catch (err) {
+      throw new Error("cannot remove the embedded signature of " + group.display + ": " + reasonOf(err));
+    } finally {
+      if (changed) {
+        fs.chmodSync(group.file, mode);
+      }
+    }
+    restoreHardLinks(group);
+  }
+}
+
 // ── The phase ───────────────────────────────────────────────
 
 /** Removes a directory tree, making directories writable first when a mode stops the removal. */
@@ -951,6 +1098,9 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
     if (signingResult.kind === "unsigned") {
       try {
         removeStaleSignatures(buildTree);
+        if (target === "windows") {
+          removeEmbeddedSignatures(processed);
+        }
       } catch (err) {
         return { status: "failed", step: "sign", message: reasonOf(err) };
       }
@@ -962,6 +1112,8 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
     }
     let installed: number;
     try {
+      // Stripping and signing changed the stage (signature files written or removed), so place what it holds now
+      tree = readStage(stageDir, options.configPrefix, target, options.projectDir);
       installed = placeStaged(tree, groups);
     } catch (err) {
       return { status: "failed", step: "place", message: reasonOf(err) };

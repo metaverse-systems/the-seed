@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -933,6 +934,125 @@ describe("placeStaged across file systems", () => {
 
     expect(fs.readlinkSync(path.join(s.prefix, "lib", "libx.so.0"))).toBe("libx.so.0.0.0");
     expect(fs.readdirSync(path.join(s.prefix, "lib")).filter((name) => name.includes(".the-seed-"))).toEqual([]);
+  });
+});
+
+
+// ── placeStaged (rollback and directory modes) ──────────────
+
+describe("placeStaged rollback", () => {
+  /** Every path under `dir` with its type, mode, content digest and link text. */
+  function contentSnapshot(dir: string): string[] {
+    const out: string[] = [];
+    const walk = (current: string): void => {
+      const st = fs.lstatSync(current);
+      const rel = path.relative(dir, current);
+      if (st.isSymbolicLink()) {
+        out.push(`${rel} link ${fs.readlinkSync(current)}`);
+      } else if (st.isDirectory()) {
+        out.push(`${rel} dir ${octal(st.mode)}`);
+        for (const name of fs.readdirSync(current).sort()) {
+          walk(path.join(current, name));
+        }
+      } else {
+        const digest = crypto.createHash("sha256").update(fs.readFileSync(current)).digest("hex");
+        out.push(`${rel} file ${octal(st.mode)} ${digest}`);
+      }
+    };
+    walk(dir);
+    return out;
+  }
+
+  /** A stage that replaces three prefix entries and adds a directory, and a prefix that holds the old ones. */
+  function stageAndPrefix(): TestStage {
+    const s = makeStage("native");
+    writeFile(path.join(s.root, "bin", "tiny"), elfHeader(2, "NEW tiny"), 0o755);
+    writeFile(path.join(s.root, "lib", "libx.so.0.0.0"), elfHeader(3, "NEW lib"), 0o755);
+    fs.symlinkSync("libx.so.0.0.0", path.join(s.root, "lib", "libx.so.0"));
+    writeFile(path.join(s.root, "share", "doc", "readme"), "NEW readme\n", 0o644);
+    writeFile(path.join(s.prefix, "bin", "tiny"), elfHeader(2, "OLD tiny"), 0o755);
+    writeFile(path.join(s.prefix, "bin", "tiny.sig"), "OLD signature", 0o644);
+    writeFile(path.join(s.prefix, "lib", "libx.so.0.0.0"), elfHeader(3, "OLD lib"), 0o755);
+    fs.symlinkSync("elsewhere", path.join(s.prefix, "lib", "libx.so.0"));
+    return s;
+  }
+
+  it("leaves the prefix as it was when a later rename into the prefix fails", () => {
+    const s = stageAndPrefix();
+    const tree = readStage(s.stageDir, s.configPrefix, "native");
+    const groups = groupOutputs(tree);
+    const before = contentSnapshot(s.configPrefix);
+    const realRename = fs.renameSync;
+    let calls = 0;
+    jest.spyOn(fs, "renameSync").mockImplementation((from, to) => {
+      if (String(to).startsWith(s.prefix)) {
+        calls++;
+        if (calls === 3) {
+          throw Object.assign(new Error("EIO: injected failure"), { code: "EIO" });
+        }
+      }
+      return realRename(from, to);
+    });
+
+    expect(() => placeStaged(tree, groups)).toThrow(/^cannot place .+: /);
+
+    expect(calls).toBeGreaterThanOrEqual(3);
+    // bin/tiny and the first library entry were replaced before the failure
+    expect(contentSnapshot(s.configPrefix)).toEqual(before);
+    expect(fs.readdirSync(path.join(s.prefix, "bin")).sort()).toEqual(["tiny", "tiny.sig"]);
+  });
+
+  it("undoes replacements, new directories and a removed signature when the last step fails", () => {
+    const s = stageAndPrefix();
+    const tree = readStage(s.stageDir, s.configPrefix, "native");
+    const groups = groupOutputs(tree);
+    const before = contentSnapshot(s.configPrefix);
+    const realChmod = fs.chmodSync;
+    const chmodSpy = jest.spyOn(fs, "chmodSync").mockImplementation((file, mode) => {
+      // Applying the staged mode of the new directory is the last thing placement does
+      if (String(file) === path.join(s.prefix, "share", "doc")) {
+        throw Object.assign(new Error("EIO: injected failure"), { code: "EIO" });
+      }
+      return realChmod(file, mode);
+    });
+
+    expect(() => placeStaged(tree, groups)).toThrow(/^cannot place .+: /);
+    chmodSpy.mockRestore();
+
+    expect(contentSnapshot(s.configPrefix)).toEqual(before);
+    expect(fs.existsSync(path.join(s.prefix, "share"))).toBe(false);
+    expect(fs.readFileSync(path.join(s.prefix, "bin", "tiny.sig"), "utf8")).toBe("OLD signature");
+  });
+
+  it("removes the original kept for each replaced file when placement succeeds", () => {
+    const s = stageAndPrefix();
+    const tree = readStage(s.stageDir, s.configPrefix, "native");
+
+    placeStaged(tree, groupOutputs(tree));
+
+    expect(fs.readFileSync(path.join(s.prefix, "bin", "tiny")).equals(elfHeader(2, "NEW tiny"))).toBe(true);
+    for (const dir of ["bin", "lib"]) {
+      expect(fs.readdirSync(path.join(s.prefix, dir)).filter((name) => name.includes(".the-seed-"))).toEqual([]);
+    }
+    expect(fs.existsSync(path.join(s.prefix, "bin", "tiny.sig"))).toBe(false);
+  });
+});
+
+describe("placeStaged directory modes", () => {
+  it("places the contents of a staged read-only directory and applies its mode afterwards", () => {
+    if (!optionalExternalCheck("install-phase-read-only-directory", process.getuid?.() !== 0, "running as root, which can write into any directory")) return;
+    const s = makeStage("native");
+    writeFile(path.join(s.root, "share", "locked", "data.txt"), "locked data\n", 0o444);
+    fs.chmodSync(path.join(s.root, "share", "locked"), 0o555);
+    fs.mkdirSync(path.join(s.prefix, "share"), { recursive: true });
+    fs.chmodSync(path.join(s.prefix, "share"), 0o711);
+    const tree = readStage(s.stageDir, s.configPrefix, "native");
+
+    placeStaged(tree, groupOutputs(tree));
+
+    expect(fs.readFileSync(path.join(s.prefix, "share", "locked", "data.txt"), "utf8")).toBe("locked data\n");
+    expect(fs.statSync(path.join(s.prefix, "share", "locked")).mode & 0o7777).toBe(0o555);
+    expect(fs.statSync(path.join(s.prefix, "share")).mode & 0o7777).toBe(0o711);
   });
 });
 
@@ -1910,7 +2030,7 @@ describe("runInstallPhase", () => {
 
   // ── Failures, notices and stale signatures ────────────────
 
-  /** Every path under `dir` with its type, size, mode and link text, for before/after comparisons. */
+  /** Every path under `dir` with its type, size, mode, content digest and link text, for before/after comparisons. */
   function snapshot(dir: string): string[] {
     const out: string[] = [];
     const walk = (current: string): void => {
@@ -1924,7 +2044,8 @@ describe("runInstallPhase", () => {
           walk(path.join(current, name));
         }
       } else {
-        out.push(`${rel} file ${st.size} ${octal(st.mode)}`);
+        const digest = crypto.createHash("sha256").update(fs.readFileSync(current)).digest("hex");
+        out.push(`${rel} file ${st.size} ${octal(st.mode)} ${digest}`);
       }
     };
     walk(dir);
@@ -2217,6 +2338,61 @@ describe("runInstallPhase", () => {
     expect(fs.readFileSync(path.join(c.prefix, "lib", "libtinygreet.dll.a")).equals(arArchive)).toBe(true);
     expect(fs.readFileSync(path.join(c.prefix, "share", "tiny", "stray")).equals(elfHeader(2))).toBe(true);
     expect(sigFilesUnder(c.prefix)).toEqual([]);
+  });
+
+  // ── The stage as stripping and signing left it ───────────
+
+  function loadAddon(): { peHasEmbeddedSignature(file: string): boolean } {
+    return require("../native/build/Release/dependency_lister.node");
+  }
+
+  it("installs a windows stage that holds a stray <name>.exe.sig, which embedded signing removes", async () => {
+    const c = makeCase("windows");
+    markSigned(c);
+    payload(c, "bin/tiny.exe", fs.readFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe")));
+    payload(c, "bin/tiny.exe.sig", "a stray detached signature", 0o644);
+    fakeMake(c);
+
+    const result = expectCompleted(await runInstallPhase(options(c, { target: "windows", configDir: certDir })));
+
+    expect(result.report.signed.map((entry) => entry.form)).toEqual(["embedded"]);
+    expect(loadAddon().peHasEmbeddedSignature(path.join(c.prefix, "bin", "tiny.exe"))).toBe(true);
+    expect(sigFilesUnder(c.prefix)).toEqual([]);
+  });
+
+  it("fails at place before anything is replaced when the prefix holds a directory where a signature is written", async () => {
+    const c = makeCase("native");
+    markSigned(c);
+    prefixWithOldFile(c);
+    writeFile(path.join(c.prefix, "bin", "tiny.sig", "inner"), "prefix file\n", 0o644);
+    payload(c, "bin/tiny", elfHeader(2, "new tiny"));
+    fakeMake(c);
+    const before = snapshot(c.configPrefix);
+
+    const failed = expectFailedAt(await runInstallPhase(options(c, { configDir: certDir })), "place");
+
+    expect(failed.message).toContain(path.join(c.prefix, "bin", "tiny.sig"));
+    expect(snapshot(c.configPrefix)).toEqual(before);
+    expect(fs.existsSync(path.join(c.configPrefix, ".the-seed-staging"))).toBe(false);
+  });
+
+  it.each([false, true])("removes the embedded signature of every windows output of an unsigned build (release %s)", async (release) => {
+    const c = makeCase("windows");
+    const signedCopy = path.join(c.base, "tiny-signed.exe");
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), signedCopy);
+    await new Signing(certDir).signFileAuthenticode(signedCopy, scope);
+    expect(loadAddon().peHasEmbeddedSignature(signedCopy)).toBe(true);
+    const signedBytes = fs.readFileSync(signedCopy);
+    payload(c, "bin/tiny.exe", signedBytes);
+    const built = path.join(c.projectDir, "src", ".libs", "tiny.exe");
+    writeFile(built, signedBytes, 0o755);
+    fakeMake(c);
+
+    const result = expectCompleted(await runInstallPhase(options(c, { target: "windows", release, configDir: c.emptyConfigDir })));
+
+    expect(result.report.outcome.kind).toBe("unsigned");
+    expect(loadAddon().peHasEmbeddedSignature(path.join(c.prefix, "bin", "tiny.exe"))).toBe(false);
+    expect(loadAddon().peHasEmbeddedSignature(built)).toBe(false);
   });
 
   // ── All or nothing: cancellation and refusals ─────────────
