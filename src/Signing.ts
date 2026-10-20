@@ -393,6 +393,9 @@ class Signing {
    * Generate a self-signed X.509 certificate with ECDSA P-256 key.
    * Reads name, email, and org from config.json for the certificate subject.
    * Stores cert.pem and key.pem in configDir/signing/.
+   * The validity is a whole number of days from 1 to MAX_VALIDITY_DAYS and defaults to
+   * DEFAULT_VALIDITY_DAYS; any other value throws a SigningError with code "invalid-validity"
+   * before anything is written.
    */
   async createCert(options?: CertOptions): Promise<CertInfo> {
     if (!options?.scope) {
@@ -400,7 +403,14 @@ class Signing {
     }
     const scope = options.scope;
     const subject = this._getSubjectFromConfig(scope);
-    const validityDays = options?.validityDays || 365;
+    const requested = options.validityDays;
+    if (requested !== undefined && (!Number.isSafeInteger(requested) || requested < 1 || requested > MAX_VALIDITY_DAYS)) {
+      throw new SigningError(
+        "invalid-validity",
+        `Invalid validity ${String(requested)} days; expected a whole number of days from 1 to ${MAX_VALIDITY_DAYS}.`
+      );
+    }
+    const validityDays = requested ?? DEFAULT_VALIDITY_DAYS;
 
     // Set the crypto provider for @peculiar/x509 to use Node.js webcrypto
     const webcrypto = crypto.webcrypto as unknown as Crypto;

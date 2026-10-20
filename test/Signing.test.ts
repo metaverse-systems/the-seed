@@ -650,6 +650,51 @@ describe("Signing without the native component", () => {
   });
 });
 
+// Interfaces fixed here where the contracts leave them open:
+//   - an invalid `validityDays` is a `SigningError` with code `invalid-validity` whose message contains
+//     the value as `String(value)`, and nothing is written under the signing directory
+//   - `undefined` selects the default; `0` is invalid (it is not replaced by the default)
+describe("createCert validity days", () => {
+  let dir: string;
+  let signing: Signing;
+
+  beforeEach(() => {
+    dir = createTempDir();
+    writeConfig(dir, { name: "Test User", email: "test@example.com" });
+    signing = new Signing(dir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const days = (info: CertInfo): number => Math.round((info.notAfter.getTime() - info.notBefore.getTime()) / (1000 * 60 * 60 * 24));
+
+  it.each([NaN, 0, -5, 1.5, 3651, Infinity])("refuses %p and writes nothing", async (value) => {
+    const error = await signingErrorOf(() => signing.createCert({ scope: "@test", validityDays: value }));
+    expect(error.code).toBe("invalid-validity");
+    expect(error.message).toContain(String(value));
+    expect(fs.existsSync(signing.scopeCertPath("@test"))).toBe(false);
+    expect(fs.existsSync(signing.scopeKeyPath("@test"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "signing"))).toBe(false);
+  });
+
+  it("uses 365 days when the validity is not given", async () => {
+    expect(days(await signing.createCert({ scope: "@test" }))).toBe(365);
+    expect(days(await signing.createCert({ scope: "@test", validityDays: undefined }))).toBe(365);
+  });
+
+  it.each([1, 3650])("accepts %p days", async (value) => {
+    expect(days(await signing.createCert({ scope: "@test", validityDays: value }))).toBe(value);
+  });
+
+  it("exports the validity limits from the package index", () => {
+    const exported = Index as unknown as { DEFAULT_VALIDITY_DAYS?: number; MAX_VALIDITY_DAYS?: number };
+    expect(exported.DEFAULT_VALIDITY_DAYS).toBe(365);
+    expect(exported.MAX_VALIDITY_DAYS).toBe(3650);
+  });
+});
+
 describe("validity constants", () => {
   // Looked up on the module so that this file compiles whether or not the exports exist.
   const constants = SigningModule as unknown as { DEFAULT_VALIDITY_DAYS?: number; MAX_VALIDITY_DAYS?: number };

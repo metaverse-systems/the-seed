@@ -1,8 +1,8 @@
 import Config from "./Config";
-import Scopes from "./Scopes";
+import Scopes, { ScopeNameError, validateScopeName } from "./Scopes";
 import Package from "./Package";
 import Build from "./Build";
-import Signing, { SigningError, UnsupportedSigningKey } from "./Signing";
+import Signing, { DEFAULT_VALIDITY_DAYS, MAX_VALIDITY_DAYS, SigningError, UnsupportedSigningKey } from "./Signing";
 import type { SigningErrorCode } from "./Signing";
 import type { SignedContent } from "./CmsBuilder";
 import Installer from "./Installer";
@@ -17,6 +17,10 @@ export {
   SigningError,
   Config,
   Scopes,
+  ScopeNameError,
+  validateScopeName,
+  DEFAULT_VALIDITY_DAYS,
+  MAX_VALIDITY_DAYS,
   Package,
   Build,
   Signing,

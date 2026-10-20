@@ -37,7 +37,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import Signing from "../src/Signing";
-import { runTheSeed, RunOptions, RunResult } from "./helpers/RunCli";
+import { runTheSeed, snapshotTree, RunOptions, RunResult } from "./helpers/RunCli";
 import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 import { COMMANDS } from "../src/cli/Commands";
 
@@ -596,6 +596,94 @@ describe("end to end", () => {
         if (saved === undefined) delete process.env.THE_SEED_DEBUG;
         else process.env.THE_SEED_DEBUG = saved;
       }
+    });
+  });
+
+  describe("values", () => {
+    const rangeMessage = (value: string) =>
+      `Invalid value "${value}" for --validity-days; expected a whole number of days from 1 to 3650.`;
+    const certDays = (env: Env): number => {
+      const info = new Signing(env.configDir).getCertInfo("@a");
+      if (info === null) throw new Error("no certificate was created");
+      return Math.round((info.notAfter.getTime() - info.notBefore.getTime()) / (1000 * 60 * 60 * 24));
+    };
+
+    it.each(["abc", "12abc", "0", "-5", "1.5", "3651"])("create-cert --validity-days %s is 3 with the range message, no prompt and nothing written", async (value) => {
+      const env = makeEnv(["@a"]);
+      const before = snapshotTree(env.home);
+      for (const words of [["--validity-days", value], [`--validity-days=${value}`]]) {
+        const run = await exec(["signing", "create-cert", "--scope", "@a", ...words], env, { interactive: false });
+        expect(run.status).toBe(3);
+        expect(run.stdout).toBe("");
+        expect(run.stderr).toContain(rangeMessage(value));
+        expect(errorLines(run)).toHaveLength(1);
+        expect(run.prompts).toEqual([]);
+        expect(snapshotTree(env.home)).toEqual(before);
+      }
+    });
+
+    it("create-cert with an empty --validity-days is 3, whether written with = or followed by another option", async () => {
+      const env = makeEnv(["@a"]);
+      const before = snapshotTree(env.home);
+      for (const words of [["--validity-days="], ["--validity-days", "--force"]]) {
+        const run = await exec(["signing", "create-cert", "--scope", "@a", ...words], env, { interactive: false });
+        expect(run.status).toBe(3);
+        expect(run.stdout).toBe("");
+        expect(run.stderr).toMatch(/--validity-days needs a value\.|Invalid value "" for --validity-days; expected a whole number of days from 1 to 3650\./);
+        expect(run.prompts).toEqual([]);
+        expect(snapshotTree(env.home)).toEqual(before);
+      }
+    });
+
+    it("create-cert without --validity-days makes a 365-day certificate", async () => {
+      const env = makeEnv(["@a"]);
+      const run = await exec(["signing", "create-cert", "--scope", "@a"], env, { interactive: false });
+      expect(run.status).toBe(0);
+      expect(certDays(env)).toBe(365);
+    });
+
+    it("create-cert --validity-days 3650 makes a 3650-day certificate", async () => {
+      const env = makeEnv(["@a"]);
+      const run = await exec(["signing", "create-cert", "--scope", "@a", "--validity-days", "3650"], env, { interactive: false });
+      expect(run.status).toBe(0);
+      expect(certDays(env)).toBe(3650);
+    });
+
+    it("template component @s/a/b is 3 with the form message", async () => {
+      const env = makeEnv();
+      const run = await exec(["template", "component", "@s/a/b"], env, { interactive: false });
+      expect(run.status).toBe(3);
+      expect(run.stdout).toBe("");
+      expect(run.stderr).toContain("Invalid value \"@s/a/b\" for <scope>/<name>; expected a scope and a name such as @my-scope/hello.");
+    });
+
+    it.each([["build", "mac"], ["dependencies", "check", "mac"]])("%s ... mac is 3, listing native and windows", async (...words) => {
+      const run = await exec(words, makeEnv(), { interactive: false });
+      expect(run.status).toBe(3);
+      expect(run.stdout).toBe("");
+      expect(run.stderr).toContain("\"mac\"");
+      expect(run.stderr).toContain("expected native or windows.");
+    });
+
+    it("scopes add asks again for an empty name and a name with a space, then adds the scope", async () => {
+      const env = makeEnv();
+      const run = await exec(["scopes", "add"], env, {
+        interactive: true,
+        answers: [{ scopeName: "a", authorName: "Ann", authorEmail: "ann@example.com", authorURL: "" }],
+      });
+      expect(run.status).toBe(0);
+      expect(run.prompts).toHaveLength(1);
+      const questions = run.prompts[0] as Array<{ name: string; validate?: (input: string) => string | boolean }>;
+      const nameQuestion = questions.find((question) => question.name === "scopeName");
+      const validate = nameQuestion?.validate;
+      expect(validate).toBeDefined();
+      // As inquirer would: an answer is accepted only when validate returns true; otherwise it asks again.
+      const accepted = ["", "a b", "a"].find((answer) => validate?.(answer) === true);
+      expect(accepted).toBe("a");
+      expect(typeof validate?.("")).toBe("string");
+      expect(typeof validate?.("a b")).toBe("string");
+      const stored = JSON.parse(fs.readFileSync(path.join(env.configDir, "config.json"), "utf-8")) as { scopes: Record<string, unknown> };
+      expect(Object.keys(stored.scopes)).toEqual(["@a"]);
     });
   });
 
