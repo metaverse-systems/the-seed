@@ -203,6 +203,37 @@ describe("parseArguments", () => {
   });
 });
 
+describe("install stage selection", () => {
+  type StageOutcome = { stage: string; passed: boolean };
+  const summariseStages = (outcomes: StageOutcome[]): string =>
+    (runChecks as unknown as { summariseStages: (outcomes: StageOutcome[]) => string }).summariseStages(outcomes);
+
+  it("selects only the install stage when it is named alone", () => {
+    expect(runChecks.parseArguments(["install"])).toEqual({ error: null, stages: ["install"], jestArgs: [] });
+  });
+
+  it("keeps install out of the default set", () => {
+    expect(runChecks.parseArguments([]).stages).toEqual(["typecheck", "lint", "unit"]);
+    expect(runChecks.STAGES).toContain("install");
+  });
+
+  it("keeps the runner's stage order when install is named with another stage", () => {
+    expect(runChecks.parseArguments(["unit", "install"]).stages).toEqual(["unit", "install"]);
+    expect(runChecks.parseArguments(["install", "lint"]).stages).toEqual(["lint", "install"]);
+  });
+
+  it("includes install PASS or FAIL in the summary only when the stage ran", () => {
+    const withoutInstall = summariseStages([
+      { stage: "typecheck", passed: true },
+      { stage: "lint", passed: true },
+      { stage: "unit", passed: true },
+    ]);
+    expect(withoutInstall).not.toContain("install");
+    expect(summariseStages([{ stage: "unit", passed: true }, { stage: "install", passed: true }])).toContain("install PASS");
+    expect(summariseStages([{ stage: "unit", passed: true }, { stage: "install", passed: false }])).toContain("install FAIL");
+  });
+});
+
 describe("validateKnownGaps", () => {
   let base: string;
 

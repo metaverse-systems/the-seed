@@ -146,12 +146,18 @@ jobs:
             npm test -- unit || exit 1
           done
 
+      - name: Install check
+        if: ${{ !cancelled() && steps.addon-load.outcome == 'success' }}
+        id: install-check
+        run: npm test -- install
+
       - name: Summary
         if: always()
         env:
           TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
           LINT_OUTCOME: ${{ steps.lint.outcome }}
           TESTS_OUTCOME: ${{ steps.tests.outcome }}
+          INSTALL_OUTCOME: ${{ steps.install-check.outcome }}
         run: |
           {
             echo "## Check results"
@@ -161,6 +167,7 @@ jobs:
             echo "| Type check | ${TYPECHECK_OUTCOME:-skipped} |"
             echo "| Style check | ${LINT_OUTCOME:-skipped} |"
             echo "| Tests | ${TESTS_OUTCOME:-skipped} |"
+            echo "| Install check | ${INSTALL_OUTCOME:-skipped} |"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ -f test-results/jest.json ]; then
             node scripts/run-checks.js --summary test-results/jest.json > "$RUNNER_TEMP/summary.txt"

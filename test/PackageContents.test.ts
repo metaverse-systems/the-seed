@@ -58,7 +58,7 @@ function listPackedEntries(): string[] {
     npm_config_cache: cache,
     npm_config_update_notifier: "false",
   };
-  const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+  const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts", "--silent"], {
     cwd: packageRoot,
     env,
     encoding: "utf8",
@@ -137,5 +137,23 @@ describe("package contents", () => {
     const entries = listPackedEntries();
     expect(entries.filter((entry) => entry.startsWith("native/build/"))).toEqual([]);
     expect(entries.filter((entry) => entry.startsWith("test-results/"))).toEqual([]);
+  });
+
+  test("the lifecycle scripts are declared and the existing scripts are unchanged", () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    const scripts = manifest.scripts;
+    expect(scripts.install).toBe("node native/build.js --install");
+    expect(scripts.prepare).toBe("npm run build");
+    expect(scripts["build-addon"]).toBe("node native/build.js");
+    expect(scripts.prepack).toMatch(/^node -e /);
+    expect(scripts.prepack).toContain("dist");
+    expect(scripts.prepack).toContain("rmSync");
+    expect(scripts.typecheck).toBe("node scripts/run-checks.js typecheck");
+    expect(scripts.lint).toBe("node scripts/run-checks.js lint");
+    expect(scripts["lint-fix"]).toBe("node ./node_modules/eslint/bin/eslint.js --ext .ts src test --fix");
+    expect(scripts.test).toBe("node scripts/run-checks.js");
+    expect(scripts.build).toBe("tsc && node -e \"require('fs').chmodSync('dist/scripts/the-seed.js', 0o755)\"");
   });
 });
