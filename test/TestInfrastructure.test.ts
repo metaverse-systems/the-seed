@@ -1,4 +1,5 @@
 import fs from "fs";
+import crypto from "crypto";
 import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
@@ -12,6 +13,7 @@ import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
 import { toolEnv } from "./helpers/IndependentCheck";
 import { toolEnv as nativeToolEnv } from "./helpers/NativeTree";
 import { elfImage } from "./helpers/ElfImage";
+import { withoutNativeComponent, nativeComponentPath, fileDigest } from "./helpers/NativeAbsent";
 import { writeProject, linkModule, readBound, onRead } from "./helpers/ScratchProjects";
 
 // Expected shapes of the runner's pure functions, as exercised here:
@@ -1072,5 +1074,96 @@ describe("scratch helpers", () => {
     const plain = path.join(dir, "node_modules", "plain");
     expect(fs.lstatSync(plain).isSymbolicLink()).toBe(true);
     expect(fs.realpathSync(plain)).toBe(fs.realpathSync(target));
+  });
+});
+
+describe("native absence helper", () => {
+  let scratch: string;
+
+  beforeEach(() => {
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), "native-absent-"));
+  });
+
+  afterEach(() => {
+    jest.dontMock(nativeComponentPath);
+    fs.rmSync(scratch, { recursive: true, force: true });
+  });
+
+  function loadComponent(): unknown {
+    return require("../native/build/Release/dependency_lister.node");
+  }
+
+  function thrownBy(action: () => unknown): NodeJS.ErrnoException {
+    try {
+      action();
+    } catch (error) {
+      return error as NodeJS.ErrnoException;
+    }
+    throw new Error("expected the load to throw");
+  }
+
+  it("imports nothing from the source tree", () => {
+    const lines = fs
+      .readFileSync(rel("test", "helpers", "NativeAbsent.ts"), "utf8")
+      .split("\n")
+      .filter((line) => /^\s*import\b|\brequire\(|^\s*}?\s*from\s/.test(line));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(line).not.toMatch(/src\/|\.\.\/\.\./);
+    }
+  });
+
+  it("names the component path the source modules resolve", () => {
+    expect(nativeComponentPath).toBe(rel("native", "build", "Release", "dependency_lister.node"));
+  });
+
+  it("throws MODULE_NOT_FOUND for the component in absent mode", () => {
+    const error = thrownBy(() => withoutNativeComponent(loadComponent));
+    expect(error.code).toBe("MODULE_NOT_FOUND");
+    expect(error.message).toContain("Cannot find module");
+  });
+
+  it("throws the shared library error without that code in fails-to-load mode", () => {
+    const error = thrownBy(() => withoutNativeComponent(loadComponent, "fails-to-load"));
+    expect(error.message).toBe("libthe-seed.so.1: cannot open shared object file: No such file or directory");
+    expect(error.code).toBeUndefined();
+  });
+
+  it("returns the value the load function returns", () => {
+    const value = { answer: 42 };
+    expect(withoutNativeComponent(() => value)).toBe(value);
+    expect(withoutNativeComponent(() => value, "fails-to-load")).toBe(value);
+  });
+
+  it("absent mode applies whether or not the component exists", () => {
+    expect(thrownBy(() => withoutNativeComponent(loadComponent)).code).toBe("MODULE_NOT_FOUND");
+  });
+
+  it("loads the real component again after the mock is removed", () => {
+    expect(thrownBy(() => withoutNativeComponent(loadComponent)).code).toBe("MODULE_NOT_FOUND");
+    jest.dontMock(nativeComponentPath);
+    let real: unknown;
+    let failure: NodeJS.ErrnoException | null = null;
+    try {
+      real = loadComponent();
+    } catch (error) {
+      failure = error as NodeJS.ErrnoException;
+    }
+    // Where the component is not built the real require fails with the loader's own error, not the mock's.
+    if (failure === null) {
+      expect(real).toBeTruthy();
+    } else {
+      expect(failure.message).not.toBe("libthe-seed.so.1: cannot open shared object file: No such file or directory");
+      expect(failure.message).toContain("dependency_lister.node");
+    }
+  });
+
+  it("fileDigest equals the SHA-256 hex of the bytes", () => {
+    const file = path.join(scratch, "data.bin");
+    const bytes = Buffer.from([0, 1, 2, 3, 250, 251, 252, 253, 254, 255]);
+    fs.writeFileSync(file, bytes);
+    expect(fileDigest(file)).toBe(crypto.createHash("sha256").update(bytes).digest("hex"));
+    fs.writeFileSync(file, Buffer.alloc(0));
+    expect(fileDigest(file)).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
   });
 });
