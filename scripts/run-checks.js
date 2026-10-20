@@ -517,6 +517,11 @@ function installStage() {
     }
   };
   const combined = (result) => result.stdout + result.stderr;
+  const finish = () => {
+    const differences = compareRealHome(before, snapshotRealHome(realHome));
+    differences.forEach((difference) => console.log("REAL HOME CHANGED: " + difference));
+    return failures.length === 0 && differences.length === 0;
+  };
 
   const makeHome = (name, prefix) => {
     const home = path.join(root, "home-" + name);
@@ -556,7 +561,7 @@ function installStage() {
     const tarballs = fs.readdirSync(packDir).filter((name) => name.endsWith(".tgz"));
     if (pack.status !== 0 || tarballs.length !== 1) {
       fail("pack", "npm pack exited " + pack.status + " and produced " + tarballs.length + " tarballs", combined(pack));
-      return false;
+      return finish();
     }
     const tarball = path.join(packDir, tarballs[0]);
     const listing = runCommand("tar", ["tzf", tarball], {});
@@ -709,9 +714,7 @@ function installStage() {
     fs.rmSync(root, { recursive: true, force: true });
   }
 
-  const differences = compareRealHome(before, snapshotRealHome(realHome));
-  differences.forEach((difference) => console.log("REAL HOME CHANGED: " + difference));
-  return failures.length === 0 && differences.length === 0;
+  return finish();
 }
 
 function runStage(name, jestArgs) {
