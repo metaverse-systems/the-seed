@@ -526,7 +526,7 @@ The bare word "recursive" after the target is deprecated; it still works for now
 warning. Use --recursive instead.
 ```
 
-Building needs a target (`native` or `windows`), except that `the-seed build` alone, optionally with `--jobs`, rebuilds the current project: `make` and the install phase, without reconfiguring. A misspelled option, `--parallel` without `--recursive`, an invalid or repeated `--parallel` or `--jobs` value, an option given without a target (`the-seed build --release`) and an unknown target are usage errors (status 3) reported before anything is built. A project directory without a `package.json`, or a build step that fails, ends with status 2 and 1 (see [Exit statuses](#exit-statuses)). The options may come before the target.
+Building needs a target (`native` or `windows`), except that `the-seed build` alone, optionally with `--jobs`, rebuilds the current project: `make` and the install phase, without reconfiguring. A misspelled option, `--parallel` without `--recursive`, an invalid or repeated `--parallel` or `--jobs` value, an option given without a target (`the-seed build --release`) and an unknown target are usage errors (status 3) reported before anything is built. A build step that fails, or a recursive build whose projects cannot be ordered or read, ends with status 1 (see [Exit statuses](#exit-statuses)). The options may come before the target.
 
 | Option | Description |
 |--------|-------------|

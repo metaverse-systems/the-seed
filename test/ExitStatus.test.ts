@@ -547,6 +547,17 @@ describe("end to end", () => {
     });
   });
 
+  describe("package", () => {
+    it("package with a project directory that does not exist is 2, with one Error line and nothing written", async () => {
+      const env = makeEnv();
+      const before = snapshotTree(env.cwd);
+      const run = await exec(["package", "out", "missing-project"], env);
+      expect(run.status).toBe(2);
+      expect(errorLines(run)).toEqual(["Error: Directory not found: missing-project"]);
+      expect(snapshotTree(env.cwd)).toEqual(before);
+    });
+  });
+
   describe("dependencies", () => {
     it("install with a failing step is 1", async () => {
       jest.mocked(Dependencies.checkLibEcs).mockReturnValue(false);
