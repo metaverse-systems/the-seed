@@ -4,8 +4,8 @@ import os from "os";
 import { execFileSync } from "child_process";
 import Config from "../src/Config";
 import Installer, { sanitizeId, generateUpgradeCode, InstallerConfig } from "../src/Installer";
-import { ScriptArgsType } from "../src/types";
 import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
+import { runTheSeed, snapshotTree } from "./helpers/RunCli";
 
 // Mock child_process for wixl/which detection
 jest.mock("child_process", () => ({
@@ -578,6 +578,56 @@ describe("Installer", () => {
         expect(mockedExecFileSync).not.toHaveBeenCalledWith("wixl", expect.anything(), expect.anything());
       });
     });
+  });
+});
+
+// `installer windows` chooses its signing scope before it generates anything. Choices: the configuration has
+// the scopes @a and @b; the project is a scratch project with a dist/ directory; "nothing generated" is a
+// snapshot of the project directory (no .wxs, no .msi, dist/ unchanged) and of the configuration directory.
+describe("installer windows --scope", () => {
+  let root: string;
+  let configDir: string;
+  let projectDir: string;
+
+  beforeEach(() => {
+    root = createTempDir();
+    configDir = path.join(root, "config");
+    fs.mkdirSync(configDir);
+    const scopes: Record<string, { author: { name: string; email: string; url: string } }> = {};
+    for (const scope of ["@a", "@b"]) {
+      scopes[scope] = { author: { name: "Signer " + scope, email: "signer@example.com", url: "" } };
+    }
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(root, "prefix"), scopes }));
+    projectDir = createProjectDir(root, { name: "my-game", version: "1.0.0", author: "Dev" });
+    createDistDir(projectDir, ["game.exe", "libengine.dll"]);
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("--scope @nope is refused with status 2 naming it and listing the configured scopes, before anything is generated", async () => {
+    const before = [snapshotTree(projectDir), snapshotTree(configDir)];
+
+    const run = await runTheSeed(["installer", "windows", "--scope", "@nope"], { home: root, configDir, cwd: projectDir });
+
+    expect(run.status).toBe(2);
+    expect(run.stderr).toContain("@nope");
+    expect(run.stderr).toContain("@a, @b");
+    expect(run.prompts).toEqual([]);
+    expect(fs.readdirSync(projectDir).filter((entry) => entry.endsWith(".wxs") || entry.endsWith(".msi"))).toEqual([]);
+    expect([snapshotTree(projectDir), snapshotTree(configDir)]).toEqual(before);
+  });
+
+  it("two scopes, not interactive and no --scope is a usage error naming --scope, with nothing written", async () => {
+    const before = [snapshotTree(projectDir), snapshotTree(configDir)];
+
+    const run = await runTheSeed(["installer", "windows"], { home: root, configDir, cwd: projectDir, interactive: false });
+
+    expect(run.status).toBe(3);
+    expect(run.stderr).toContain("--scope");
+    expect(run.prompts).toEqual([]);
+    expect([snapshotTree(projectDir), snapshotTree(configDir)]).toEqual(before);
   });
 });
 

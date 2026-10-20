@@ -3,6 +3,8 @@ import path from "path";
 import os from "os";
 import Config from "../src/Config";
 import Template from "../src/Template";
+import { execSync } from "child_process";
+import { runTheSeed, snapshotTree } from "./helpers/RunCli";
 
 jest.mock("child_process", () => ({
   execSync: jest.fn()
@@ -184,4 +186,76 @@ describe("test Template", () => {
       fs.rmSync(tmpDir, { recursive: true });
     });
   });
+});
+
+// `<scope>/<name>` is read by the command-line parser, and the package is created in the current directory.
+// Choices: the configuration has the scope @s; "npm init" is replaced by a function that writes an empty
+// package.json in the directory it is given; the working directory and the home are scratch directories.
+describe("template command line", () => {
+  let root: string;
+  let configDir: string;
+  let cwd: string;
+  const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
+
+  beforeEach(() => {
+    root = createTempDir();
+    configDir = path.join(root, "the-seed");
+    cwd = path.join(root, "work");
+    fs.mkdirSync(configDir);
+    fs.mkdirSync(cwd);
+    const scopes = { "@s": { author: { name: "S Author", email: "s@example.com", url: "https://example.com" } } };
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(root, "prefix"), scopes }));
+    mockedExecSync.mockReset();
+    mockedExecSync.mockImplementation(((command: string, options?: { cwd?: string }) => {
+      fs.writeFileSync(path.join(options?.cwd ?? ".", "package.json"), "{}");
+      return Buffer.from("");
+    }) as unknown as typeof execSync);
+    jest.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const packageNameIn = (dir: string): string => JSON.parse(fs.readFileSync(path.join(dir, "package.json")).toString()).name;
+
+  it("component @s/hello creates ./hello in the working directory for the scope @s", async () => {
+    const run = await runTheSeed(["template", "component", "@s/hello"], { home: root, configDir, cwd, interactive: false });
+
+    expect(run.status).toBe(0);
+    expect(run.prompts).toEqual([]);
+    expect(fs.existsSync(path.join(cwd, "hello", "src", "hello.hpp"))).toBe(true);
+    expect(packageNameIn(path.join(cwd, "hello"))).toBe("@s/hello");
+  });
+
+  it("component s/hello (without the @) is the scope @s", async () => {
+    const run = await runTheSeed(["template", "component", "s/hello"], { home: root, configDir, cwd, interactive: false });
+
+    expect(run.status).toBe(0);
+    expect(packageNameIn(path.join(cwd, "hello"))).toBe("@s/hello");
+  });
+
+  for (const kind of ["system", "program"]) {
+    it(`${kind} @s/hello creates ./hello in the working directory`, async () => {
+      const run = await runTheSeed(["template", kind, "@s/hello"], { home: root, configDir, cwd, interactive: false });
+
+      expect(run.status).toBe(0);
+      expect(fs.existsSync(path.join(cwd, "hello", "src", "hello.cpp"))).toBe(true);
+    });
+  }
+
+  for (const form of ["@s/", "@s", "@s/a/b", "@s/a b"]) {
+    it(`component ${JSON.stringify(form)} is a usage error with the form message and nothing created`, async () => {
+      const before = [snapshotTree(cwd), snapshotTree(configDir)];
+
+      const run = await runTheSeed(["template", "component", form], { home: root, configDir, cwd, interactive: false });
+
+      expect(run.status).toBe(3);
+      expect(run.stdout).toBe("");
+      expect(run.stderr).toContain(`Invalid value "${form}" for <scope>/<name>; expected a scope and a name such as @my-scope/hello.`);
+      expect(run.prompts).toEqual([]);
+      expect([snapshotTree(cwd), snapshotTree(configDir)]).toEqual(before);
+    });
+  }
 });

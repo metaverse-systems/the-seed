@@ -1,32 +1,12 @@
 import path from "path";
 import inquirer from "inquirer";
 import Signing, { MISSING_FILE_REASON } from "../Signing";
-import Config from "../Config";
 import { exitStatusOf } from "../Trust";
-import { IntegrityResult, MachOSliceResult, ScriptArgsType, TrustResult, VerifyResult, VerifyStatus } from "../types";
-
-/**
- * Prompt the user to select a scope. If only one scope exists, auto-selects it.
- * Returns the selected scope name, or null if no scopes are configured.
- */
-async function promptForScope(signing: Signing): Promise<string | null> {
-  const scopes = signing.getScopes();
-  if (scopes.length === 0) {
-    return null;
-  }
-  if (scopes.length === 1) {
-    return scopes[0];
-  }
-  const answer = await inquirer.prompt([
-    {
-      type: "list",
-      name: "scope",
-      message: "Which scope should be used?",
-      choices: scopes,
-    },
-  ]);
-  return answer.scope;
-}
+import { CertInfo, IntegrityResult, MachOSliceResult, TrustResult, VerifyResult, VerifyStatus } from "../types";
+import { CliContext, ParsedCommand } from "../cli/CommandSpec";
+import { CliError, HandlerResult, UsageError } from "../cli/ExitStatus";
+import { chooseScope } from "../cli/ScopeChoice";
+import { forceHint } from "../cli/Hints";
 
 /** The words after "Trust:" in a report. */
 function describeTrust(trust: TrustResult): string {
@@ -138,167 +118,218 @@ function fileReport(signing: Signing, result: VerifyResult): string[] {
   return lines;
 }
 
-const SigningCLI = async (scriptConfig: ScriptArgsType) => {
-  const command = scriptConfig.args[3];
-  const signing = new Signing(scriptConfig.configDir);
+/** The message of a thrown value. */
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
-  // Helper to parse flags from args
-  const hasFlag = (flag: string): boolean => scriptConfig.args.includes(flag);
-  const getFlagValue = (flag: string): string | undefined => {
-    const idx = scriptConfig.args.indexOf(flag);
-    if (idx !== -1 && idx + 1 < scriptConfig.args.length) {
-      return scriptConfig.args[idx + 1];
+/** Today's exit status for a failed `sign`, chosen from the message until the errors are typed. */
+function signStatus(message: string): number {
+  if (message.includes("No signing certificate")) return 1;
+  if (message.includes("expired")) return 2;
+  if (message.includes("No binary files")) return 4;
+  return 3;
+}
+
+/** Stops with the "--force" usage error when a certificate exists and may not be replaced without asking. */
+async function confirmReplace(signing: Signing, scope: string, parsed: ParsedCommand, context: CliContext): Promise<boolean> {
+  if (!signing.hasCert(scope) || parsed.options.force === true) {
+    return true;
+  }
+  if (!context.interactive) {
+    throw new UsageError(forceHint(scope), { argument: "--force", command: "", usage: "" });
+  }
+  const { overwrite } = await inquirer.prompt([
+    {
+      type: "confirm",
+      name: "overwrite",
+      message: "A signing certificate already exists. Overwrite?",
+      default: false,
+    },
+  ]);
+  if (!overwrite) {
+    console.log("Aborted. Existing certificate unchanged.");
+    return false;
+  }
+  return true;
+}
+
+/** Prints the details printed after a certificate is created or imported. */
+function printStored(signing: Signing, heading: string, certInfo: CertInfo, withIssuer: boolean): void {
+  const validFrom = certInfo.notBefore.toISOString().split("T")[0];
+  const validTo = certInfo.notAfter.toISOString().split("T")[0];
+  console.log(heading);
+  console.log(`  Subject:     ${signing._formatSubject(certInfo.subject)}`);
+  if (withIssuer) {
+    console.log(`  Issuer:      ${certInfo.issuer}`);
+  }
+  console.log(`  Fingerprint: ${certInfo.fingerprint}`);
+  console.log(`  Valid:        ${validFrom} to ${validTo}`);
+  console.log(`  Stored:       ${certInfo.certPath}`);
+}
+
+async function verifyCommand(signing: Signing, parsed: ParsedCommand): Promise<HandlerResult> {
+  const targetPath = parsed.positionals.path as string;
+  const certFiles = (parsed.options.cert as string[] | undefined) ?? [];
+
+  // Supplied certificates are read before the target is examined; an unusable one stops the command.
+  let trust;
+  try {
+    trust = signing.loadTrust(certFiles.length > 0 ? certFiles : undefined);
+  } catch (err: unknown) {
+    throw new CliError(2, messageOf(err));
+  }
+
+  let exitStatus = 0;
+  try {
+    const fs = await import("fs");
+    const resolvedPath = path.resolve(targetPath);
+
+    if (!fs.existsSync(resolvedPath)) {
+      throw new CliError(2, `File not found: ${resolvedPath}`);
     }
-    return undefined;
-  };
-  const getPositional = (): string | undefined => {
-    // First arg after the subcommand that doesn't start with --
-    for (let i = 4; i < scriptConfig.args.length; i++) {
-      if (!scriptConfig.args[i].startsWith("--")) {
-        return scriptConfig.args[i];
+
+    const stat = fs.statSync(resolvedPath);
+
+    if (stat.isDirectory()) {
+      const result = await signing.verifyDirectory(targetPath, { trust });
+      const formLabels: Record<string, string> = {
+        detached: "detached",
+        "windows-program": "Windows program",
+        installer: "installer",
+        "mac-program": "Mac program",
+      };
+      const headlines: Record<string, string> = {
+        VALID: "VALID",
+        UNTRUSTED: "UNTRUSTED",
+        INVALID: "INVALID",
+        NOT_FULLY_SIGNED: "NOT FULLY SIGNED",
+        NOT_CHECKED: "NOT CHECKED",
+        NOT_FOUND: "MISSING",
+      };
+      const row = (word: string, text: string): string => "  " + word.padEnd(17) + text;
+      const manifest = result.manifest;
+      console.log(`Verifying directory: ${targetPath}`);
+      if (manifest.earlierFormat) {
+        console.log(`  Manifest:    .signatures.json, earlier format (version ${manifest.version}); signing the directory again writes the current one`);
+      } else {
+        console.log(`  Manifest:    .signatures.json, current format (version ${manifest.version}), signed ${manifest.signedAt}`);
       }
+      const consistency = manifest.fingerprintConsistent
+        ? "fingerprint matches the manifest"
+        : `fingerprint does NOT match the manifest's recorded fingerprint ${manifest.recordedFingerprint}`;
+      console.log(`  Certificate: ${signing._formatSubject(manifest.certificate.subject)}  ${manifest.certificate.fingerprint}  (${consistency})`);
+      console.log(`  Trust:       ${describeTrust(manifest.trust)}`);
+      for (const r of result.results) {
+        const word = headlines[r.status] ?? r.status;
+        if (r.status === "NOT_FOUND") {
+          console.log(row(word, r.reason === MISSING_FILE_REASON || !r.reason ? r.relativePath : `${r.relativePath} — ${r.reason}`));
+        } else if (r.status === "VALID" || r.status === "UNTRUSTED") {
+          console.log(row(word, `${r.relativePath} (${formLabels[r.form ?? "detached"] ?? r.form}; signer matches the manifest)`));
+        } else {
+          console.log(row(word, `${r.relativePath} — ${r.reason || "Unknown reason"}`));
+        }
+      }
+      for (const item of result.unlisted) {
+        console.log(row("UNLISTED", `${item.relativePath} — ${item.reason}`));
+      }
+      for (const link of result.links) {
+        console.log(row("LINK", `${link.relativePath} -> ${link.target}`));
+      }
+      for (const item of result.skipped) {
+        if (item.present) {
+          console.log(row("SKIPPED", `${item.relativePath} — present, not signed; contents not checked`));
+        }
+      }
+      for (const warning of result.warnings) {
+        console.log(`  Warning: ${warning}`);
+      }
+      console.log(`  Not checked: ${result.notChecked.join(", ")}`);
+      console.log("");
+      const counts = result.counts;
+      const verdict = result.status === "VALID" ? "PASS" : result.status === "UNTRUSTED" ? "NOT TRUSTED" : "FAIL";
+      console.log(
+        `  Result: ${verdict} (valid ${counts.valid}, untrusted ${counts.untrusted}, invalid ${counts.invalid}, not fully signed ${counts.notFullySigned}, ` +
+          `not checked ${counts.notChecked}, missing ${counts.missing}, unlisted ${counts.unlisted}; skipped ${counts.skipped})`
+      );
+      exitStatus = exitStatusOf(result.status);
+    } else {
+      const result = await signing.verifyFile(targetPath, { trust });
+      for (const line of fileReport(signing, result)) {
+        console.log(line);
+      }
+      exitStatus = exitStatusOf(result.status);
     }
-    return undefined;
-  };
+  } catch (err: unknown) {
+    if (err instanceof CliError) throw err;
+    const message = messageOf(err);
+    if (message.includes("No .signatures.json")) {
+      throw new CliError(2, message);
+    }
+    if (message.includes("malformed") || message.includes("is a signature file;") || message.includes("is a directory manifest;")) {
+      throw new CliError(3, message);
+    }
+    throw new CliError(2, message);
+  }
+  if (exitStatus !== 0) {
+    return { status: exitStatus };
+  }
+}
 
-  switch (command) {
+const SigningCLI = async (parsed: ParsedCommand, context: CliContext): Promise<HandlerResult> => {
+  const signing = new Signing(context.configDir);
+  const requestedScope = parsed.options.scope as string | undefined;
+
+  switch (parsed.subcommand) {
     case "create-cert": {
-      const validityDaysStr = getFlagValue("--validity-days");
-      const validityDays = validityDaysStr ? parseInt(validityDaysStr, 10) : 365;
-      const force = hasFlag("--force");
+      const validityDays = (parsed.options["validity-days"] as number | undefined) ?? 365;
 
-      try {
-        // Prompt for scope selection
-        const scope = await promptForScope(signing);
-        if (!scope) {
-          console.error("Error: No scopes configured. Run 'the-seed config add-scope' to add one.");
-          process.exit(3);
-          return;
-        }
-
-        // Check if cert already exists for this scope
-        if (signing.hasCert(scope) && !force) {
-          const { overwrite } = await inquirer.prompt([
-            {
-              type: "confirm",
-              name: "overwrite",
-              message: "A signing certificate already exists. Overwrite?",
-              default: false,
-            },
-          ]);
-          if (!overwrite) {
-            console.log("Aborted. Existing certificate unchanged.");
-            process.exit(1);
-            return;
-          }
-        }
-
-        const certInfo = await signing.createCert({ validityDays, scope });
-        const subjectStr = signing._formatSubject(certInfo.subject);
-        const validFrom = certInfo.notBefore.toISOString().split("T")[0];
-        const validTo = certInfo.notAfter.toISOString().split("T")[0];
-
-        console.log("Certificate created successfully.");
-        console.log(`  Subject:     ${subjectStr}`);
-        console.log(`  Fingerprint: ${certInfo.fingerprint}`);
-        console.log(`  Valid:        ${validFrom} to ${validTo}`);
-        console.log(`  Stored:       ${certInfo.certPath}`);
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        console.error("Error: " + message);
-        process.exit(2);
+      const scope = await chooseScope(signing, requestedScope, context.interactive);
+      if (!(await confirmReplace(signing, scope, parsed, context))) {
+        return { status: 1 };
       }
+
+      let certInfo;
+      try {
+        certInfo = await signing.createCert({ validityDays, scope });
+      } catch (err: unknown) {
+        throw new CliError(2, messageOf(err));
+      }
+      printStored(signing, "Certificate created successfully.", certInfo, false);
       break;
     }
     case "import-cert": {
-      const certPathArg = getFlagValue("--cert");
-      const keyPathArg = getFlagValue("--key");
-      const force = hasFlag("--force");
+      const resolvedCert = path.resolve(parsed.options.cert as string);
+      const resolvedKey = path.resolve(parsed.options.key as string);
 
-      if (!certPathArg || !keyPathArg) {
-        console.error("Error: Missing required arguments. Usage: the-seed signing import-cert --cert <path> --key <path>");
-        process.exit(3);
-        return;
+      const scope = await chooseScope(signing, requestedScope, context.interactive);
+      if (!(await confirmReplace(signing, scope, parsed, context))) {
+        return { status: 1 };
       }
 
+      let certInfo;
       try {
-        const resolvedCert = path.resolve(certPathArg);
-        const resolvedKey = path.resolve(keyPathArg);
-
-        // Prompt for scope selection
-        const scope = await promptForScope(signing);
-        if (!scope) {
-          console.error("Error: No scopes configured. Run 'the-seed config add-scope' to add one.");
-          process.exit(3);
-          return;
-        }
-
-        // Check if cert already exists for this scope
-        if (signing.hasCert(scope) && !force) {
-          const { overwrite } = await inquirer.prompt([
-            {
-              type: "confirm",
-              name: "overwrite",
-              message: "A signing certificate already exists. Overwrite?",
-              default: false,
-            },
-          ]);
-          if (!overwrite) {
-            console.log("Aborted. Existing certificate unchanged.");
-            process.exit(1);
-            return;
-          }
-        }
-
-        const certInfo = await signing.importCert(resolvedCert, resolvedKey, scope);
-        const subjectStr = signing._formatSubject(certInfo.subject);
-        const validFrom = certInfo.notBefore.toISOString().split("T")[0];
-        const validTo = certInfo.notAfter.toISOString().split("T")[0];
-
-        console.log("Certificate imported successfully.");
-        console.log(`  Subject:     ${subjectStr}`);
-        console.log(`  Issuer:      ${certInfo.issuer}`);
-        console.log(`  Fingerprint: ${certInfo.fingerprint}`);
-        console.log(`  Valid:        ${validFrom} to ${validTo}`);
-        console.log(`  Stored:       ${certInfo.certPath}`);
+        certInfo = await signing.importCert(resolvedCert, resolvedKey, scope);
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("ENOENT") || message.includes("no such file")) {
-          console.error("Error: " + message);
-          process.exit(2);
-        } else if (message.includes("mismatch") || message.includes("do not match") || message.includes("Unsupported")) {
-          console.error("Error: " + message);
-          process.exit(3);
-        } else {
-          console.error("Error: " + message);
-          process.exit(2);
-        }
+        const message = messageOf(err);
+        const mismatch = message.includes("mismatch") || message.includes("do not match") || message.includes("Unsupported");
+        const missing = message.includes("ENOENT") || message.includes("no such file");
+        throw new CliError(mismatch && !missing ? 3 : 2, message);
       }
+      printStored(signing, "Certificate imported successfully.", certInfo, true);
       break;
     }
     case "sign": {
-      const targetPath = getPositional();
-      const force = hasFlag("--force");
-      const detached = hasFlag("--detached");
+      const targetPath = parsed.positionals.path as string;
+      const force = parsed.options.force === true;
+      const detached = parsed.options.detached === true;
 
-      if (!targetPath) {
-        console.error("Error: Missing path argument. Usage: the-seed signing sign <path>");
-        process.exit(3);
-        return;
-      }
+      const scope = await chooseScope(signing, requestedScope, context.interactive);
 
       try {
         const fs = await import("fs");
         const resolvedPath = path.resolve(targetPath);
         const stat = fs.statSync(resolvedPath);
-
-        // Prompt for scope selection
-        const scope = await promptForScope(signing);
-        if (!scope) {
-          console.error("Error: No scopes configured. Run 'the-seed config add-scope' to add one.");
-          process.exit(3);
-          return;
-        }
 
         if (stat.isDirectory()) {
           const result = await signing.signDirectory(targetPath, { force, scope, detached });
@@ -319,7 +350,7 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
             console.log(`  Skipped (not binary): ${skipped}`);
           }
           console.log("");
-          console.log(`  Manifest: ${path.relative(process.cwd(), result.manifestPath)}`);
+          console.log(`  Manifest: ${path.relative(context.cwd, result.manifestPath)}`);
           console.log(`  Files signed: ${result.signed.length} | Skipped: ${result.skipped.length}`);
         } else {
           const result = await signing.signFile(targetPath, { force, scope, detached });
@@ -336,182 +367,21 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
           }
         }
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("No signing certificate")) {
-          console.error("Error: " + message);
-          process.exit(1);
-        } else if (message.includes("expired")) {
-          console.error("Error: " + message);
-          process.exit(2);
-        } else if (message.includes("No binary files")) {
-          console.error("Error: " + message);
-          process.exit(4);
-        } else {
-          console.error("Error: " + message);
-          process.exit(3);
-        }
+        const message = messageOf(err);
+        throw new CliError(signStatus(message), message);
       }
       break;
     }
-    case "verify": {
-      const VERIFY_USAGE = "Usage: the-seed signing verify [--cert <file>]... <path>";
-      const certFiles: string[] = [];
-      let targetPath: string | undefined;
-      for (let i = 4; i < scriptConfig.args.length; i++) {
-        const arg = scriptConfig.args[i];
-        if (arg === "--cert") {
-          const value = scriptConfig.args[i + 1];
-          if (value === undefined) {
-            console.error("Error: --cert needs a file");
-            console.error(VERIFY_USAGE);
-            process.exit(3);
-            return;
-          }
-          certFiles.push(value);
-          i++;
-        } else if (arg.startsWith("--")) {
-          console.error(`Error: Unknown option ${arg}`);
-          console.error(VERIFY_USAGE);
-          process.exit(3);
-          return;
-        } else if (targetPath === undefined) {
-          targetPath = arg;
-        }
-      }
-
-      if (!targetPath) {
-        console.error(`Error: Missing path argument. ${VERIFY_USAGE}`);
-        process.exit(3);
-        return;
-      }
-
-      // Supplied certificates are read before the target is examined; an unusable one stops the command.
-      let trust;
-      try {
-        trust = signing.loadTrust(certFiles.length > 0 ? certFiles : undefined);
-      } catch (err: unknown) {
-        console.error("Error: " + (err instanceof Error ? err.message : String(err)));
-        process.exit(2);
-        return;
-      }
-
-      let exitStatus = 0;
-      try {
-        const fs = await import("fs");
-        const resolvedPath = path.resolve(targetPath);
-
-        if (!fs.existsSync(resolvedPath)) {
-          console.error(`Error: File not found: ${resolvedPath}`);
-          process.exit(2);
-          return;
-        }
-
-        const stat = fs.statSync(resolvedPath);
-
-        if (stat.isDirectory()) {
-          const result = await signing.verifyDirectory(targetPath, { trust });
-          const formLabels: Record<string, string> = {
-            detached: "detached",
-            "windows-program": "Windows program",
-            installer: "installer",
-            "mac-program": "Mac program",
-          };
-          const headlines: Record<string, string> = {
-            VALID: "VALID",
-            UNTRUSTED: "UNTRUSTED",
-            INVALID: "INVALID",
-            NOT_FULLY_SIGNED: "NOT FULLY SIGNED",
-            NOT_CHECKED: "NOT CHECKED",
-            NOT_FOUND: "MISSING",
-          };
-          const row = (word: string, text: string): string => "  " + word.padEnd(17) + text;
-          const manifest = result.manifest;
-          console.log(`Verifying directory: ${targetPath}`);
-          if (manifest.earlierFormat) {
-            console.log(`  Manifest:    .signatures.json, earlier format (version ${manifest.version}); signing the directory again writes the current one`);
-          } else {
-            console.log(`  Manifest:    .signatures.json, current format (version ${manifest.version}), signed ${manifest.signedAt}`);
-          }
-          const consistency = manifest.fingerprintConsistent
-            ? "fingerprint matches the manifest"
-            : `fingerprint does NOT match the manifest's recorded fingerprint ${manifest.recordedFingerprint}`;
-          console.log(`  Certificate: ${signing._formatSubject(manifest.certificate.subject)}  ${manifest.certificate.fingerprint}  (${consistency})`);
-          console.log(`  Trust:       ${describeTrust(manifest.trust)}`);
-          for (const r of result.results) {
-            const word = headlines[r.status] ?? r.status;
-            if (r.status === "NOT_FOUND") {
-              console.log(row(word, r.reason === MISSING_FILE_REASON || !r.reason ? r.relativePath : `${r.relativePath} — ${r.reason}`));
-            } else if (r.status === "VALID" || r.status === "UNTRUSTED") {
-              console.log(row(word, `${r.relativePath} (${formLabels[r.form ?? "detached"] ?? r.form}; signer matches the manifest)`));
-            } else {
-              console.log(row(word, `${r.relativePath} — ${r.reason || "Unknown reason"}`));
-            }
-          }
-          for (const item of result.unlisted) {
-            console.log(row("UNLISTED", `${item.relativePath} — ${item.reason}`));
-          }
-          for (const link of result.links) {
-            console.log(row("LINK", `${link.relativePath} -> ${link.target}`));
-          }
-          for (const item of result.skipped) {
-            if (item.present) {
-              console.log(row("SKIPPED", `${item.relativePath} — present, not signed; contents not checked`));
-            }
-          }
-          for (const warning of result.warnings) {
-            console.log(`  Warning: ${warning}`);
-          }
-          console.log(`  Not checked: ${result.notChecked.join(", ")}`);
-          console.log("");
-          const counts = result.counts;
-          const verdict = result.status === "VALID" ? "PASS" : result.status === "UNTRUSTED" ? "NOT TRUSTED" : "FAIL";
-          console.log(
-            `  Result: ${verdict} (valid ${counts.valid}, untrusted ${counts.untrusted}, invalid ${counts.invalid}, not fully signed ${counts.notFullySigned}, ` +
-              `not checked ${counts.notChecked}, missing ${counts.missing}, unlisted ${counts.unlisted}; skipped ${counts.skipped})`
-          );
-          exitStatus = exitStatusOf(result.status);
-        } else {
-          const result = await signing.verifyFile(targetPath, { trust });
-          for (const line of fileReport(signing, result)) {
-            console.log(line);
-          }
-          exitStatus = exitStatusOf(result.status);
-        }
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("No .signatures.json")) {
-          console.error("Error: " + message);
-          process.exit(2);
-        } else if (message.includes("malformed") || message.includes("is a signature file;") || message.includes("is a directory manifest;")) {
-          console.error("Error: " + message);
-          process.exit(3);
-        } else {
-          console.error("Error: " + message);
-          process.exit(2);
-        }
-        return;
-      }
-      if (exitStatus !== 0) {
-        process.exit(exitStatus);
-      }
-      break;
-    }
+    case "verify":
+      return verifyCommand(signing, parsed);
     case "cert-info": {
-      const scope = await promptForScope(signing);
-      if (!scope) {
-        console.log("No scopes configured.");
-        console.log("  Run 'the-seed config add-scope' to add a scope.");
-        process.exit(1);
-        return;
-      }
+      const scope = await chooseScope(signing, requestedScope, context.interactive);
 
       const certInfo = signing.getCertInfo(scope);
       if (!certInfo) {
-        console.log(`No signing certificate found for scope '${scope}'.`);
-        console.log("  Run 'the-seed signing create-cert' to generate one.");
-        console.log("  Run 'the-seed signing import-cert' to import an existing certificate.");
-        process.exit(1);
-        return;
+        throw new CliError(1, `No signing certificate found for scope '${scope}'.`, {
+          hint: "Run 'the-seed signing create-cert' to generate one, or 'the-seed signing import-cert' to import an existing certificate.",
+        });
       }
 
       const subjectStr = signing._formatSubject(certInfo.subject);
@@ -530,79 +400,27 @@ const SigningCLI = async (scriptConfig: ScriptArgsType) => {
       break;
     }
     case "export-cert": {
-      const outputPath = getFlagValue("--output");
+      const outputPath = parsed.options.output as string;
 
-      if (!outputPath) {
-        console.error("Error: Missing required argument. Usage: the-seed signing export-cert --output <path>");
-        process.exit(2);
-        return;
+      const scope = await chooseScope(signing, requestedScope, context.interactive);
+
+      const certInfo = signing.getCertInfo(scope);
+      if (!certInfo) {
+        throw new CliError(1, `No signing certificate found for scope '${scope}'.`);
       }
 
+      const resolvedOutput = path.resolve(outputPath);
       try {
-        const scope = await promptForScope(signing);
-        if (!scope) {
-          console.error("Error: No scopes configured. Run 'the-seed config add-scope' to add one.");
-          process.exit(3);
-          return;
-        }
-
-        const certInfo = signing.getCertInfo(scope);
-        if (!certInfo) {
-          console.error(`Error: No signing certificate found for scope '${scope}'.`);
-          process.exit(1);
-          return;
-        }
-
-        const resolvedOutput = path.resolve(outputPath);
         await signing.exportCert(resolvedOutput, scope);
-
-        console.log(`Certificate exported to: ${resolvedOutput}`);
-        console.log(`  Fingerprint: ${certInfo.fingerprint}`);
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("No signing certificate")) {
-          console.error("Error: " + message);
-          process.exit(1);
-        } else {
-          console.error("Error: " + message);
-          process.exit(2);
-        }
+        const message = messageOf(err);
+        throw new CliError(message.includes("No signing certificate") ? 1 : 2, message);
       }
+
+      console.log(`Certificate exported to: ${resolvedOutput}`);
+      console.log(`  Fingerprint: ${certInfo.fingerprint}`);
       break;
     }
-    case "help":
-    default:
-      console.log("\nUsage: the-seed signing <command>");
-      console.log("\nAvailable commands:");
-      console.log("  create-cert   Generate a self-signed ECDSA P-256 certificate");
-      console.log("  import-cert   Import an existing PEM certificate and private key");
-      console.log("  sign          Sign one or more binary files");
-      console.log("  verify        Verify file signature(s): integrity and trust (--cert <file> to trust a given certificate)");
-      console.log("  cert-info     Display current certificate details");
-      console.log("  export-cert   Export public certificate to a file");
-      console.log("\nCommands:");
-      console.log("  the-seed signing help          Show this help message");
-      console.log("  the-seed signing create-cert   Generate a new signing certificate");
-      console.log("  the-seed signing import-cert   Import an existing certificate");
-      console.log("  the-seed signing sign          Sign file(s) or directory");
-      console.log("  the-seed signing verify [--cert <file>]... <file-or-directory>");
-      console.log("                                 Verify file or directory signatures");
-      console.log("  the-seed signing cert-info     Show certificate information");
-      console.log("  the-seed signing export-cert   Export public certificate");
-      console.log("\nverify checks that a file is unchanged since it was signed and that its signer");
-      console.log("is one of the certificates of your configured scopes (or of the files named with");
-      console.log("--cert). Exit status: 0 valid; 4 intact but not trusted; 1 invalid, not fully");
-      console.log("signed, not checked or no signature; 2 not found or other error; 3 usage or");
-      console.log("malformed manifest. Certificate chains, revocation, signing time and acceptance");
-      console.log("by the platform's own verifier are not checked.");
-      console.log("\nsign writes standard signature containers (signed attributes, the signer's");
-      console.log("certificate). Checked with independent tools, the signer's certificate given");
-      console.log("as the trusted root: Windows programs and installers pass osslsigncode; each");
-      console.log("slice of a Mac program passes openssl's signed-data check over its code");
-      console.log("directory. Not checked with the platforms' own tools (signtool, WinVerifyTrust,");
-      console.log("the Windows Installer service, codesign, Gatekeeper), which may still refuse");
-      console.log("the certificate. Files signed by earlier versions should be signed again.");
-      break;
   }
 };
 

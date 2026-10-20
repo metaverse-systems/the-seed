@@ -1,35 +1,22 @@
-import Config from "../Config";
-import { ScriptArgsType } from "../types";
-import ResourcePak from "../ResourcePak";
 import inquirer from "inquirer";
+import Config from "../Config";
+import ResourcePak from "../ResourcePak";
+import { CliContext, ParsedCommand } from "../cli/CommandSpec";
 
-const ResourcePakCLI = (scriptConfig: ScriptArgsType) => {
-  const config = new Config(scriptConfig.configDir);
-  const command = scriptConfig.args[3];
-  const name = scriptConfig.args[4];
-  
-  let rp: ResourcePak;
+const ResourcePakCLI = async (parsed: ParsedCommand, context: CliContext): Promise<void> => {
+  const config = new Config(context.configDir);
+  const rp = new ResourcePak(config);
 
-  switch(command) {
-    case "help":
-      console.log("Available resource-pak commands:");
-      console.log("  create <name>");
-      console.log("  add <resource-name> <filename>");
-      console.log("  build");
+  switch (parsed.subcommand) {
+    case "create": {
+      const answers = await inquirer.prompt(rp.askName());
+      rp.createPackage(answers.scopeName, answers.pakName);
       break;
-    case "create":
-      rp = new ResourcePak(config);
-      inquirer.prompt(rp.askName())
-        .then((answers) => {
-          rp.createPackage(answers.scopeName, answers.pakName);
-        });
-      break;
+    }
     case "add":
-      rp = new ResourcePak(config);
-      rp.addResource(name, scriptConfig.args[5]);
+      rp.addResource(parsed.positionals["resource-name"] as string, parsed.positionals.filename as string);
       break;
     case "build":
-      rp = new ResourcePak(config);
       rp.build();
       break;
   }

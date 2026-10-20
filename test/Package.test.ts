@@ -4,8 +4,8 @@ import os from "os";
 import Config from "../src/Config";
 import Package from "../src/Package";
 import { targets } from "../src/Build";
-import { DependencyResultType, PackagePlan, ScriptArgsType } from "../src/types";
-import PackageCLI from "../src/scripts/PackageCLI";
+import { DependencyResultType, PackagePlan } from "../src/types";
+import { runTheSeed } from "./helpers/RunCli";
 import fse from "fs-extra";
 import { elfImage } from "./helpers/ElfImage";
 import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
@@ -1057,97 +1057,59 @@ describe("test Package", () => {
     });
   });
 
-  // T016: help subcommand prints usage information (US2)
-  describe("PackageCLI - help subcommand", () => {
+  // `the-seed package help` and `the-seed package` alone print the command's help on standard output.
+  describe("package - help subcommand", () => {
     it("prints usage information when help subcommand is given", async () => {
-      const scriptConfig: ScriptArgsType = {
-        binName: "the-seed",
-        args: ["node", "the-seed", "package", "help"],
-        configDir: configDir
-      };
+      const run = await runTheSeed(["package", "help"], { configDir });
 
-      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      await PackageCLI(scriptConfig);
-      const logCalls = consoleSpy.mock.calls.map(c => c[0]);
-      consoleSpy.mockRestore();
-
-      expect(logCalls.some(msg => msg.includes("Usage: the-seed package"))).toBe(true);
-      expect(logCalls.some(msg => msg.includes("output-directory"))).toBe(true);
-      expect(logCalls.some(msg => msg.includes("project-dir"))).toBe(true);
+      expect(run.status).toBe(0);
+      expect(run.stderr).toBe("");
+      expect(run.stdout).toContain("Usage: the-seed package");
+      expect(run.stdout).toContain("output-directory");
+      expect(run.stdout).toContain("project-dir");
     });
 
     it("explains how dependency projects are found, how libraries are named and that collisions are refused", async () => {
-      const scriptConfig: ScriptArgsType = {
-        binName: "the-seed",
-        args: ["node", "the-seed", "package", "help"],
-        configDir: configDir
-      };
+      const run = await runTheSeed(["package", "help"], { configDir });
 
-      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      await PackageCLI(scriptConfig);
-      const logCalls = consoleSpy.mock.calls.map(c => String(c[0]));
-      consoleSpy.mockRestore();
-      const help = logCalls.join("\n");
-
-      // The help is printed after the usage lines; the lines are matched
-      // as a whole text so the choice of one console.log call or several is open.
-      const lines = [
-        "Dependency projects are found the way \"the-seed build --recursive\" finds them, from the",
-        "\"dependencies\" of each project's package.json: a \"file:\" path is taken relative to the declaring",
-        "project, and any other dependency (for example one installed from npm) is looked up in that",
-        "project's node_modules. Linux libraries are written under the name programs load them by",
-        "(for example libgreet.so.0), each with its .sig when signed.",
+      // The help is wrapped by the renderer, so it is compared with whitespace collapsed.
+      const help = run.stdout.replace(/\s+/g, " ");
+      const sentences = [
+        "Dependency projects are found the way \"the-seed build native --recursive\" finds them, from the " +
+          "\"dependencies\" of each project's package.json: a \"file:\" path is taken relative to the declaring " +
+          "project, and any other dependency (for example one installed from npm) is looked up in that " +
+          "project's node_modules.",
+        "Linux libraries are written under the name programs load them by (for example libgreet.so.0), " +
+          "each with its .sig when signed.",
         "Two different files with the same name are refused; nothing is written."
       ];
-      for (const line of lines) {
-        expect(help).toContain(line);
+      for (const sentence of sentences) {
+        expect(help).toContain(sentence);
       }
-      expect(help.indexOf(lines[0])).toBeGreaterThan(help.indexOf("project-dir"));
-      for (let i = 1; i < lines.length; i++) {
-        expect(help.indexOf(lines[i])).toBeGreaterThan(help.indexOf(lines[i - 1]));
+      expect(help.indexOf(sentences[0])).toBeGreaterThan(help.indexOf("project-dir"));
+      for (let i = 1; i < sentences.length; i++) {
+        expect(help.indexOf(sentences[i])).toBeGreaterThan(help.indexOf(sentences[i - 1]));
       }
     });
   });
 
-  // T017: no arguments prints usage message (US2)
-  describe("PackageCLI - no arguments", () => {
-    it("prints usage message when no arguments are given", async () => {
-      const scriptConfig: ScriptArgsType = {
-        binName: "the-seed",
-        args: ["node", "the-seed", "package"],
-        configDir: configDir
-      };
+  describe("package - no arguments", () => {
+    it("prints the command's help and exits 0 when no arguments are given", async () => {
+      const run = await runTheSeed(["package"], { configDir });
 
-      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
-      await PackageCLI(scriptConfig);
-      const logCalls = consoleSpy.mock.calls.map(c => c[0]);
-      consoleSpy.mockRestore();
-
-      expect(logCalls.some(msg => msg.includes("Usage: the-seed package"))).toBe(true);
+      expect(run.status).toBe(0);
+      expect(run.stdout).toContain("Usage: the-seed package");
     });
   });
 
-  // T021: no project dirs specified shows usage error (US3)
-  describe("PackageCLI - no project dirs specified", () => {
-    it("shows usage error when output dir given but no project dirs", async () => {
-      const scriptConfig: ScriptArgsType = {
-        binName: "the-seed",
-        args: ["node", "the-seed", "package", "my-release"],
-        configDir: configDir
-      };
+  describe("package - no project dirs specified", () => {
+    it("shows a usage error with status 3 when output dir given but no project dirs", async () => {
+      const run = await runTheSeed(["package", "my-release"], { configDir });
 
-      const consoleSpy = jest.spyOn(console, "error").mockImplementation();
-      const mockExit = jest.spyOn(process, "exit").mockImplementation((code?: number) => {
-        throw new Error("process.exit: " + code);
-      });
-
-      await expect(PackageCLI(scriptConfig)).rejects.toThrow("process.exit: 1");
-
-      const errorCalls = consoleSpy.mock.calls.map(c => c[0]);
-      consoleSpy.mockRestore();
-      mockExit.mockRestore();
-
-      expect(errorCalls.some(msg => msg.includes("Usage: the-seed package"))).toBe(true);
+      expect(run.status).toBe(3);
+      expect(run.stdout).toBe("");
+      expect(run.stderr).toContain("Usage: the-seed package");
+      expect(run.stderr).toContain("Run \"the-seed help package\" for details.");
     });
   });
 });

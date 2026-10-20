@@ -280,7 +280,17 @@ export const COMMANDS: CommandSpec[] = [
     name: "signing",
     summary: "Create, import, use and inspect code-signing certificates",
     whenEmpty: "help",
-    notes: [],
+    notes: [
+      "verify checks that a file is unchanged since it was signed and that its signer is one of the " +
+        "certificates of your configured scopes (or of the files named with --cert). Certificate chains, " +
+        "revocation, signing time and acceptance by the platform's own verifier are not checked.",
+      "sign writes standard signature containers (signed attributes, the signer's certificate). Checked with " +
+        "independent tools, the signer's certificate given as the trusted root: Windows programs and installers " +
+        "pass osslsigncode; each slice of a Mac program passes openssl's signed-data check over its code " +
+        "directory. Not checked with the platforms' own tools (signtool, WinVerifyTrust, the Windows Installer " +
+        "service, codesign, Gatekeeper), which may still refuse the certificate. Files signed by earlier " +
+        "versions should be signed again.",
+    ],
     subcommands: [
       sub({
         name: "create-cert",

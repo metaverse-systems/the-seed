@@ -122,7 +122,8 @@ function readArguments(command: CommandSpec, sub: SubcommandSpec, words: string[
       let valueArgument = word;
       if (equals !== -1) {
         raw = word.slice(equals + 1);
-      } else if (i + 1 < words.length && !words[i + 1].startsWith("-")) {
+      } else if (i + 1 < words.length && (!words[i + 1].startsWith("-") || /^-[0-9.]/.test(words[i + 1]))) {
+        // A word that starts with "-" is another option, except a negative number, which is a value.
         i++;
         raw = words[i];
         valueArgument = raw;

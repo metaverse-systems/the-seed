@@ -308,7 +308,7 @@ describe("recursive discovery", () => {
   });
 
   describe("the build command", () => {
-    const argv = ["node", "the-seed", "build", "native", "--recursive", "--jobs", "4"];
+    const argv = ["build", "native", "--recursive", "--jobs", "4"];
 
     function inProject(dir: string): void {
       cwdSpy = jest.spyOn(process, "cwd").mockReturnValue(dir);
@@ -318,7 +318,7 @@ describe("recursive discovery", () => {
       const { a, b } = writeCycle();
       inProject(a);
 
-      await bounded(() => runCli(argv, configDir, "the-seed"));
+      await bounded(() => runCli(argv, configDir));
 
       const expected = new CyclicDependencyError(["@t/a", "@t/b"], [a, b]).message;
       expect(process.exitCode).toBe(1);
@@ -331,7 +331,7 @@ describe("recursive discovery", () => {
       fs.writeFileSync(path.join(b, "package.json"), "{ not json");
       inProject(a);
 
-      await bounded(() => runCli(argv, configDir, "the-seed"));
+      await bounded(() => runCli(argv, configDir));
 
       expect(process.exitCode).toBe(1);
       const output = errored();
@@ -345,7 +345,7 @@ describe("recursive discovery", () => {
       const { p, local, copy } = writeConflict();
       inProject(p);
 
-      await bounded(() => runCli(argv, configDir, "the-seed"));
+      await bounded(() => runCli(argv, configDir));
 
       const expected = new ConflictingProjectError("@t/q", local, copy).message;
       expect(process.exitCode).toBe(1);
@@ -367,7 +367,7 @@ describe("recursive discovery", () => {
       const reads: string[] = [];
 
       await bounded(
-        () => runCli(argv, configDir, "the-seed"),
+        () => runCli(argv, configDir),
         () => [
           recordReads(reads),
           onRead("b/package.json", () => process.emit("SIGTERM", "SIGTERM")),

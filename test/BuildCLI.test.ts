@@ -20,13 +20,6 @@ jest.mock("../src/Build", () => {
   };
 });
 
-// Fix the processor count so the help text and default are predictable. Choice for the implementer:
-// the help text reads the count through processorCount() exported by src/BuildScheduler.
-jest.mock("../src/BuildScheduler", () => ({
-  ...jest.requireActual("../src/BuildScheduler"),
-  processorCount: () => 6,
-}));
-
 // Mock RecursiveBuild
 jest.mock("../src/RecursiveBuild", () => ({
   buildRecursive: jest.fn().mockResolvedValue({
@@ -45,18 +38,24 @@ import {
   DependencyDiscoveryError,
   ProjectManifestError,
 } from "../src/DependencyWalker";
-import BuildCLI from "../src/scripts/BuildCLI";
-import { ScriptArgsType, RecursiveBuildResult, ProjectBuildResult } from "../src/types";
+import { RecursiveBuildResult, ProjectBuildResult } from "../src/types";
 import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
+import { runTheSeed, RunOptions, RunResult } from "./helpers/RunCli";
 
 const mockedBuildRecursive = buildRecursive as jest.MockedFunction<typeof buildRecursive>;
 
-function makeArgs(args: string[]): ScriptArgsType {
-  return {
-    binName: "the-seed",
-    args: ["node", "the-seed", "build", ...args],
-    configDir: "/fake/config",
-  };
+// Header: the build command is run as `the-seed build <args>` through runTheSeed. The configuration is
+// mocked, so the configuration directory is only passed through to the build (it is "/fake/config").
+// What the run printed on standard error is compared as whole lines: `stderrOf("a", "b")` is "a\nb\n".
+// A usage error is the sentence after "Error: ", the usage line of the build command and the help hint.
+const CONFIG_DIR = "/fake/config";
+
+function build(args: string[], options: RunOptions = {}): Promise<RunResult> {
+  return runTheSeed(["build", ...args], { configDir: CONFIG_DIR, ...options });
+}
+
+function stderrOf(...lines: string[]): string {
+  return lines.map((line) => line + "\n").join("");
 }
 
 const completed: ProjectBuildResult = { status: "completed" };
@@ -72,45 +71,44 @@ describe("BuildCLI --release flag parsing", () => {
     jest.clearAllMocks();
     mockBuildProject.mockReset();
     mockBuildProject.mockResolvedValue(completed);
-    process.exitCode = undefined;
   });
 
   it("parses --release from 'native --release'", async () => {
-    await BuildCLI(makeArgs(["native", "--release"]));
+    await build(["native", "--release"]);
     expect(lastBuildOptions()).toEqual(expect.objectContaining({ target: "native", release: true }));
   });
 
   it("parses --release from 'native recursive --release'", async () => {
-    await BuildCLI(makeArgs(["native", "recursive", "--release"]));
+    await build(["native", "recursive", "--release"]);
     expect(mockedBuildRecursive).toHaveBeenCalledWith(
       expect.objectContaining({ release: true })
     );
   });
 
   it("parses --release from '--release native'", async () => {
-    await BuildCLI(makeArgs(["native", "--release"]));
+    await build(["native", "--release"]);
     expect(lastBuildOptions().release).toBe(true);
   });
 
   it("handles duplicated --release flag gracefully", async () => {
-    await BuildCLI(makeArgs(["native", "--release", "--release"]));
+    await build(["native", "--release", "--release"]);
     // One build, asked to strip
     expect(lastBuildOptions().release).toBe(true);
   });
 
   it("does not ask for stripping when --release is missing", async () => {
-    await BuildCLI(makeArgs(["native"]));
+    await build(["native"]);
     expect(lastBuildOptions().release).toBe(false);
   });
 
   it("asks for stripping for windows target with --release", async () => {
-    await BuildCLI(makeArgs(["windows", "--release"]));
+    await build(["windows", "--release"]);
     expect(lastBuildOptions()).toEqual(expect.objectContaining({ target: "windows", release: true }));
   });
 
   it("leaves compile, install, strip and sign order to buildProject for a non-recursive build", async () => {
     // The ordering itself is asserted in Build.test.ts (buildProject); the command line starts one build.
-    await BuildCLI(makeArgs(["native", "--release"]));
+    await build(["native", "--release"]);
     expect(mockBuildProject).toHaveBeenCalledTimes(1);
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
   });
@@ -140,22 +138,22 @@ describe("BuildCLI dashed --recursive", () => {
   }
 
   it("runs a recursive build for 'native --recursive'", async () => {
-    await BuildCLI(makeArgs(["native", "--recursive"]));
+    await build(["native", "--recursive"]);
     expectRecursiveCall("native", false);
   });
 
   it("runs a recursive build for 'windows --release --recursive'", async () => {
-    await BuildCLI(makeArgs(["windows", "--release", "--recursive"]));
+    await build(["windows", "--release", "--recursive"]);
     expectRecursiveCall("windows", true);
   });
 
   it("runs a recursive build for 'windows --recursive --release'", async () => {
-    await BuildCLI(makeArgs(["windows", "--recursive", "--release"]));
+    await build(["windows", "--recursive", "--release"]);
     expectRecursiveCall("windows", true);
   });
 
   it("builds only the current project for 'native --release'", async () => {
-    await BuildCLI(makeArgs(["native", "--release"]));
+    await build(["native", "--release"]);
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
     expect(lastBuildOptions()).toEqual(
       expect.objectContaining({
@@ -169,7 +167,7 @@ describe("BuildCLI dashed --recursive", () => {
 
   it("runs an incremental build through buildProject with no target", async () => {
     // An incremental build is a buildProject call without a target (compile and install; the install phase strips and signs).
-    await BuildCLI(makeArgs([]));
+    await build([]);
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
     const options = lastBuildOptions();
     expect(options.target).toBeUndefined();
@@ -180,25 +178,16 @@ describe("BuildCLI dashed --recursive", () => {
 });
 
 describe("BuildCLI plain and incremental result handling", () => {
-  let errorSpy: jest.SpyInstance;
-
   beforeEach(() => {
     jest.clearAllMocks();
     mockBuildProject.mockReset();
-    process.exitCode = undefined;
-    errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
-  });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    process.exitCode = undefined;
   });
 
   it("leaves the exit status unset and prints nothing for a completed build", async () => {
     mockBuildProject.mockResolvedValue(completed);
-    await BuildCLI(makeArgs(["native"]));
-    expect(process.exitCode).toBeUndefined();
-    expect(errorSpy).not.toHaveBeenCalled();
+    const run = await build(["native"]);
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
   });
 
   it.each([
@@ -208,9 +197,9 @@ describe("BuildCLI plain and incremental result handling", () => {
     [["native"], "sign", "signing failed on /p/x86_64-linux-gnu/lib/libtiny.so.0.0.0: key file unreadable"],
   ])("prints the failed step on stderr, sets exit status 1 and repeats no output for %p", async (args, step, message) => {
     mockBuildProject.mockResolvedValue({ status: "failed", step, message });
-    await BuildCLI(makeArgs(args));
-    expect(process.exitCode).toBe(1);
-    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([`Build failed at ${step}: ${message}.`]);
+    const run = await build(args);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toBe(stderrOf(`Build failed at ${step}: ${message}.`));
   });
 
   it("prints a signing failure as `Build failed at sign: signing failed on <path>: <message>.` with exit status 1", async () => {
@@ -219,29 +208,27 @@ describe("BuildCLI plain and incremental result handling", () => {
       step: "sign",
       message: "signing failed on /p/x86_64-linux-gnu/bin/tiny: EACCES: permission denied, open '/c/signing/@t/key.pem'",
     });
-    await BuildCLI(makeArgs(["native"]));
-    expect(process.exitCode).toBe(1);
-    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
-      "Build failed at sign: signing failed on /p/x86_64-linux-gnu/bin/tiny: EACCES: permission denied, open '/c/signing/@t/key.pem'.",
-    ]);
+    const run = await build(["native"]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toBe(
+      stderrOf("Build failed at sign: signing failed on /p/x86_64-linux-gnu/bin/tiny: EACCES: permission denied, open '/c/signing/@t/key.pem'.")
+    );
   });
 
   it("prints an unreadable certificate as `Build failed at sign: <cert path>: <reason>.` with exit status 1", async () => {
     mockBuildProject.mockResolvedValue({ status: "failed", step: "sign", message: "/c/signing/@t/cert.pem: error:0480006C:PEM routines::no start line" });
-    await BuildCLI(makeArgs(["native"]));
-    expect(process.exitCode).toBe(1);
-    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
-      "Build failed at sign: /c/signing/@t/cert.pem: error:0480006C:PEM routines::no start line.",
-    ]);
+    const run = await build(["native"]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toBe(stderrOf("Build failed at sign: /c/signing/@t/cert.pem: error:0480006C:PEM routines::no start line."));
   });
 
   it("prints a missing strip tool with its hint as `Build failed at strip: Strip tool '<tool>' not found on this system.` with exit status 1", async () => {
     const message = "Strip tool 'strip' not found on this system.\nInstall binutils (for example the binutils package) and try again.";
     mockBuildProject.mockResolvedValue({ status: "failed", step: "strip", message });
-    await BuildCLI(makeArgs(["native", "--release"]));
-    expect(process.exitCode).toBe(1);
-    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([`Build failed at strip: ${message}.`]);
-    expect(String(errorSpy.mock.calls[0][0])).toContain("Build failed at strip: Strip tool 'strip' not found on this system.");
+    const run = await build(["native", "--release"]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toBe(stderrOf(`Build failed at strip: ${message}.`));
+    expect(run.stderr).toContain("Build failed at strip: Strip tool 'strip' not found on this system.");
   });
 
   it("sets exit status 130 and prints Build cancelled. on stderr when the first signal was SIGINT", async () => {
@@ -249,9 +236,9 @@ describe("BuildCLI plain and incremental result handling", () => {
       process.emit("SIGINT", "SIGINT");
       return { status: "cancelled" };
     });
-    await BuildCLI(makeArgs(["native"]));
-    expect(process.exitCode).toBe(130);
-    expect(errorSpy).toHaveBeenCalledWith("Build cancelled.");
+    const run = await build(["native"]);
+    expect(run.status).toBe(130);
+    expect(run.stderr).toContain("Build cancelled.\n");
   });
 
   it("prints Build cancelled after installing. with exit status 130 when the install finished after the first SIGINT", async () => {
@@ -259,10 +246,10 @@ describe("BuildCLI plain and incremental result handling", () => {
       process.emit("SIGINT", "SIGINT");
       return { status: "cancelled", installed: true };
     });
-    await BuildCLI(makeArgs(["native"]));
-    expect(process.exitCode).toBe(130);
-    expect(errorSpy).toHaveBeenCalledWith("Build cancelled after installing.");
-    expect(errorSpy).not.toHaveBeenCalledWith("Build cancelled.");
+    const run = await build(["native"]);
+    expect(run.status).toBe(130);
+    expect(run.stderr).toContain("Build cancelled after installing.\n");
+    expect(run.stderr).not.toContain("Build cancelled.\n");
   });
 
   it("prints Build cancelled after installing. with exit status 143 for SIGTERM", async () => {
@@ -270,9 +257,9 @@ describe("BuildCLI plain and incremental result handling", () => {
       process.emit("SIGTERM", "SIGTERM");
       return { status: "cancelled", installed: true };
     });
-    await BuildCLI(makeArgs([]));
-    expect(process.exitCode).toBe(143);
-    expect(errorSpy).toHaveBeenCalledWith("Build cancelled after installing.");
+    const run = await build([]);
+    expect(run.status).toBe(143);
+    expect(run.stderr).toContain("Build cancelled after installing.\n");
   });
 
   it("prints a failed placement as `Build failed at place: cannot place <path>: <reason>.` with exit status 1", async () => {
@@ -281,32 +268,21 @@ describe("BuildCLI plain and incremental result handling", () => {
       step: "place",
       message: "cannot place /p/x86_64-linux-gnu/lib: EACCES: permission denied",
     });
-    await BuildCLI(makeArgs(["native"]));
-    expect(process.exitCode).toBe(1);
-    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
-      "Build failed at place: cannot place /p/x86_64-linux-gnu/lib: EACCES: permission denied.",
-    ]);
+    const run = await build(["native"]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toBe(stderrOf("Build failed at place: cannot place /p/x86_64-linux-gnu/lib: EACCES: permission denied."));
   });
 });
 
 describe("BuildCLI rejects invalid arguments", () => {
-  let errorSpy: jest.SpyInstance;
-
   beforeEach(() => {
     jest.clearAllMocks();
     mockBuildProject.mockReset();
-    process.exitCode = undefined;
-    errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
-  });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    process.exitCode = undefined;
   });
 
   it.each([
-    [["native", "--recursve"], "Unrecognized option \"--recursve\"."],
-    [["native", "recursve"], "Unrecognized argument \"recursve\"."],
+    [["native", "--recursve"], "Unknown option \"--recursve\" for \"the-seed build\"."],
+    [["native", "recursve"], "Unexpected argument \"recursve\" for \"the-seed build\"."],
     [["native", "--parallel", "4"], "--parallel applies only to recursive builds; add --recursive."],
     [["native", "--recursive", "--parallel"], "--parallel requires a positive whole number."],
     [["native", "--recursive", "--parallel", "--release"], "--parallel requires a positive whole number."],
@@ -325,24 +301,26 @@ describe("BuildCLI rejects invalid arguments", () => {
     [["native", "--jobs", "2", "--jobs", "3"], "--jobs was given more than once."],
     [["foo"], "Unrecognized build target \"foo\"; expected native or windows."],
   ])("rejects %p before doing any work", async (args, message) => {
-    await BuildCLI(makeArgs(args));
+    const run = await build(args);
 
-    expect(process.exitCode).toBe(1);
-    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([
-      message,
-      "Valid options: --recursive, --parallel N, --jobs N, --release",
-      "Run \"the-seed build help\" for details.",
-    ]);
+    expect(run.status).toBe(3);
+    expect(run.stdout).toBe("");
+    const lines = run.stderr.split("\n");
+    expect(lines).toHaveLength(4);
+    expect(lines[0]).toBe(`Error: ${message}`);
+    expect(lines[1]).toMatch(/^Usage: the-seed build /);
+    expect(lines[2]).toBe("Run \"the-seed help build\" for details.");
+    expect(lines[3]).toBe("");
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
     expect(mockBuildProject).not.toHaveBeenCalled();
   });
 
   it("forwards --parallel to the recursive build", async () => {
-    await BuildCLI(makeArgs(["native", "--parallel=3", "--recursive"]));
+    const run = await build(["native", "--parallel=3", "--recursive"]);
     expect(mockedBuildRecursive).toHaveBeenCalledWith(
       expect.objectContaining({ target: "native", parallel: 3 })
     );
-    expect(errorSpy).not.toHaveBeenCalled();
+    expect(run.stderr).toBe("");
   });
 });
 
@@ -355,66 +333,48 @@ describe("BuildCLI --jobs", () => {
     process.exitCode = undefined;
   });
 
-  afterEach(() => {
-    process.exitCode = undefined;
-  });
-
   it("passes --jobs to plain, incremental and recursive builds", async () => {
-    await BuildCLI(makeArgs(["native", "--jobs", "3"]));
+    await build(["native", "--jobs", "3"]);
     expect(lastBuildOptions()).toEqual(expect.objectContaining({ target: "native", jobs: 3 }));
 
     mockBuildProject.mockClear();
-    await BuildCLI(makeArgs(["--jobs=2"]));
+    await build(["--jobs=2"]);
     const incremental = lastBuildOptions();
     expect(incremental.target).toBeUndefined();
     expect(incremental.jobs).toBe(2);
 
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
-    await BuildCLI(makeArgs(["native", "--recursive", "--jobs", "5", "--parallel", "2"]));
+    await build(["native", "--recursive", "--jobs", "5", "--parallel", "2"]);
     expect(mockedBuildRecursive).toHaveBeenCalledWith(
       expect.objectContaining({ target: "native", parallel: 2, jobs: 5 })
     );
   });
 
   it("leaves jobs undefined when --jobs is not given", async () => {
-    await BuildCLI(makeArgs(["native"]));
+    await build(["native"]);
     expect(lastBuildOptions().jobs).toBeUndefined();
 
-    await BuildCLI(makeArgs(["native", "--recursive"]));
+    await build(["native", "--recursive"]);
     expect(mockedBuildRecursive.mock.calls[0][0].jobs).toBeUndefined();
   });
 
   it("accepts --jobs above the processor count", async () => {
-    await BuildCLI(makeArgs(["native", "--jobs", "64"]));
+    await build(["native", "--jobs", "64"]);
     expect(lastBuildOptions().jobs).toBe(64);
   });
 
   it("rejects a bad incremental --jobs before doing any work", async () => {
-    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
-    try {
-      await BuildCLI(makeArgs(["--jobs", "0"]));
-      expect(process.exitCode).toBe(1);
-      expect(mockBuildProject).not.toHaveBeenCalled();
-      expect(mockedBuildRecursive).not.toHaveBeenCalled();
-    } finally {
-      errorSpy.mockRestore();
-    }
+    const run = await build(["--jobs", "0"]);
+    expect(run.status).toBe(3);
+    expect(mockBuildProject).not.toHaveBeenCalled();
+    expect(mockedBuildRecursive).not.toHaveBeenCalled();
   });
 });
 
 describe("BuildCLI discovery errors in a recursive build", () => {
-  let errorSpy: jest.SpyInstance;
-
   beforeEach(() => {
     jest.clearAllMocks();
     mockedBuildRecursive.mockReset();
-    process.exitCode = undefined;
-    errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
-  });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    process.exitCode = undefined;
   });
 
   it.each([
@@ -424,32 +384,31 @@ describe("BuildCLI discovery errors in a recursive build", () => {
   ])("prints exactly the message, exits 1 and throws nothing when the build rejects with %s", async (_name, error) => {
     mockedBuildRecursive.mockRejectedValueOnce(error);
 
-    await expect(BuildCLI(makeArgs(["native", "--recursive"]))).resolves.toBeUndefined();
+    const run = await build(["native", "--recursive"]);
 
-    expect(errorSpy.mock.calls).toEqual([[error.message]]);
-    expect(process.exitCode).toBe(1);
+    expect(run.stderr).toBe(stderrOf(error.message));
+    expect(run.status).toBe(1);
   });
 
-  it("still propagates a plain Error", async () => {
-    const failure = new Error("not a discovery error");
-    mockedBuildRecursive.mockRejectedValueOnce(failure);
+  it("reports an unexpected error as one line with status 1 and no stack trace", async () => {
+    mockedBuildRecursive.mockRejectedValueOnce(new Error("not a discovery error"));
 
-    await expect(BuildCLI(makeArgs(["native", "--recursive"]))).rejects.toBe(failure);
+    const run = await build(["native", "--recursive"]);
+
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("not a discovery error");
+    expect(run.stderr.trimEnd().split("\n")).toHaveLength(1);
+    expect(run.stderr).not.toMatch(/\n\s+at /);
   });
 });
 
 describe("BuildCLI deprecated bare word", () => {
   const notice = "Warning: \"recursive\" is deprecated; use \"--recursive\" instead.";
-  let errorSpy: jest.SpyInstance;
   let events: string[];
 
   beforeEach(() => {
     jest.clearAllMocks();
-    process.exitCode = undefined;
     events = [];
-    errorSpy = jest.spyOn(console, "error").mockImplementation((message: string) => {
-      events.push(`stderr:${message}`);
-    });
     mockedBuildRecursive.mockImplementation(async () => {
       events.push("buildRecursive");
       return {
@@ -459,23 +418,19 @@ describe("BuildCLI deprecated bare word", () => {
     });
   });
 
-  afterEach(() => {
-    errorSpy.mockRestore();
-    process.exitCode = undefined;
-  });
-
   it.each([
     [["native", "recursive"]],
     [["native", "recursive", "--recursive"]],
     [["native", "recursive", "recursive", "--release"]],
   ])("prints the notice once before building for %p", async (args) => {
-    await BuildCLI(makeArgs(args));
-    expect(events).toEqual([`stderr:${notice}`, "buildRecursive"]);
+    const run = await build(args);
+    expect(run.stderr).toBe(stderrOf(notice));
+    expect(events).toEqual(["buildRecursive"]);
   });
 
   it("passes the same options as the dashed form", async () => {
-    await BuildCLI(makeArgs(["windows", "recursive", "--release", "--parallel", "2"]));
-    await BuildCLI(makeArgs(["windows", "--recursive", "--release", "--parallel", "2"]));
+    await build(["windows", "recursive", "--release", "--parallel", "2"]);
+    await build(["windows", "--recursive", "--release", "--parallel", "2"]);
     expect(mockedBuildRecursive).toHaveBeenCalledTimes(2);
     // Each build gets its own cancellation signals; everything else is the same.
     const withoutSignals = (call: number) => {
@@ -492,13 +447,13 @@ describe("BuildCLI deprecated bare word", () => {
       success: false, completed: [], failed: null, failureOutput: "boom", remaining: [],
       cancelled: false, failures: [], interrupted: [], notStarted: [],
     });
-    await BuildCLI(makeArgs(["native", "recursive"]));
-    expect(process.exitCode).toBe(1);
+    const run = await build(["native", "recursive"]);
+    expect(run.status).toBe(1);
   });
 
   it("prints no notice for the dashed form", async () => {
-    await BuildCLI(makeArgs(["native", "--recursive"]));
-    expect(errorSpy).not.toHaveBeenCalled();
+    const run = await build(["native", "--recursive"]);
+    expect(run.stderr).toBe("");
   });
 });
 
@@ -511,23 +466,18 @@ describe("BuildCLI exit status for a recursive build", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockedBuildRecursive.mockReset();
-    process.exitCode = undefined;
-  });
-
-  afterEach(() => {
-    process.exitCode = undefined;
   });
 
   it("sets exit code 1 for a failed build", async () => {
     mockedBuildRecursive.mockResolvedValue({ ...base, success: false, cancelled: false, failureOutput: "boom" });
-    await BuildCLI(makeArgs(["native", "--recursive", "--parallel", "2"]));
-    expect(process.exitCode).toBe(1);
+    const run = await build(["native", "--recursive", "--parallel", "2"]);
+    expect(run.status).toBe(1);
   });
 
   it("leaves the exit code unset for a successful build", async () => {
     mockedBuildRecursive.mockResolvedValue({ ...base, success: true, cancelled: false });
-    await BuildCLI(makeArgs(["native", "--recursive", "--parallel", "2"]));
-    expect(process.exitCode).toBeUndefined();
+    const run = await build(["native", "--recursive", "--parallel", "2"]);
+    expect(run.status).toBe(0);
   });
 });
 
@@ -539,7 +489,6 @@ describe("BuildCLI cancellation signals", () => {
     cancelled: true, failures: [], interrupted: [], notStarted: [],
   };
 
-  let errorSpy: jest.SpyInstance;
   let baseline: Record<string, number>;
 
   /** Run a recursive build whose mocked buildRecursive waits until `release` is called. */
@@ -554,7 +503,7 @@ describe("BuildCLI cancellation signals", () => {
         release = resolve as typeof release;
       });
     });
-    const done = BuildCLI(makeArgs(args));
+    const done = build(args);
     return {
       done,
       options: () => options,
@@ -568,14 +517,7 @@ describe("BuildCLI cancellation signals", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockedBuildRecursive.mockReset();
-    process.exitCode = undefined;
-    errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
     baseline = Object.fromEntries(signals.map((s) => [s, process.listenerCount(s)]));
-  });
-
-  afterEach(() => {
-    errorSpy.mockRestore();
-    process.exitCode = undefined;
   });
 
   it("installs the handlers for a recursive build and removes them afterwards", async () => {
@@ -593,7 +535,9 @@ describe("BuildCLI cancellation signals", () => {
 
   it("removes the handlers when the build throws", async () => {
     mockedBuildRecursive.mockRejectedValue(new Error("discovery failed"));
-    await expect(BuildCLI(makeArgs(["native", "--recursive"]))).rejects.toThrow("discovery failed");
+    const run = await build(["native", "--recursive"]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain("discovery failed");
     for (const s of signals) {
       expect(process.listenerCount(s)).toBe(baseline[s]);
     }
@@ -609,14 +553,14 @@ describe("BuildCLI cancellation signals", () => {
     process.emit("SIGINT", "SIGINT");
     expect(signal?.aborted).toBe(true);
     expect(forceSignal?.aborted).toBe(false);
-    expect(errorSpy).toHaveBeenCalledWith(notice);
 
     process.emit("SIGINT", "SIGINT");
     expect(forceSignal?.aborted).toBe(true);
 
     run.finish();
-    await run.done;
-    expect(process.exitCode).toBe(130);
+    const result = await run.done;
+    expect(result.status).toBe(130);
+    expect(result.stderr).toContain(notice + "\n");
   });
 
   it.each([["SIGTERM", 143], ["SIGHUP", 129]] as const)("%s cancels and forces at once", async (sig, code) => {
@@ -626,8 +570,7 @@ describe("BuildCLI cancellation signals", () => {
     expect(run.options().signal?.aborted).toBe(true);
     expect(run.options().forceSignal?.aborted).toBe(true);
     run.finish();
-    await run.done;
-    expect(process.exitCode).toBe(code);
+    expect((await run.done).status).toBe(code);
   });
 
   it("uses the first signal received for the exit status", async () => {
@@ -636,16 +579,14 @@ describe("BuildCLI cancellation signals", () => {
     process.emit("SIGINT", "SIGINT");
     process.emit("SIGTERM", "SIGTERM");
     run.finish();
-    await run.done;
-    expect(process.exitCode).toBe(130);
+    expect((await run.done).status).toBe(130);
   });
 
   it("sets exit code 1 for a build that failed without being cancelled", async () => {
     const run = startBuild(["native", "--recursive"]);
     await flushMicrotasks();
     run.finish({ ...cancelledResult, cancelled: false, failureOutput: "boom" });
-    await run.done;
-    expect(process.exitCode).toBe(1);
+    expect((await run.done).status).toBe(1);
   });
 
   describe("plain and incremental builds", () => {
@@ -661,7 +602,7 @@ describe("BuildCLI cancellation signals", () => {
           release = resolve as typeof release;
         });
       });
-      const done = BuildCLI(makeArgs(args));
+      const done = build(args);
       return {
         done,
         options: () => options,
@@ -692,7 +633,9 @@ describe("BuildCLI cancellation signals", () => {
 
     it("removes the handlers when buildProject throws", async () => {
       mockBuildProject.mockRejectedValue(new Error("boom"));
-      await expect(BuildCLI(makeArgs(["native"]))).rejects.toThrow("boom");
+      const run = await build(["native"]);
+      expect(run.status).toBe(1);
+      expect(run.stderr).toContain("boom");
       for (const s of signals) {
         expect(process.listenerCount(s)).toBe(baseline[s]);
       }
@@ -709,12 +652,12 @@ describe("BuildCLI cancellation signals", () => {
       process.emit("SIGINT", "SIGINT");
       expect(signal?.aborted).toBe(true);
       expect(forceSignal?.aborted).toBe(false);
-      expect(errorSpy).toHaveBeenCalledWith(notice);
 
       run.finish();
-      await run.done;
-      expect(process.exitCode).toBe(130);
-      expect(errorSpy).toHaveBeenCalledWith("Build cancelled.");
+      const result = await run.done;
+      expect(result.status).toBe(130);
+      expect(result.stderr).toContain(notice + "\n");
+      expect(result.stderr).toContain("Build cancelled.\n");
     });
 
     it("plain build: the second SIGINT forces", async () => {
@@ -724,8 +667,7 @@ describe("BuildCLI cancellation signals", () => {
       process.emit("SIGINT", "SIGINT");
       expect(run.options().forceSignal?.aborted).toBe(true);
       run.finish();
-      await run.done;
-      expect(process.exitCode).toBe(130);
+      expect((await run.done).status).toBe(130);
     });
 
     it("incremental build: SIGTERM cancels and forces at once, exit status 143", async () => {
@@ -735,88 +677,81 @@ describe("BuildCLI cancellation signals", () => {
       expect(run.options().signal?.aborted).toBe(true);
       expect(run.options().forceSignal?.aborted).toBe(true);
       run.finish();
-      await run.done;
-      expect(process.exitCode).toBe(143);
+      expect((await run.done).status).toBe(143);
     });
 
     it("plain build: a failure without a signal sets exit status 1 only", async () => {
       const run = startPlain(["native"]);
       await flushMicrotasks();
       run.finish({ status: "failed", step: "configure", message: "./configure exited with status 1" });
-      await run.done;
-      expect(process.exitCode).toBe(1);
+      expect((await run.done).status).toBe(1);
     });
   });
 });
 
+// Choices: the help is the one rendered from the command registry, so the placeholders are written <n>, the
+// processor count is not part of the text, and sentences that may be wrapped over several lines are compared with
+// whitespace collapsed.
 describe("BuildCLI help", () => {
-  // Choice: the Ctrl+C help line is the one printed by the build command's usage text (`the-seed build help`).
-  it("explains that a second Ctrl+C discards an install that has not reached the prefix", async () => {
+  async function helpText(args: string[] = ["help"]): Promise<string> {
     jest.clearAllMocks();
-    const logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
-    let text: string;
-    try {
-      await BuildCLI(makeArgs(["help"]));
-      text = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
-    } finally {
-      logSpy.mockRestore();
-    }
+    const run = await build(args);
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    return run.stdout;
+  }
+  const collapse = (text: string) => text.replace(/\s+/g, " ");
 
+  it.each([[["--help"]], [["-h"]], [["help"]], [["native", "--jobs", "0", "-h"]], [["native", "--recursve", "--help"]]])(
+    "build %p prints build's help with status 0 and runs no step",
+    async (args) => {
+      const reference = await helpText(["help"]);
+      const text = await helpText(args);
+      expect(text).toBe(reference);
+      expect(text).toContain("Usage: the-seed build");
+      expect(mockBuildProject).not.toHaveBeenCalled();
+      expect(mockedBuildRecursive).not.toHaveBeenCalled();
+    }
+  );
+
+  it("explains that a second Ctrl+C discards an install that has not reached the prefix", async () => {
+    const text = collapse(await helpText());
     expect(text).toContain("Press it again to stop at once; an install that has not reached the prefix is discarded.");
   });
 
   it("describes the dashed options, defaults, examples and the deprecation", async () => {
-    jest.clearAllMocks();
-    const logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
-    let text: string;
-    try {
-      await BuildCLI(makeArgs(["help"]));
-      text = logSpy.mock.calls.map((call) => String(call[0])).join("\n");
-    } finally {
-      logSpy.mockRestore();
-    }
+    const text = await helpText();
 
-    expect(text).toContain("the-seed build <target> [--recursive] [--parallel N] [--jobs N] [--release]");
+    expect(text).toContain("[--recursive] [--parallel <n>] [--jobs <n>] [--release]");
     expect(text).toContain("--recursive");
-    expect(text).toContain("--parallel N");
+    expect(text).toContain("--parallel <n>");
     expect(text).toContain("--release");
     expect(text).toContain("default 1");
     expect(text).toContain("the-seed build native --recursive --parallel 4 --release");
     expect(text).toMatch(/the-seed build windows --recursive/);
-    const deprecationLines = text.split("\n").filter((line) => /\brecursive\b/.test(line.replace(/--recursive/g, "")));
-    expect(deprecationLines.length).toBeGreaterThan(0);
-    for (const line of deprecationLines) {
-      expect(line.toLowerCase()).toContain("deprecated");
-    }
+    expect(collapse(text)).toMatch(/bare word "recursive"[^.]*deprecated/);
     expect(text).not.toMatch(/the-seed build (native|windows) recursive/);
     expect(mockedBuildRecursive).not.toHaveBeenCalled();
   });
 });
 
 describe("BuildCLI help › lists --jobs with its default", () => {
-  async function helpText(): Promise<string> {
+  const helpText = async (): Promise<string> => {
     jest.clearAllMocks();
-    const logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
-    try {
-      await BuildCLI(makeArgs(["help"]));
-      return logSpy.mock.calls.map((call) => String(call[0])).join("\n");
-    } finally {
-      logSpy.mockRestore();
-    }
-  }
+    return (await build(["help"])).stdout;
+  };
 
   it("shows both usage forms and the incremental line", async () => {
-    const text = await helpText();
-    expect(text).toContain("the-seed build <target> [--recursive] [--parallel N] [--jobs N] [--release]");
-    expect(text).toContain("the-seed build [--jobs N]");
-    expect(text).toContain("Rebuild the current project (make, install, sign)");
+    const text = (await helpText()).replace(/\s+/g, " ");
+    expect(text).toContain("[--recursive] [--parallel <n>] [--jobs <n>] [--release]");
+    expect(text).toContain("\"the-seed build [--jobs <n>]\" rebuilds the current project (make, install, sign)");
   });
 
   it("lists --jobs with the processor count as its default", async () => {
-    const text = await helpText();
-    expect(text).toContain("--jobs N");
+    const text = (await helpText()).replace(/\s+/g, " ");
+    expect(text).toContain("--jobs <n>");
     expect(text).toContain(
-      "Run at most N compile jobs at once (default: the processor count, 6 here); with --parallel, the projects building at once share N"
+      "Run at most <n> compile jobs at once (default: the processor count); with --parallel, the projects building at once share <n>"
     );
   });
 
@@ -824,7 +759,7 @@ describe("BuildCLI help › lists --jobs with its default", () => {
     // Whitespace is collapsed so the sentences may be wrapped over several lines.
     const text = (await helpText()).replace(/\s+/g, " ");
     expect(text).toContain(
-      "--parallel=N and --jobs=N are the same as --parallel N and --jobs N. --parallel above the processor count, or above --jobs, is reduced to it."
+      "--parallel=<n> and --jobs=<n> are the same as --parallel <n> and --jobs <n>. --parallel above the processor count, or above --jobs, is reduced to it."
     );
     expect(text).toContain(
       "With --recursive and --parallel above 1, the compile jobs of the projects building at once never add up to more than --jobs, or the processor count when --jobs is not given."
@@ -835,14 +770,13 @@ describe("BuildCLI help › lists --jobs with its default", () => {
     // Whitespace is collapsed so the sentences may be wrapped over several lines.
     const text = (await helpText()).replace(/\s+/g, " ");
     expect(text).toContain(
-      "Strip the installed programs and libraries (and the build-tree copies \"package\" reads) before they are signed"
+      "Strip the installed programs and libraries (and the build-tree copies \"the-seed package\" reads) before they are signed"
     );
     expect(text).toContain("staging directory");
     expect(text).toContain("Archives, import libraries, wrappers and other files are not stripped or signed.");
     expect(text).toContain("A failure leaves the prefix as it was.");
     expect(text).toContain("Install phases never overlap.");
     expect(text).not.toContain("Installs (with strip and sign) never overlap.");
-    expect(text).toContain("the-seed build [--jobs N] Rebuild the current project (make, install, sign)");
   });
 
   it("gives an example with --jobs", async () => {
@@ -853,23 +787,18 @@ describe("BuildCLI help › lists --jobs with its default", () => {
 });
 
 describe("BuildCLI without the native component", () => {
-  type CliModule = typeof import("../src/scripts/BuildCLI");
+  type RunModule = typeof import("./helpers/RunCli");
   type RecursiveModule = typeof import("../src/RecursiveBuild");
   type ComponentModule = typeof import("../src/NativeComponent");
 
-  let isolated: { BuildCLI: CliModule["default"]; recursive: jest.MockedFunction<RecursiveModule["buildRecursive"]>; component: ComponentModule };
-  let errorSpy: jest.SpyInstance;
-  let logSpy: jest.SpyInstance;
+  let isolated: { run: RunModule["runTheSeed"]; recursive: jest.MockedFunction<RecursiveModule["buildRecursive"]>; component: ComponentModule };
 
   beforeEach(() => {
     jest.clearAllMocks();
     mockBuildProject.mockReset();
-    process.exitCode = undefined;
-    errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
-    logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
     isolated = withoutNativeComponent(() => ({
       // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
-      BuildCLI: (require("../src/scripts/BuildCLI") as CliModule).default,
+      run: (require("./helpers/RunCli") as RunModule).runTheSeed,
       // eslint-disable-next-line @typescript-eslint/no-var-requires -- the recursive build of the same registry
       recursive: (require("../src/RecursiveBuild") as RecursiveModule).buildRecursive as jest.MockedFunction<RecursiveModule["buildRecursive"]>,
       // eslint-disable-next-line @typescript-eslint/no-var-requires -- the error class of the same registry
@@ -886,9 +815,6 @@ describe("BuildCLI without the native component", () => {
 
   afterEach(() => {
     jest.dontMock(nativeComponentPath);
-    errorSpy.mockRestore();
-    logSpy.mockRestore();
-    process.exitCode = undefined;
   });
 
   it.each([
@@ -896,9 +822,9 @@ describe("BuildCLI without the native component", () => {
     [["windows", "--release"]],
     [["windows", "--release", "--recursive"]],
   ])("prints the missing component message alone on standard error and exits 1 for build %p", async (args) => {
-    await isolated.BuildCLI(makeArgs(args));
+    const run = await isolated.run(["build", ...args], { configDir: CONFIG_DIR });
 
-    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([isolated.component.nativeComponentMessage()]);
-    expect(process.exitCode).toBe(1);
+    expect(run.stderr).toBe(stderrOf(isolated.component.nativeComponentMessage()));
+    expect(run.status).toBe(1);
   });
 });
