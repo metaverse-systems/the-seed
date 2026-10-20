@@ -299,19 +299,19 @@ export enum ProjectType {
 
 /** A discovered project that can be built with the autotools pipeline. */
 export interface BuildableProject {
-  /** Package name from package.json (e.g., "@org/physics-system") */
+  /** Package name from package.json (e.g., "@org/physics-system"), or the directory name when it has none */
   name: string;
-  /** Absolute filesystem path to the project root directory */
+  /** Real location (symbolic links resolved) of the project root directory */
   path: string;
   /** Tier classification derived from src/Makefile.am + configure.ac */
   type: ProjectType;
-  /** Package names of buildable dependencies */
+  /** Package names of the dependency projects, each once, in declaration order */
   dependencies: string[];
 }
 
 /** A directed acyclic graph of BuildableProject nodes. */
 export interface DependencyGraph {
-  /** All discovered projects, keyed by absolute path (deduplicates diamond deps) */
+  /** All discovered projects, keyed by real location (a project reached several ways is one project) */
   projects: Map<string, BuildableProject>;
   /** Adjacency list: project path → paths of its buildable dependencies */
   edges: Map<string, string[]>;
@@ -537,3 +537,62 @@ export type InstallPhaseResult =
   | { status: "completed"; report: InstallReport }
   | { status: "failed"; step: "install" | "strip" | "sign" | "place"; message: string; output?: string }
   | { status: "interrupted" };
+
+/** A file the package plan will copy into the output directory. */
+export interface PlannedFile {
+  /** Name written in the output directory (the loadable name for a Linux library; the existing name for programs and Windows files) */
+  name: string;
+  /** Real file whose content is copied */
+  source: string;
+  /** Hex SHA-256 of the content, for collision checks */
+  sha256: string;
+  /** Detached signature copied as `<name>.sig`, taken from the same place as the file; null when there is none */
+  signature: string | null;
+  /** Where the file was found: a project's build tree or a library search path */
+  origin:
+    | { kind: "project"; project: string; location: string }
+    | { kind: "search-path"; directory: string };
+}
+
+/** A library a packaged file needs that was not found and so is not packaged. */
+export interface UnpackagedLibrary {
+  /** Needed name not found in the search paths and not among the planned names */
+  name: string;
+  /** Packaged name of the first input (in sorted order) that needs it */
+  neededBy: string;
+}
+
+/** What packaging would do, decided without writing anything. */
+export type PackagePlan =
+  | {
+      ok: true;
+      /** Real locations of every project packaged from, each once, in walk order */
+      projects: string[];
+      /** Files in registration order */
+      files: PlannedFile[];
+      notPackaged: UnpackagedLibrary[];
+    }
+  | {
+      ok: false;
+      /** The refusal text */
+      message: string;
+    };
+
+/** How packaging ended. */
+export interface PackageResult {
+  /** The output directory was written completely */
+  success: boolean;
+  /** Refusal or failure text; null on success */
+  message: string | null;
+  /** The output directory as given */
+  outputDir: string;
+  /** As in the plan on success; empty on any refusal or failure */
+  projects: string[];
+  /** Names written, signatures excluded, in copy order */
+  files: string[];
+  /** Signature files written */
+  signatures: number;
+  /** Number of entries in the output directory (files plus signatures) */
+  fileCount: number;
+  notPackaged: UnpackagedLibrary[];
+}

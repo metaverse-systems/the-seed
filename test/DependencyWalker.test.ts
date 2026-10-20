@@ -9,8 +9,16 @@ import {
   walkDependencies,
   resolveBuildOrder,
   CyclicDependencyError,
+  DependencyDiscoveryError,
+  ConflictingProjectError,
+  ProjectManifestError,
+  DiscoveryCancelledError,
 } from "../src/DependencyWalker";
 import type { DependencyGraph, BuildableProject } from "../src/types";
+import { writeProject, linkModule, readBound, onRead } from "./helpers/ScratchProjects";
+
+/** Jest time limit of every case that walks a tree holding a cycle or a link. */
+const BOUND_TIMEOUT = 5000;
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "depwalker-test-"));
@@ -49,7 +57,8 @@ describe("DependencyWalker", () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = createTempDir();
+    // The temporary directory may be a link; discovery reports real locations.
+    tempDir = fs.realpathSync(createTempDir());
   });
 
   afterEach(() => {
@@ -317,11 +326,314 @@ describe("DependencyWalker", () => {
       expect(sharedProject!.name).toBe("shared-component");
     });
 
-    it("throws when root project has no package.json", async () => {
+    it("throws ProjectManifestError naming the file when root project has no package.json", async () => {
       const emptyDir = path.join(tempDir, "empty");
       fs.mkdirSync(emptyDir, { recursive: true });
-      await expect(walkDependencies(emptyDir)).rejects.toThrow();
+      const manifest = path.join(emptyDir, "package.json");
+      let caught: unknown;
+      try {
+        await walkDependencies(emptyDir);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(ProjectManifestError);
+      expect((caught as ProjectManifestError).manifestPath).toBe(manifest);
+      expect((caught as Error).message.startsWith(`Cannot read ${manifest}: `)).toBe(true);
     });
+  });
+
+  // ── walkDependencies: cycles, bad manifests, cancellation ──
+
+  describe("walkDependencies cycles and cancellation", () => {
+    // Every case here runs under a hard bound of 200 file reads, so a walk that
+    // never ends fails by the bound instead of hanging.
+    const LIB = "lib_LTLIBRARIES = libx.la";
+
+    interface Outcome {
+      graph?: DependencyGraph;
+      error?: unknown;
+      reads: number;
+    }
+
+    /** Runs the walk under the read bound; extra hooks are installed inside it and restored first. */
+    async function discover(
+      dir: string,
+      options?: { signal?: AbortSignal },
+      hooks: Array<{ restore(): void }> = []
+    ): Promise<Outcome> {
+      const bound = readBound(200);
+      try {
+        const graph = await walkDependencies(dir, options);
+        return { graph, reads: bound.count() };
+      } catch (error) {
+        return { error, reads: bound.count() };
+      } finally {
+        for (const hook of [...hooks].reverse()) {
+          hook.restore();
+        }
+        bound.restore();
+      }
+    }
+
+    /** The error of the walk as the given class; any other outcome is thrown so its text shows. */
+    function expectError<T extends Error>(outcome: Outcome, type: new (...args: never[]) => T): T {
+      if (outcome.error === undefined) {
+        throw new Error("the walk finished without an error");
+      }
+      if (!(outcome.error instanceof type)) {
+        throw outcome.error;
+      }
+      return outcome.error;
+    }
+
+    it("reports two projects declaring each other by local path", async () => {
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB, dependencies: { "@t/a": "file:../a" } });
+
+      const outcome = await discover(a);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.cycleParticipants).toEqual(["@t/a", "@t/b"]);
+      expect(error.chain).toEqual(["@t/a", "@t/b", "@t/a"]);
+      expect(error.locations).toEqual([a, b]);
+      expect(error.message.split("\n")[0]).toBe("Dependency cycle: @t/a → @t/b → @t/a");
+      expect(outcome.reads).toBeLessThan(10);
+    }, BOUND_TIMEOUT);
+
+    it("reports a project that declares itself with file:.", async () => {
+      const s = path.join(tempDir, "s");
+      writeProject(s, { name: "@t/s", makefileAm: LIB, dependencies: { "@t/s": "file:." } });
+
+      const outcome = await discover(s);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.cycleParticipants).toEqual(["@t/s"]);
+      expect(error.chain).toEqual(["@t/s", "@t/s"]);
+      expect(error.locations).toEqual([s]);
+      expect(error.message.split("\n")[0]).toBe("Dependency cycle: @t/s → @t/s");
+      expect(outcome.reads).toBeLessThan(10);
+    }, BOUND_TIMEOUT);
+
+    it("reports a project whose node_modules entry links to itself", async () => {
+      const s = path.join(tempDir, "s");
+      writeProject(s, { name: "@t/s", makefileAm: LIB, dependencies: { "@t/s": "^1.0.0" } });
+      linkModule(s, "@t/s", "../..");
+
+      const outcome = await discover(s);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.cycleParticipants).toEqual(["@t/s"]);
+      expect(error.locations).toEqual([s]);
+      expect(outcome.reads).toBeLessThan(10);
+    }, BOUND_TIMEOUT);
+
+    it("reports a three-project cycle that passes through a node_modules link", async () => {
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      const c = path.join(tempDir, "c");
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB, dependencies: { "@t/c": "^1.0.0" } });
+      linkModule(b, "@t/c", "../../../c");
+      writeProject(c, { name: "@t/c", makefileAm: LIB, dependencies: { "@t/a": "file:../a" } });
+
+      const outcome = await discover(a);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.chain).toEqual(["@t/a", "@t/b", "@t/c", "@t/a"]);
+      expect(error.locations).toEqual([a, b, c]);
+      expect(error.message.split("\n")[0]).toBe("Dependency cycle: @t/a → @t/b → @t/c → @t/a");
+      expect(outcome.reads).toBeLessThan(20);
+    }, BOUND_TIMEOUT);
+
+    it("starts the chain of a cycle below the root at the first project of the cycle", async () => {
+      const root = path.join(tempDir, "root");
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      writeProject(root, { name: "@t/root", makefileAm: "bin_PROGRAMS = root", dependencies: { "@t/a": "file:../a" } });
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB, dependencies: { "@t/a": "file:../a" } });
+
+      const outcome = await discover(root);
+      const error = expectError(outcome, CyclicDependencyError);
+      expect(error.chain).toEqual(["@t/a", "@t/b", "@t/a"]);
+      expect(error.locations).toEqual([a, b]);
+      expect(error.message).not.toContain("@t/root");
+    }, BOUND_TIMEOUT);
+
+    it("finds a diamond without error, the shared component once, with an edge from each system", async () => {
+      const root = path.join(tempDir, "root");
+      const s1 = path.join(tempDir, "s1");
+      const s2 = path.join(tempDir, "s2");
+      const comp = path.join(tempDir, "comp");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: "bin_PROGRAMS = root",
+        dependencies: { "@t/s1": "file:../s1", "@t/s2": "file:../s2" },
+      });
+      writeProject(s1, { name: "@t/s1", makefileAm: LIB, dependencies: { "@t/comp": "file:../comp" } });
+      writeProject(s2, { name: "@t/s2", makefileAm: LIB, dependencies: { "@t/comp": "file:../comp" } });
+      writeProject(comp, { name: "@t/comp", makefileAm: LIB });
+
+      const outcome = await discover(root);
+      expect(outcome.error).toBeUndefined();
+      const graph = outcome.graph as DependencyGraph;
+      expect([...graph.projects.keys()].sort()).toEqual([comp, root, s1, s2].sort());
+      expect(graph.edges.get(s1)).toEqual([comp]);
+      expect(graph.edges.get(s2)).toEqual([comp]);
+      expect(graph.edges.get(root)).toEqual([s1, s2]);
+      expect(graph.edges.get(comp)).toEqual([]);
+    }, BOUND_TIMEOUT);
+
+    it("names the package.json of a dependency that holds invalid JSON", async () => {
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB });
+      fs.writeFileSync(path.join(b, "package.json"), "{ not json");
+
+      const outcome = await discover(a);
+      const error = expectError(outcome, ProjectManifestError);
+      expect(error.manifestPath).toBe(path.join(b, "package.json"));
+      expect(error.message.startsWith(`Cannot read ${path.join(b, "package.json")}: `)).toBe(true);
+      expect(error).not.toBeInstanceOf(SyntaxError);
+    }, BOUND_TIMEOUT);
+
+    it("ends with DiscoveryCancelledError when the signal aborts while the last project is read", async () => {
+      const a = path.join(tempDir, "a");
+      const b = path.join(tempDir, "b");
+      writeProject(a, { name: "@t/a", makefileAm: LIB, dependencies: { "@t/b": "file:../b" } });
+      writeProject(b, { name: "@t/b", makefileAm: LIB });
+      const controller = new AbortController();
+
+      const hook = onRead("b/package.json", () => controller.abort());
+      const outcome = await discover(a, { signal: controller.signal }, [hook]);
+      expectError(outcome, DiscoveryCancelledError);
+    }, BOUND_TIMEOUT);
+
+    it("rejects without reading anything when the signal is aborted before the call", async () => {
+      const a = path.join(tempDir, "a");
+      writeProject(a, { name: "@t/a", makefileAm: LIB });
+      const controller = new AbortController();
+      controller.abort();
+
+      const outcome = await discover(a, { signal: controller.signal });
+      expectError(outcome, DiscoveryCancelledError);
+      expect(outcome.reads).toBe(0);
+    }, BOUND_TIMEOUT);
+  });
+
+  describe("walkDependencies identity and conflicts", () => {
+    // Projects are identified by real location. Cases that hold a link run under the
+    // hard bound of 200 file reads so that a walk that never ends fails fast.
+    const LIB = "lib_LTLIBRARIES = libx.la";
+
+    async function discover(dir: string): Promise<DependencyGraph> {
+      const bound = readBound(200);
+      try {
+        return await walkDependencies(dir);
+      } finally {
+        bound.restore();
+      }
+    }
+
+    it("finds one project, at its real location, for a link and a local path to one directory", async () => {
+      const root = path.join(tempDir, "root");
+      const q = path.join(tempDir, "q");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "@t/q": "file:../q", "@t/q-alias": "^1.0.0" },
+      });
+      writeProject(q, { name: "@t/q", makefileAm: LIB });
+      linkModule(root, "@t/q-alias", "../../../q");
+
+      const graph = await discover(root);
+      expect([...graph.projects.keys()].sort()).toEqual([q, root].sort());
+      expect(graph.projects.get(q)?.path).toBe(q);
+      expect(graph.edges.get(root)).toEqual([q]);
+    }, BOUND_TIMEOUT);
+
+    it("finds one project for a file: path through a link to the project's parent directory", async () => {
+      const root = path.join(tempDir, "root");
+      const parent = path.join(tempDir, "parent");
+      const q = path.join(parent, "q");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "@t/q": "file:../parent/q", "@t/q-via-link": "file:../parentlink/q" },
+      });
+      writeProject(q, { name: "@t/q", makefileAm: LIB });
+      fs.symlinkSync("parent", path.join(tempDir, "parentlink"));
+
+      const graph = await discover(root);
+      expect([...graph.projects.keys()].sort()).toEqual([q, root].sort());
+      expect(graph.edges.get(root)).toEqual([q]);
+    }, BOUND_TIMEOUT);
+
+    it("lists dependencies as package names, once each, in declaration order, when two keys reach one directory", async () => {
+      const root = path.join(tempDir, "root");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "@t/q": "file:../q", "@t/r": "file:../r", "@t/q-again": "file:../q" },
+      });
+      writeProject(path.join(tempDir, "q"), { name: "@t/q", makefileAm: LIB });
+      writeProject(path.join(tempDir, "r"), { name: "@t/r", makefileAm: LIB });
+
+      const graph = await discover(root);
+      expect(graph.projects.get(root)?.dependencies).toEqual(["@t/q", "@t/r"]);
+      expect(graph.edges.get(root)).toEqual([path.join(tempDir, "q"), path.join(tempDir, "r")]);
+    }, BOUND_TIMEOUT);
+
+    it("reports a local-path project and a separate copy under one name, with both real locations in the order found", async () => {
+      const root = path.join(tempDir, "root");
+      const local = path.join(tempDir, "q");
+      const copy = path.join(root, "node_modules", "@t", "q");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "q-local": "file:../q", "@t/q": "^1.0.0" },
+      });
+      writeProject(local, { name: "@t/q", makefileAm: LIB });
+      writeProject(copy, { name: "@t/q", makefileAm: LIB });
+
+      let thrown: unknown;
+      try {
+        await discover(root);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(ConflictingProjectError);
+      const error = thrown as ConflictingProjectError;
+      expect(error.packageName).toBe("@t/q");
+      expect(error.locations).toEqual([local, copy]);
+      expect(error.message).toContain(local);
+      expect(error.message).toContain(copy);
+    }, BOUND_TIMEOUT);
+
+    it("skips a dangling node_modules link and a missing file: directory (guard)", async () => {
+      const root = path.join(tempDir, "root");
+      writeProject(root, {
+        name: "@t/root",
+        makefileAm: LIB,
+        dependencies: { "@t/dangling": "^1.0.0", "@t/missing": "file:../missing" },
+      });
+      linkModule(root, "@t/dangling", "../../../nowhere");
+
+      const graph = await discover(root);
+      expect([...graph.projects.keys()]).toEqual([root]);
+      expect(graph.projects.get(root)?.dependencies).toEqual([]);
+    }, BOUND_TIMEOUT);
+
+    it("discovers a project directory named with spaces and shell characters at its exact path (guard)", async () => {
+      const root = path.join(tempDir, "root");
+      const oddName = "a b$'\"";
+      const odd = path.join(tempDir, oddName);
+      writeProject(root, { name: "@t/root", makefileAm: LIB, dependencies: { "@t/odd": "file:../" + oddName } });
+      writeProject(odd, { name: "@t/odd", makefileAm: LIB });
+
+      const graph = await discover(root);
+      expect(graph.projects.get(odd)?.path).toBe(odd);
+      expect(graph.edges.get(root)).toEqual([odd]);
+    }, BOUND_TIMEOUT);
   });
 
   // ── resolveBuildOrder ──────────────────────────────────────
@@ -510,6 +822,23 @@ describe("DependencyWalker", () => {
       expect(() => resolveBuildOrder(graph, aPath)).toThrow(
         CyclicDependencyError
       );
+
+      // Defensive form: leftover names in name order, no location lines.
+      let caught: unknown;
+      try {
+        resolveBuildOrder(graph, aPath);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(CyclicDependencyError);
+      expect((caught as Error).message.split("\n")).toEqual([
+        "Dependency cycle: project-a → project-b → project-a",
+        "Each project above declares the next one in its package.json \"dependencies\"; remove the declaration that closes the cycle.",
+      ]);
+      expect((caught as CyclicDependencyError).cycleParticipants).toEqual([
+        "project-a",
+        "project-b",
+      ]);
     });
 
     it("sorts same-tier projects alphabetically for stability", () => {
@@ -597,6 +926,110 @@ describe("DependencyWalker", () => {
       // z-component (Component=0) should come before a-system (System=1)
       expect(order[0].name).toBe("z-component");
       expect(order[1].name).toBe("a-system");
+    });
+  });
+
+  // ── Discovery errors ───────────────────────────────────────
+
+  describe("discovery errors", () => {
+    // Constructor forms chosen here: CyclicDependencyError(participants,
+    // locations?) takes the project names without the repeated first name,
+    // and optionally their real locations in the same order;
+    // ConflictingProjectError(packageName, first, second);
+    // ProjectManifestError(manifestPath, reason) where manifestPath is the
+    // path of the package.json file; DiscoveryCancelledError() takes no
+    // arguments.
+    const cycleMessage = [
+      "Dependency cycle: @t/a → @t/b → @t/a",
+      "  @t/a  /loc/a",
+      "  @t/b  /loc/b",
+      "Each project above declares the next one in its package.json \"dependencies\"; remove the declaration that closes the cycle.",
+    ].join("\n");
+
+    it("CyclicDependencyError describes a two-project cycle", () => {
+      const error = new CyclicDependencyError(
+        ["@t/a", "@t/b"],
+        ["/loc/a", "/loc/b"]
+      );
+      expect(error.cycleParticipants).toEqual(["@t/a", "@t/b"]);
+      expect(error.chain).toEqual(["@t/a", "@t/b", "@t/a"]);
+      expect(error.locations).toEqual(["/loc/a", "/loc/b"]);
+      expect(error.message).toBe(cycleMessage);
+    });
+
+    it("CyclicDependencyError describes a cycle of one", () => {
+      const error = new CyclicDependencyError(["@t/s"], ["/loc/s"]);
+      expect(error.cycleParticipants).toEqual(["@t/s"]);
+      expect(error.chain).toEqual(["@t/s", "@t/s"]);
+      expect(error.message).toBe(
+        [
+          "Dependency cycle: @t/s → @t/s",
+          "  @t/s  /loc/s",
+          "The project declares itself in its package.json \"dependencies\"; remove that declaration.",
+        ].join("\n")
+      );
+    });
+
+    it("ConflictingProjectError names both locations", () => {
+      const error = new ConflictingProjectError("@t/q", "/one/q", "/two/q");
+      expect(error.packageName).toBe("@t/q");
+      expect(error.locations).toEqual(["/one/q", "/two/q"]);
+      expect(error.message).toBe(
+        [
+          "Two different projects are named @t/q:",
+          "  /one/q",
+          "  /two/q",
+          "Make every declaration of @t/q lead to the same directory, or give one of them another name.",
+        ].join("\n")
+      );
+    });
+
+    it("ProjectManifestError names the file and the reason", () => {
+      const error = new ProjectManifestError(
+        "/loc/x/package.json",
+        "Unexpected token"
+      );
+      expect(error.manifestPath).toBe("/loc/x/package.json");
+      expect(error.reason).toBe("Unexpected token");
+      expect(error.message).toBe(
+        "Cannot read /loc/x/package.json: Unexpected token"
+      );
+    });
+
+    it("the three discovery errors share DependencyDiscoveryError", () => {
+      const errors = [
+        new CyclicDependencyError(["@t/a", "@t/b"], ["/loc/a", "/loc/b"]),
+        new ConflictingProjectError("@t/q", "/one/q", "/two/q"),
+        new ProjectManifestError("/loc/x/package.json", "bad"),
+      ];
+      for (const error of errors) {
+        expect(error).toBeInstanceOf(DependencyDiscoveryError);
+        expect(error).toBeInstanceOf(Error);
+      }
+    });
+
+    it("DiscoveryCancelledError is an Error but not a discovery error", () => {
+      const error = new DiscoveryCancelledError();
+      expect(error).toBeInstanceOf(Error);
+      expect(error).not.toBeInstanceOf(DependencyDiscoveryError);
+    });
+
+    it("each class sets name to its class name", () => {
+      expect(new CyclicDependencyError(["@t/a"], ["/a"]).name).toBe(
+        "CyclicDependencyError"
+      );
+      expect(new ConflictingProjectError("@t/q", "/a", "/b").name).toBe(
+        "ConflictingProjectError"
+      );
+      expect(new ProjectManifestError("/a/package.json", "x").name).toBe(
+        "ProjectManifestError"
+      );
+      expect(new DiscoveryCancelledError().name).toBe(
+        "DiscoveryCancelledError"
+      );
+      expect(new DependencyDiscoveryError("x").name).toBe(
+        "DependencyDiscoveryError"
+      );
     });
   });
 

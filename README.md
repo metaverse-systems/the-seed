@@ -363,7 +363,25 @@ Running `the-seed build` without a subcommand performs only step 4 and the insta
 
 #### Recursive Builds
 
-The `--recursive` option discovers all transitive `file:` and `node_modules` dependencies from `package.json`, classifies each project by type (component, system, or program), and builds them in topological order so that dependencies are always installed before their dependents.
+The `--recursive` option finds the projects the current project depends on, classifies each by type (component, system, or program), and builds them in topological order so that dependencies are always installed before their dependents.
+
+Dependencies are found by one rule, which `the-seed package` uses too (see [package](#package)): for each entry in a project's `package.json` `dependencies`, a `file:` path is taken relative to the project that declares it, and any other name is looked up in that project's own `node_modules`. Parent directories are never searched. A project is identified by its real location, so a project reached through links, or declared by several projects, is built once.
+
+Before anything runs, the build stops with exit status 1 and a message when the projects cannot be ordered or read:
+
+- A dependency cycle, including a project that declares itself, names the projects in the cycle and where they are, for example:
+
+  ```text
+  Dependency cycle: @t/a → @t/b → @t/a
+    @t/a  /work/a
+    @t/b  /work/b
+  Each project above declares the next one in its package.json "dependencies"; remove the declaration that closes the cycle.
+  ```
+
+- Two different directories with the same package name are reported with both locations.
+- A `package.json` that cannot be read or parsed is reported with its path and the reason.
+
+A stop request (Ctrl+C, `SIGTERM`, `SIGHUP`) while the dependencies are being scanned cancels the build.
 
 ```bash
 the-seed build native --recursive
@@ -442,9 +460,31 @@ Behavior:
 1. Validates that all directories exist
 2. Parses `src/Makefile.am` for binary type (`bin_PROGRAMS` or `lib_LTLIBRARIES`)
 3. Resolves compiled binaries from `src/.libs/` (the build strips them with `--release` and signs them when the scope has a certificate)
-4. Resolves transitive project dependencies from `package.json` and `node_modules`
+4. Finds dependency projects exactly as `the-seed build --recursive` does: `file:` paths relative to the declaring project, other names in that project's own `node_modules`, parent directories never searched, each project once by real location. A dependency cycle, two different directories with one package name, or an unreadable `package.json` stops packaging with the same message as the build
 5. Analyzes shared library dependencies using the native DependencyLister addon
-6. Copies all resolved files to the output directory
+6. Names each Linux library by the name programs load it by (its soname, for example `libgreet.so.0`), copied as a regular file from what that name resolves to; programs and Windows files keep their names
+7. Copies each file's `.sig` under the same name, from the same place
+8. Copies a file reached twice with the same content once; refuses two different files for one name, naming both, and writes nothing
+9. Lists the libraries needed but not packaged
+
+The summary counts every file written, signatures included:
+
+```text
+Packaged 5 files into dist/ (2 signatures included)
+Not packaged (expected on the target system):
+  libc.so.6 (needed by tiny)
+```
+
+A refusal prints `Error: <message>` and exits with status 1; the output directory is not created. A collision reads:
+
+```text
+Error: Two different files would be packaged as libfoo.so.1:
+  <source 1> (build of @t/a)
+  <source 2> (build of @t/b)
+Nothing was written.
+```
+
+**Changes from earlier versions.** Packaged output now includes the dependency projects declared in `package.json` (whether `file:` paths or packages installed from npm into `node_modules`) and each Linux library under its loadable name (for example `libgreet.so.0`). It no longer includes `lib<name>.so` development copies or fully versioned names such as `libgreet.so.0.0.0`; scripts that look for those names must change.
 
 Search paths for shared library resolution include `<prefix>/<target>/lib`, `<prefix>/<target>/bin`, and MinGW cross-compiler runtime directories.
 
@@ -619,7 +659,7 @@ the-seed installer windows
 - `<name>-<version>.wxs` — WiX XML source (retained for inspection)
 - `<name>-<version>.msi` — Windows Installer package
 
-If `dist/` does not exist, the command automatically runs `the-seed package dist .` to populate it before generating the installer. The installer installs files to `C:\Program Files\<name>\` on Windows and uses a deterministic `UpgradeCode` derived from the project name for seamless major-upgrade behavior.
+If `dist/` does not exist, the package step creates it in the project directory before the installer is generated; if packaging refuses (for example a name collision), no installer is built. The installer installs files to `C:\Program Files\<name>\` on Windows and uses a deterministic `UpgradeCode` derived from the project name for seamless major-upgrade behavior.
 
 ## API Reference
 
@@ -707,10 +747,30 @@ constructor(config: Config)
 |--------|-------------|-------------|
 | `getSearchPaths()` | `string[]` | Return library search paths for the current target |
 | `parseMakefileAm(projectDir: string)` | `{ type: "program" \| "library"; name: string } \| null` | Parse src/Makefile.am for binary type and name |
-| `resolveBinaryPaths(projectDir: string)` | `string[]` | Resolve compiled binary paths from src/.libs/ |
-| `getPackageDeps(projectDir: string, visited?: Set<string>)` | `string[]` | Recursively resolve project dependencies |
+| `resolveBinaryPaths(projectDir: string)` | `string[]` | Resolve compiled binary paths from src/.libs/; a native library is the real file behind `<name>.so`, which packaging writes under its soname |
+| `plan(projectDirs: string[])` | `Promise<PackagePlan>` | Decide what packaging would write, naming each file, its source, its signature and its origin, without writing anything; a refusal is `{ ok: false, message }` |
 | `resolveDependencies(binaryPaths: string[], searchPaths: string[])` | `DependencyResultType` | Analyze shared library dependencies using native addon |
-| `run(outputDir: string, projectDirs: string[])` | `void` | Execute full packaging workflow |
+| `run(outputDir: string, projectDirs: string[])` | `Promise<PackageResult>` | Execute the full packaging workflow; a refusal or failure is printed, writes nothing and resolves `success: false` |
+
+`getPackageDeps` no longer exists; `plan` finds dependency projects with `walkDependencies`.
+
+#### Installer
+
+`ensureDist(projectDir)` resolves `boolean` and `run(projectDir)` resolves `string | null`: the path of the installer, or `null` when packaging was refused or a later step failed (no `.wxs` or `.msi` is written for a refusal).
+
+#### Dependency discovery
+
+`walkDependencies(projectDir, options?)` (from `@metaverse-systems/the-seed/dist/DependencyWalker`) resolves the `DependencyGraph` of a project by the rule in [Recursive Builds](#recursive-builds). `options.signal` is an `AbortSignal`; aborting it rejects with `DiscoveryCancelledError`. It rejects with one of these error classes, all exported from the package:
+
+| Class | Raised when |
+|-------|-------------|
+| `DependencyDiscoveryError` | Base class of the three below |
+| `CyclicDependencyError` | Projects depend on each other, or a project on itself (`cycleParticipants`, `chain`, `locations`) |
+| `ConflictingProjectError` | Two different directories carry one package name (`packageName`, `locations`) |
+| `ProjectManifestError` | A `package.json` cannot be read or parsed (`manifestPath`, `reason`) |
+| `DiscoveryCancelledError` | The signal was aborted; not a `DependencyDiscoveryError` |
+
+`readElfNames(filePath)` returns `{ soname, needed }` for an ELF file, `null` for any other file, and throws for a malformed ELF file.
 
 #### Signing
 
@@ -807,6 +867,36 @@ interface DependencyResultType {
   errors: Record<string, string>;
 }
 
+interface PlannedFile {
+  name: string;               // name written in the output directory (the loadable name for a Linux library)
+  source: string;             // real file whose content is copied
+  sha256: string;
+  signature: string | null;   // copied as "<name>.sig"
+  origin:
+    | { kind: "project"; project: string; location: string }
+    | { kind: "search-path"; directory: string };
+}
+
+interface UnpackagedLibrary {
+  name: string;               // needed name left to the target system
+  neededBy: string;           // packaged name of the first file that needs it
+}
+
+type PackagePlan =
+  | { ok: true; projects: string[]; files: PlannedFile[]; notPackaged: UnpackagedLibrary[] }
+  | { ok: false; message: string };
+
+interface PackageResult {
+  success: boolean;
+  message: string | null;     // refusal or failure text; null on success
+  outputDir: string;
+  projects: string[];
+  files: string[];            // names written, signatures excluded
+  signatures: number;
+  fileCount: number;          // files plus signatures
+  notPackaged: UnpackagedLibrary[];
+}
+
 type SignatureType = "embedded" | "detached";
 type BinaryFormat = "pe" | "macho" | "other";
 
@@ -895,6 +985,13 @@ import {
   PackageType,
   ScriptArgsType,
   DependencyResultType,
+  PackagePlan,
+  PackageResult,
+  DependencyDiscoveryError,
+  CyclicDependencyError,
+  ConflictingProjectError,
+  ProjectManifestError,
+  DiscoveryCancelledError,
   SignatureType,
   BinaryFormat,
   FormatDetectionResult,
@@ -915,7 +1012,8 @@ console.log(scopes.getScopes());
 
 // Package a project
 const pkg = new Package(config);
-pkg.run("./output", ["./my-project"]);
+const packaged = await pkg.run("./output", ["./my-project"]);
+console.log(packaged.success, packaged.fileCount);
 
 // Sign a binary (auto-detects PE/Mach-O for embedded, detached for others)
 const signing = new Signing();

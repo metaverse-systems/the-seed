@@ -10,6 +10,9 @@ import Signing from "../src/Signing";
 import { readSignedData } from "../src/CmsReader";
 import { checkMachO, sliceSignatureBlobs } from "./helpers/MachOChecker";
 import { toolEnv } from "./helpers/IndependentCheck";
+import { toolEnv as nativeToolEnv } from "./helpers/NativeTree";
+import { elfImage } from "./helpers/ElfImage";
+import { writeProject, linkModule, readBound, onRead } from "./helpers/ScratchProjects";
 
 // Expected shapes of the runner's pure functions, as exercised here:
 //   summariseResults(jest, entries) -> { lines: string[], failed: boolean }
@@ -908,5 +911,166 @@ describe("independent checks", () => {
     for (const specifier of specifiers) {
       expect(specifier).not.toMatch(/(^|\/)src(\/|$)/);
     }
+  });
+});
+
+describe("scratch helpers", () => {
+  let scratch: string;
+
+  beforeEach(() => {
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), "scratch-helpers-"));
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(scratch, { recursive: true, force: true });
+  });
+
+  function filePaths(count: number): string[] {
+    const paths: string[] = [];
+    for (let index = 0; index < count; index++) {
+      const file = path.join(scratch, `file${index}.txt`);
+      fs.writeFileSync(file, `content ${index}`);
+      paths.push(file);
+    }
+    return paths;
+  }
+
+  for (const name of ["ScratchProjects.ts", "NativeTree.ts", "ElfImage.ts"]) {
+    it(`${name} imports nothing from the source tree`, () => {
+      const lines = fs
+        .readFileSync(rel("test", "helpers", name), "utf8")
+        .split("\n")
+        .filter((line) => /^\s*import\b|\brequire\(|^\s*}?\s*from\s/.test(line));
+      for (const line of lines) {
+        expect(line).not.toMatch(/src\/|\.\.\/\.\./);
+      }
+    });
+  }
+
+  it("readBound lets the limit through, rejects the next read and counts the calls", async () => {
+    const files = filePaths(5);
+    const bound = readBound(3);
+    try {
+      await fs.promises.readFile(files[0]);
+      await fs.promises.readFile(files[1]);
+      await fs.promises.readFile(files[2]);
+      await expect(fs.promises.readFile(files[3])).rejects.toThrow("walk did not finish: more than 3 file reads");
+      expect(bound.count()).toBe(4);
+    } finally {
+      bound.restore();
+    }
+  });
+
+  it("readBound reads work again after restore", async () => {
+    const files = filePaths(2);
+    const bound = readBound(1);
+    await fs.promises.readFile(files[0]);
+    await expect(fs.promises.readFile(files[1])).rejects.toThrow("more than 1 file reads");
+    bound.restore();
+    expect((await fs.promises.readFile(files[1])).toString()).toBe("content 1");
+    expect((await fs.promises.readFile(files[0])).toString()).toBe("content 0");
+  });
+
+  // onRead returns an object with restore(), like readBound, so a case can remove the hook early.
+  it("onRead runs the action once, on the first matching read", async () => {
+    const dir = path.join(scratch, "x");
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "package.json"), "{}");
+    const other = filePaths(1)[0];
+    const action = jest.fn();
+    const hook = onRead("x/package.json", action);
+    try {
+      await fs.promises.readFile(other);
+      expect(action).not.toHaveBeenCalled();
+      expect((await fs.promises.readFile(path.join(dir, "package.json"))).toString()).toBe("{}");
+      expect(action).toHaveBeenCalledTimes(1);
+      await fs.promises.readFile(path.join(dir, "package.json"));
+      expect(action).toHaveBeenCalledTimes(1);
+    } finally {
+      hook.restore();
+    }
+  });
+
+  it("onRead and readBound compose in one case", async () => {
+    const dir = path.join(scratch, "x");
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "package.json"), "{}");
+    const action = jest.fn();
+    const bound = readBound(2);
+    const hook = onRead("x/package.json", action);
+    try {
+      await fs.promises.readFile(path.join(dir, "package.json"));
+      expect(action).toHaveBeenCalledTimes(1);
+      await fs.promises.readFile(path.join(dir, "package.json"));
+      await expect(fs.promises.readFile(path.join(dir, "package.json"))).rejects.toThrow("more than 2 file reads");
+      expect(action).toHaveBeenCalledTimes(1);
+    } finally {
+      hook.restore();
+      bound.restore();
+    }
+  });
+
+  it("NativeTree toolEnv has exactly PATH and LC_ALL", () => {
+    const env = nativeToolEnv();
+    expect(Object.keys(env).sort()).toEqual(["LC_ALL", "PATH"]);
+    expect(env.LC_ALL).toBe("C");
+    expect(env.PATH).toBe(process.env.PATH ?? "/usr/bin:/bin");
+  });
+
+  it("elfImage starts with the ELF magic and the requested class and byte order", () => {
+    const cases: { bits: 32 | 64; endian: "little" | "big"; klass: number; data: number }[] = [
+      { bits: 64, endian: "little", klass: 2, data: 1 },
+      { bits: 32, endian: "little", klass: 1, data: 1 },
+      { bits: 64, endian: "big", klass: 2, data: 2 },
+      { bits: 32, endian: "big", klass: 1, data: 2 },
+    ];
+    for (const item of cases) {
+      const image = elfImage({ bits: item.bits, endian: item.endian, type: "dyn", soname: "libx.so.1" });
+      expect(Buffer.isBuffer(image)).toBe(true);
+      expect(image.subarray(0, 4)).toEqual(Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+      expect(image[4]).toBe(item.klass);
+      expect(image[5]).toBe(item.data);
+    }
+  });
+
+  it("elfImage carries the soname text and needed names", () => {
+    const image = elfImage({ bits: 64, endian: "little", type: "dyn", soname: "libx.so.1", needed: ["liba.so.2"] });
+    expect(image.includes(Buffer.from("libx.so.1\0"))).toBe(true);
+    expect(image.includes(Buffer.from("liba.so.2\0"))).toBe(true);
+  });
+
+  it("writeProject writes package.json and src/Makefile.am with the given contents", () => {
+    const dir = path.join(scratch, "proj");
+    writeProject(dir, {
+      name: "@t/greet",
+      makefileAm: "lib_LTLIBRARIES = libgreet.la\n",
+      dependencies: { "@t/other": "file:../other" },
+    });
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, "package.json"), "utf8"));
+    expect(manifest.name).toBe("@t/greet");
+    expect(manifest.dependencies).toEqual({ "@t/other": "file:../other" });
+    expect(fs.readFileSync(path.join(dir, "src", "Makefile.am"), "utf8")).toBe("lib_LTLIBRARIES = libgreet.la\n");
+  });
+
+  it("writeProject writes configure.ac when given", () => {
+    const dir = path.join(scratch, "proj");
+    writeProject(dir, { name: "plain", makefileAm: "", configureAc: "AC_INIT([plain],[1])\n" });
+    expect(fs.readFileSync(path.join(dir, "configure.ac"), "utf8")).toBe("AC_INIT([plain],[1])\n");
+  });
+
+  it("linkModule makes node_modules/<name> a symbolic link, relative when given relative", () => {
+    const target = path.join(scratch, "greet");
+    fs.mkdirSync(target);
+    const dir = path.join(scratch, "hello");
+    fs.mkdirSync(dir);
+    linkModule(dir, "@t/greet", "../greet");
+    const link = path.join(dir, "node_modules", "@t", "greet");
+    expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(fs.readlinkSync(link)).toBe("../greet");
+    linkModule(dir, "plain", target);
+    const plain = path.join(dir, "node_modules", "plain");
+    expect(fs.lstatSync(plain).isSymbolicLink()).toBe(true);
+    expect(fs.realpathSync(plain)).toBe(fs.realpathSync(target));
   });
 });

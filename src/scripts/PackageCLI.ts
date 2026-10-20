@@ -2,7 +2,7 @@ import Config from "../Config";
 import Package from "../Package";
 import { ScriptArgsType } from "../types";
 
-const PackageCLI = (scriptConfig: ScriptArgsType) => {
+const PackageCLI = async (scriptConfig: ScriptArgsType) => {
   const command = scriptConfig.args[3];
 
   // No arguments or help subcommand
@@ -18,6 +18,13 @@ const PackageCLI = (scriptConfig: ScriptArgsType) => {
     console.log("The command reads src/Makefile.am to determine the binary type and name,");
     console.log("resolves installed binaries for all build targets, uses DependencyLister");
     console.log("to find shared library dependencies, and copies everything into the output directory.");
+    console.log("");
+    console.log("Dependency projects are found the way \"the-seed build --recursive\" finds them, from the");
+    console.log("\"dependencies\" of each project's package.json: a \"file:\" path is taken relative to the declaring");
+    console.log("project, and any other dependency (for example one installed from npm) is looked up in that");
+    console.log("project's node_modules. Linux libraries are written under the name programs load them by");
+    console.log("(for example libgreet.so.0), each with its .sig when signed.");
+    console.log("Two different files with the same name are refused; nothing is written.");
     return;
   }
 
@@ -32,9 +39,9 @@ const PackageCLI = (scriptConfig: ScriptArgsType) => {
 
   const config = new Config(scriptConfig.configDir);
   const pkg = new Package(config);
-  const success = pkg.run(outputDir, projectDirs);
+  const result = await pkg.run(outputDir, projectDirs);
 
-  if (!success) {
+  if (!result.success) {
     process.exit(1);
   }
 };

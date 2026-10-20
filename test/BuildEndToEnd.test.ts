@@ -13,6 +13,7 @@ import { findOnPath } from "../src/ProcessRunner";
 import { installLib } from "../src/Dependencies";
 import { WINDOWS_TOOLCHAIN_PKGCONFIG_DIRS } from "../src/LibrarySearch";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { runFrom } from "./helpers/NativeTree";
 import { copyFixture } from "./helpers/Fixture";
 import { findSystemOnlyPackage, writePackageDescription } from "./helpers/SystemPackage";
 
@@ -868,23 +869,30 @@ describe("BuildEndToEnd", () => {
       const warnSpy = jest.spyOn(console, "warn").mockImplementation(() => undefined);
       let packaged: boolean;
       try {
-        packaged = new Package(new Config(configDir)).run(outputDir, [projectDir]);
+        packaged = (await new Package(new Config(configDir)).run(outputDir, [projectDir])).success;
       } finally {
         errorSpy.mockRestore();
         warnSpy.mockRestore();
       }
 
       expect(packaged).toBe(true);
-      // The program comes from src/.libs, the libraries it loads from the prefix (copied under their real names)
-      const shipped = ["tiny", "libtinyrelink.so.0.0.0", "libtinygreet.so.0.0.0"].map((name) => path.join(outputDir, name));
+      // The program comes from src/.libs, the libraries it loads from the prefix (copied under their loadable names)
+      const shipped = ["tiny", "libtinyrelink.so.0", "libtinygreet.so.0"].map((name) => path.join(outputDir, name));
       for (const file of shipped) {
         expect([file, fs.statSync(file).isFile()]).toEqual([file, true]);
         expect([file, fs.existsSync(file + ".sig")]).toEqual([file, true]);
         expectStripped(file);
         await expectValid(file, "detached");
       }
+      const outputNames = fs.readdirSync(outputDir);
+      expect(outputNames.filter((name) => name.endsWith(".so") || /\.so\.\d+\.\d+\.\d+$/.test(name))).toEqual([]);
       expect(fs.readFileSync(path.join(outputDir, "tiny")).equals(fs.readFileSync(path.join(projectDir, "src", ".libs", "tiny")))).toBe(true);
-      expect(fs.readFileSync(path.join(outputDir, "libtinygreet.so.0.0.0")).equals(fs.readFileSync(path.join(nativePrefix, "lib", "libtinygreet.so.0.0.0")))).toBe(true);
+      expect(fs.readFileSync(path.join(outputDir, "libtinygreet.so.0")).equals(fs.readFileSync(path.join(nativePrefix, "lib", "libtinygreet.so.0.0.0")))).toBe(true);
+
+      // With the prefix and the project out of reach the program still runs from the output directory
+      fs.renameSync(prefix, path.join(root, "moved-prefix"));
+      fs.renameSync(projectDir, path.join(root, "moved-project"));
+      expect(runFrom(outputDir, "tiny")).toEqual({ status: 0, output: "tiny library ok\n" });
     }, GROUP_TIMEOUT);
 
     it("building twice leaves one valid signature and the same size (native)", async () => {

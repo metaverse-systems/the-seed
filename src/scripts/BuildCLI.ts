@@ -3,6 +3,7 @@ import Config from "../Config";
 import Build from "../Build";
 import { ScriptArgsType } from "../types";
 import { buildRecursive } from "../RecursiveBuild";
+import { DependencyDiscoveryError } from "../DependencyWalker";
 import { parseBuildArgs, optionHelp, VALID_OPTIONS_LINE } from "../BuildArgs";
 
 const printHelp = () => {
@@ -93,16 +94,26 @@ const withCancellation = async (
 
 const runRecursiveBuild = (target: string, release: boolean, parallel: number, jobs: number | undefined) =>
   withCancellation(async ({ signal, forceSignal }) => {
-    const result = await buildRecursive({
-      target,
-      fullReconfigure: true,
-      projectDir: process.cwd(),
-      release,
-      parallel,
-      jobs,
-      signal,
-      forceSignal,
-    });
+    let result;
+    try {
+      result = await buildRecursive({
+        target,
+        fullReconfigure: true,
+        projectDir: process.cwd(),
+        release,
+        parallel,
+        jobs,
+        signal,
+        forceSignal,
+      });
+    } catch (error) {
+      if (error instanceof DependencyDiscoveryError) {
+        console.error(error.message);
+        process.exitCode = 1;
+        return false;
+      }
+      throw error;
+    }
     if (!result.cancelled && !result.success) {
       process.exitCode = 1;
     }

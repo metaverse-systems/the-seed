@@ -135,19 +135,24 @@ class Installer {
   };
 
   /**
-   * Ensure the dist/ directory exists. If missing, auto-runs Package.run('dist', ['.']).
-   * Returns true if dist/ exists and is non-empty after this call.
+   * Ensure the dist/ directory of the project exists. If missing, packages the project into it
+   * (the project's own dist/, whatever the working directory is). When packaging is refused,
+   * for example for a name collision, the refusal is printed and no installer is built.
+   * Resolves true if dist/ exists and is non-empty after this call.
    */
-  ensureDist = (projectDir: string): boolean => {
+  ensureDist = async (projectDir: string): Promise<boolean> => {
     const distDir = path.join(projectDir, "dist");
 
     if (!fs.existsSync(distDir)) {
       console.log("dist/ not found, running package step...");
       try {
         const pkg = new Package(this.config);
-        const success = pkg.run("dist", [projectDir]);
-        if (!success) {
-          console.error("Error: Packaging failed. Ensure the project has been cross-compiled with 'the-seed build windows'.");
+        const result = await pkg.run(distDir, [projectDir]);
+        if (!result.success) {
+          if (result.message !== null && result.message.startsWith("No installed binaries found for")) {
+            console.error("Ensure the project has been cross-compiled with 'the-seed build windows'.");
+          }
+          console.error("Error: Packaging failed; no installer was built.");
           return false;
         }
       } catch (err) {
@@ -260,9 +265,9 @@ ${componentRefs}
 
   /**
    * Full pipeline: validate → ensure dist → generate → compile.
-   * Returns true on success.
+   * Resolves the path of the installer, or null on failure.
    */
-  run = (projectDir: string): string | null => {
+  run = async (projectDir: string): Promise<string | null> => {
     // Step 1: Validate wixl is installed
     if (!this.checkWixl()) {
       console.error("Error: wixl is not installed. Install it with: sudo apt install msitools");
@@ -276,7 +281,7 @@ ${componentRefs}
     }
 
     // Step 3: Ensure dist/ directory
-    if (!this.ensureDist(projectDir)) {
+    if (!(await this.ensureDist(projectDir))) {
       return null;
     }
 

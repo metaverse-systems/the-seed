@@ -20,6 +20,7 @@ import {
 import {
   walkDependencies,
   resolveBuildOrder,
+  DiscoveryCancelledError,
 } from "./DependencyWalker";
 
 const TIER_NAMES = ["Components", "Systems", "Programs"];
@@ -101,7 +102,7 @@ function printReport(result: RecursiveBuildResult, total: number): void {
  * Execute a recursive build across all dependencies of a project.
  *
  * Algorithm:
- * 1. Call walkDependencies(options.projectDir) to discover the graph
+ * 1. Call walkDependencies(options.projectDir, { signal }) to discover the graph
  * 2. Call resolveBuildOrder(graph, options.projectDir) to get ordered list
  * 3. Build the projects with runSchedule: up to `parallel` at once (default
  *    1, never more than the processors), each only after its dependencies
@@ -132,7 +133,28 @@ export async function buildRecursive(
   validateJobs(options.jobs);
 
   // Discover dependency graph and resolve build order
-  const graph = await walkDependencies(projectDir);
+  console.log(`Scanning dependencies of ${projectDir}...`);
+  let graph;
+  try {
+    graph = await walkDependencies(projectDir, { signal });
+  } catch (error) {
+    if (error instanceof DiscoveryCancelledError) {
+      console.log("");
+      console.log("Recursive build cancelled.");
+      return {
+        success: false,
+        completed: [],
+        failed: null,
+        failureOutput: null,
+        remaining: [],
+        cancelled: true,
+        failures: [],
+        interrupted: [],
+        notStarted: [],
+      };
+    }
+    throw error;
+  }
   const buildOrder = resolveBuildOrder(graph, projectDir);
   const total = buildOrder.length;
 
@@ -142,7 +164,6 @@ export async function buildRecursive(
   const env = concurrency > 1 ? boundedEnv() : process.env;
 
   // Log build plan
-  console.log(`Scanning dependencies for ${buildOrder[buildOrder.length - 1]?.name ?? "project"}...`);
   console.log(`Discovered ${total} buildable project${total === 1 ? "" : "s"}`);
   console.log("Build order:");
   for (let i = 0; i < buildOrder.length; i++) {

@@ -40,6 +40,11 @@ jest.mock("../src/RecursiveBuild", () => ({
 }));
 
 import { buildRecursive } from "../src/RecursiveBuild";
+import {
+  CyclicDependencyError,
+  DependencyDiscoveryError,
+  ProjectManifestError,
+} from "../src/DependencyWalker";
 import BuildCLI from "../src/scripts/BuildCLI";
 import { ScriptArgsType, RecursiveBuildResult, ProjectBuildResult } from "../src/types";
 
@@ -393,6 +398,42 @@ describe("BuildCLI --jobs", () => {
     } finally {
       errorSpy.mockRestore();
     }
+  });
+});
+
+describe("BuildCLI discovery errors in a recursive build", () => {
+  let errorSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockedBuildRecursive.mockReset();
+    process.exitCode = undefined;
+    errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    process.exitCode = undefined;
+  });
+
+  it.each([
+    ["a DependencyDiscoveryError", new DependencyDiscoveryError("Discovery stopped.\nSecond line.")],
+    ["a CyclicDependencyError", new CyclicDependencyError(["@t/a", "@t/b"], ["/loc/a", "/loc/b"])],
+    ["a ProjectManifestError", new ProjectManifestError("/loc/b/package.json", "Unexpected end of JSON input")],
+  ])("prints exactly the message, exits 1 and throws nothing when the build rejects with %s", async (_name, error) => {
+    mockedBuildRecursive.mockRejectedValueOnce(error);
+
+    await expect(BuildCLI(makeArgs(["native", "--recursive"]))).resolves.toBeUndefined();
+
+    expect(errorSpy.mock.calls).toEqual([[error.message]]);
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("still propagates a plain Error", async () => {
+    const failure = new Error("not a discovery error");
+    mockedBuildRecursive.mockRejectedValueOnce(failure);
+
+    await expect(BuildCLI(makeArgs(["native", "--recursive"]))).rejects.toBe(failure);
   });
 });
 
