@@ -324,7 +324,7 @@ describe("cross-signer", () => {
     expect(result.status).toBe("UNTRUSTED");
     expect(result.integrity.state).toBe("intact");
     expect(result.trust.reason).toBe("no-trusted-certificates");
-    expect(result.trust.message).toBe("no trusted certificates are available; create one with 'the-seed signing create-cert' or name one with --cert <file>");
+    expect(result.trust.message).toBe("no trusted certificates are available; create one with \"the-seed signing create-cert\" or name one with --cert <file>");
     expect(result.reason).toBe(result.trust.message);
   });
 

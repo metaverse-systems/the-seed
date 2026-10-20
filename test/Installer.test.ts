@@ -6,6 +6,7 @@ import Config from "../src/Config";
 import Installer, { sanitizeId, generateUpgradeCode, InstallerConfig } from "../src/Installer";
 import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 import { runTheSeed, snapshotTree } from "./helpers/RunCli";
+import { addScopeHint, buildWindowsHint, createCertHint } from "../src/cli/Hints";
 
 // Mock child_process for wixl/which detection
 jest.mock("child_process", () => ({
@@ -556,7 +557,7 @@ describe("Installer", () => {
         expect(output).toContain("build of @t/app");
         expect(output).toContain("build of @t/other");
         expect(errors[errors.length - 1]).toBe("Error: Packaging failed; no installer was built.");
-        expect(output).not.toContain("cross-compiled");
+        expect(output).not.toContain(buildWindowsHint());
         expect(fs.existsSync(path.join(app, "dist"))).toBe(false);
         expect(fs.readdirSync(app).filter((entry) => entry.endsWith(".wxs") || entry.endsWith(".msi"))).toEqual([]);
         expect(fs.readdirSync(other).filter((entry) => entry.endsWith(".wxs") || entry.endsWith(".msi"))).toEqual([]);
@@ -573,7 +574,8 @@ describe("Installer", () => {
         expect(result).toBeNull();
         const output = errors.join("\n");
         expect(output).toContain("No installed binaries found for");
-        expect(output).toContain("cross-compiled");
+        expect(output).toContain(buildWindowsHint());
+        expect(output).not.toContain("'the-seed");
         expect(errors[errors.length - 1]).toBe("Error: Packaging failed; no installer was built.");
         expect(mockedExecFileSync).not.toHaveBeenCalledWith("wixl", expect.anything(), expect.anything());
       });
@@ -628,6 +630,58 @@ describe("installer windows --scope", () => {
     expect(run.stderr).toContain("--scope");
     expect(run.prompts).toEqual([]);
     expect([snapshotTree(projectDir), snapshotTree(configDir)]).toEqual(before);
+  });
+});
+
+// The hints `installer windows` prints when it cannot sign: with no scope there is nothing to create a
+// certificate for yet, so the hint is the one that adds a scope; with a scope but no certificate it is the
+// one that creates the certificate for that scope. The notice may go to either stream, so both are searched.
+describe("installer windows signing hints", () => {
+  let root: string;
+  let configDir: string;
+  let projectDir: string;
+
+  function configure(scopes: string[]): void {
+    const entries: Record<string, { author: { name: string; email: string; url: string } }> = {};
+    for (const scope of scopes) {
+      entries[scope] = { author: { name: "Signer " + scope, email: "signer@example.com", url: "" } };
+    }
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(root, "prefix"), scopes: entries }));
+  }
+
+  beforeEach(() => {
+    root = createTempDir();
+    configDir = path.join(root, "config");
+    fs.mkdirSync(configDir);
+    projectDir = createProjectDir(root, { name: "my-game", version: "1.0.0", author: "Dev" });
+    createDistDir(projectDir, ["game.exe", "libengine.dll"]);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("with no scopes the installer is made unsigned and the add-scope hint is printed", async () => {
+    configure([]);
+
+    const run = await runTheSeed(["installer", "windows"], { home: root, configDir, cwd: projectDir, interactive: false });
+
+    expect(run.status).toBe(0);
+    const printed = run.stdout + run.stderr;
+    expect(printed).toContain(addScopeHint());
+    expect(printed).not.toContain("'the-seed");
+  });
+
+  it("with a scope that has no certificate the hint creates the certificate for that scope", async () => {
+    configure(["@a"]);
+
+    const run = await runTheSeed(["installer", "windows"], { home: root, configDir, cwd: projectDir, interactive: false });
+
+    expect(run.status).toBe(0);
+    const printed = run.stdout + run.stderr;
+    expect(printed).toContain(createCertHint("@a"));
+    expect(printed).not.toContain("'the-seed");
   });
 });
 

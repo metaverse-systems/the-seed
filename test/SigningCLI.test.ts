@@ -1126,6 +1126,8 @@ describe("signing statuses come from the error kind", () => {
       expect(run.out).toBe("");
       expect(run.err).toContain("Error: No signing certificate found for scope '@tn'.");
       expect(run.err).toContain(createCertHint("@tn"));
+      expect(run.err).toContain("\"the-seed signing import-cert --cert <file> --key <file> --scope @tn\"");
+      expect(run.err).not.toContain("'the-seed");
     });
 
     it("with no scopes prints the error on standard error, nothing on standard output, and ends with 2", async () => {

@@ -3,6 +3,7 @@ import path from "path";
 import { execFileSync } from "child_process";
 import { createHash } from "crypto";
 import Config from "./Config";
+import { buildWindowsHint } from "./cli/Hints";
 import Package from "./Package";
 import { NativeComponentMissingError, requireNativeComponent } from "./NativeComponent";
 
@@ -151,7 +152,7 @@ class Installer {
         const result = await pkg.run(distDir, [projectDir]);
         if (!result.success) {
           if (result.message !== null && result.message.startsWith("No installed binaries found for")) {
-            console.error("Ensure the project has been cross-compiled with 'the-seed build windows'.");
+            console.error(buildWindowsHint());
           }
           console.error("Error: Packaging failed; no installer was built.");
           return false;

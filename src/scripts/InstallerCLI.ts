@@ -3,6 +3,7 @@ import Installer from "../Installer";
 import Signing from "../Signing";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
 import { HandlerResult } from "../cli/ExitStatus";
+import { addScopeHint, createCertHint } from "../cli/Hints";
 import { chooseScope } from "../cli/ScopeChoice";
 
 const InstallerCLI = async (parsed: ParsedCommand, context: CliContext): Promise<HandlerResult> => {
@@ -25,14 +26,14 @@ const InstallerCLI = async (parsed: ParsedCommand, context: CliContext): Promise
 
   if (!scope) {
     console.log("No signing scopes configured — skipping signing.");
-    console.log("Run 'the-seed signing create-cert --scope <name>' to enable signing.");
+    console.log(addScopeHint());
     return;
   }
 
   const certInfo = signing.getCertInfo(scope);
   if (!certInfo) {
     console.log(`No certificate found for scope '${scope}' — skipping signing.`);
-    console.log("Run 'the-seed signing create-cert' to create one.");
+    console.log(createCertHint(scope));
     return;
   }
 
