@@ -19,10 +19,12 @@ const InstallerCLI = async (parsed: ParsedCommand, context: CliContext): Promise
 
   const config = new Config(context.configDir);
   const installer = new Installer(config);
-  const msiPath = await installer.run(context.cwd);
-  if (!msiPath) {
-    return { status: 1 };
+  const built = await installer.run(context.cwd);
+  if (!built.ok) {
+    // run has printed the message; the status says whether something was missing (2) or failed (1)
+    return { status: built.status };
   }
+  const msiPath = built.msiPath;
 
   if (!scope) {
     console.log("No signing scopes configured — skipping signing.");

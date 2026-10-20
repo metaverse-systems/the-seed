@@ -6,6 +6,8 @@ import Signing, { DEFAULT_VALIDITY_DAYS, MAX_VALIDITY_DAYS, SigningError, Unsupp
 import type { SigningErrorCode } from "./Signing";
 import type { SignedContent } from "./CmsBuilder";
 import Installer from "./Installer";
+import type { InstallerRunResult } from "./Installer";
+import { InstallerMetadataError } from "./InstallerMetadata";
 import { NativeComponentMissingError, nativeComponentMessage } from "./NativeComponent";
 import { readElfNames } from "./ElfNames";
 import type { ElfNames } from "./ElfNames";
@@ -30,6 +32,8 @@ export {
   SignedContent,
   SigningErrorCode,
   Installer,
+  InstallerMetadataError,
+  InstallerRunResult,
   readElfNames,
   ElfNames,
   InstallerConfig,

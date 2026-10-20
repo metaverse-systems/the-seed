@@ -6,10 +6,20 @@ import Config from "./Config";
 import { buildWindowsHint } from "./cli/Hints";
 import Package from "./Package";
 import { NativeComponentMissingError, requireNativeComponent } from "./NativeComponent";
+import {
+  InstallerMetadataError,
+  checkFolderName,
+  fileIdentifier,
+  installerVersion,
+  parsePackageVersion,
+  sanitizeId,
+  xmlAttribute,
+} from "./InstallerMetadata";
 
 export interface InstallerConfig {
   productName: string;
-  version: string;       // 4-part: X.X.X.0
+  version: string;        // Installer version: three numbers, X.Y.Z
+  packageVersion: string; // The package's own version, as written in package.json
   manufacturer: string;
   upgradeCode: string;   // Uppercase UUID
 }
@@ -18,18 +28,17 @@ export interface InstallerConfig {
 // Generated once; never change this value.
 const INSTALLER_NAMESPACE = "7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
-/**
- * Sanitize a filename for use as a WiX XML Id attribute.
- * Replaces non-alphanumeric characters (except underscores) with underscores,
- * and prefixes with '_' if the name starts with a digit.
- */
-export function sanitizeId(name: string): string {
-  let id = name.replace(/[^a-zA-Z0-9_]/g, "_");
-  if (/^[0-9]/.test(id)) {
-    id = "_" + id;
-  }
-  return id;
-}
+export { sanitizeId };
+
+/** What `Installer.run` resolves: the installer, or the status and message of the failure (already printed). */
+export type InstallerRunResult =
+  | { ok: true; msiPath: string }
+  | { ok: false; status: 1 | 2; message: string };
+
+/** What `Installer.readProjectMetadata` returns; nothing is printed. */
+export type ProjectMetadataResult =
+  | { ok: true; config: InstallerConfig; notes: string[] }
+  | { ok: false; message: string; status: 2 };
 
 /**
  * Generate a deterministic UUID v5 (SHA-1 namespace-based) UpgradeCode
@@ -80,59 +89,72 @@ class Installer {
   };
 
   /**
-   * Read project metadata from package.json and return an InstallerConfig.
-   * Returns null if package.json is missing or invalid.
+   * Read project metadata from package.json and return an InstallerConfig with the notes to show the user.
+   * Every check is made here, before anything is written, and nothing is printed: a refusal comes back as
+   * `{ ok: false, message, status: 2 }`.
    */
-  readProjectMetadata = (projectDir: string): InstallerConfig | null => {
+  readProjectMetadata = (projectDir: string): ProjectMetadataResult => {
+    const refuse = (message: string): ProjectMetadataResult => ({ ok: false, message, status: 2 });
     const pkgPath = path.join(projectDir, "package.json");
     if (!fs.existsSync(pkgPath)) {
-      console.error("Error: package.json not found in " + projectDir);
-      return null;
+      return refuse("package.json not found in " + projectDir);
+    }
+
+    let pkgData: Record<string, unknown>;
+    try {
+      pkgData = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    } catch (err) {
+      return refuse("Failed to parse package.json: " + (err instanceof Error ? err.message : String(err)));
+    }
+    if (pkgData === null || typeof pkgData !== "object") {
+      return refuse("Failed to parse package.json: it does not hold an object");
+    }
+
+    const rawName = pkgData.name;
+    if (!rawName || typeof rawName !== "string") {
+      return refuse("package.json must contain a non-empty 'name' field");
+    }
+
+    // Strip npm scope prefix (e.g. "@metaverse-systems/client" → "client")
+    const name = rawName.startsWith("@") && rawName.includes("/")
+      ? rawName.split("/").pop()!
+      : rawName;
+
+    const rawVersion = pkgData.version;
+    if (!rawVersion || typeof rawVersion !== "string") {
+      return refuse("package.json must contain a valid 'version' field");
+    }
+
+    // Extract author — handle both string and object forms
+    let manufacturer = "Unknown";
+    const author = pkgData.author;
+    if (typeof author === "string") {
+      manufacturer = author || "Unknown";
+    } else if (author !== null && typeof author === "object" && typeof (author as { name?: unknown }).name === "string" && (author as { name: string }).name) {
+      manufacturer = (author as { name: string }).name;
     }
 
     try {
-      const pkgData = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-
-      const rawName = pkgData.name;
-      if (!rawName || typeof rawName !== "string") {
-        console.error("Error: package.json must contain a non-empty 'name' field");
-        return null;
-      }
-
-      // Strip npm scope prefix (e.g. "@metaverse-systems/client" → "client")
-      const name = rawName.startsWith("@") && rawName.includes("/")
-        ? rawName.split("/").pop()!
-        : rawName;
-
-      const rawVersion = pkgData.version;
-      if (!rawVersion || typeof rawVersion !== "string") {
-        console.error("Error: package.json must contain a valid 'version' field");
-        return null;
-      }
-
-      // Convert 3-part semver to 4-part for WiX
-      const versionParts = rawVersion.split(".");
-      const version = versionParts.length === 3
-        ? rawVersion + ".0"
-        : rawVersion;
-
-      // Extract author — handle both string and object forms
-      let manufacturer = "Unknown";
-      if (pkgData.author) {
-        if (typeof pkgData.author === "string") {
-          manufacturer = pkgData.author || "Unknown";
-        } else if (typeof pkgData.author === "object" && pkgData.author.name) {
-          manufacturer = pkgData.author.name;
-        }
-      }
-
+      checkFolderName(name);
+      const installer = installerVersion(parsePackageVersion(rawVersion));
       // Use the full scoped name for UpgradeCode to keep it deterministic per package
-      const upgradeCode = generateUpgradeCode(rawName);
-
-      return { productName: name, version, manufacturer, upgradeCode };
+      const config: InstallerConfig = {
+        productName: name,
+        version: installer.version,
+        packageVersion: rawVersion,
+        manufacturer,
+        upgradeCode: generateUpgradeCode(rawName),
+      };
+      // Dry run: every value written to the description must be one XML can carry
+      xmlAttribute(config.productName);
+      xmlAttribute(config.manufacturer);
+      xmlAttribute(config.version);
+      return { ok: true, config, notes: installer.note === null ? [] : [installer.note] };
     } catch (err) {
-      console.error("Error: Failed to parse package.json: " + (err instanceof Error ? err.message : String(err)));
-      return null;
+      if (err instanceof InstallerMetadataError) {
+        return refuse(err.message);
+      }
+      throw err;
     }
   };
 
@@ -143,7 +165,19 @@ class Installer {
    * Resolves true if dist/ exists and is non-empty after this call.
    */
   ensureDist = async (projectDir: string): Promise<boolean> => {
+    return (await this.prepareDist(projectDir)) === null;
+  };
+
+  /**
+   * Does the work of ensureDist, printing what it reports. Resolves null on success, otherwise the final
+   * message it printed.
+   */
+  private prepareDist = async (projectDir: string): Promise<string | null> => {
     const distDir = path.join(projectDir, "dist");
+    const fail = (message: string): string => {
+      console.error("Error: " + message);
+      return message;
+    };
 
     if (!fs.existsSync(distDir)) {
       console.log("dist/ not found, running package step...");
@@ -154,32 +188,28 @@ class Installer {
           if (result.message !== null && result.message.startsWith("No installed binaries found for")) {
             console.error(buildWindowsHint());
           }
-          console.error("Error: Packaging failed; no installer was built.");
-          return false;
+          return fail("Packaging failed; no installer was built.");
         }
       } catch (err) {
-        console.error("Error: Packaging failed: " + (err instanceof Error ? err.message : String(err)));
-        return false;
+        return fail("Packaging failed: " + (err instanceof Error ? err.message : String(err)));
       }
     }
 
     // Verify dist/ is non-empty
     if (!fs.existsSync(distDir)) {
-      console.error("Error: dist/ directory does not exist after packaging.");
-      return false;
+      return fail("dist/ directory does not exist after packaging.");
     }
 
-    const files = fs.readdirSync(distDir).filter(f => {
-      const stat = fs.statSync(path.join(distDir, f));
-      return stat.isFile();
-    });
-
-    if (files.length === 0) {
-      console.error("Error: dist/ directory is empty.");
-      return false;
+    if (this.listDistFiles(projectDir).length === 0) {
+      return fail("dist/ directory is empty.");
     }
 
-    return true;
+    return null;
+  };
+
+  private listDistFiles = (projectDir: string): string[] => {
+    const distDir = path.join(projectDir, "dist");
+    return fs.readdirSync(distDir).filter(f => fs.statSync(path.join(distDir, f)).isFile());
   };
 
   /**
@@ -187,29 +217,42 @@ class Installer {
    * Returns the path to the generated .wxs file.
    */
   generateWxs = (projectDir: string, config: InstallerConfig, files: string[]): string => {
-    const components = files.map(filename => {
-      const safeId = sanitizeId(filename);
-      return `          <Component Id="Cmp_${safeId}" Guid="*" Win64="yes">
-            <File Id="File_${safeId}"
-                  Name="${filename}"
-                  Source="dist/${filename}"
+    const productName = xmlAttribute(config.productName);
+    const manufacturer = xmlAttribute(config.manufacturer);
+    const version = xmlAttribute(config.version);
+
+    // Every file has its own identifiers; two files that would share one are refused, never merged
+    const owners = new Map<string, string>();
+    const entries = files.map(filename => {
+      const componentId = fileIdentifier("Cmp", filename);
+      const fileId = fileIdentifier("File", filename);
+      const other = owners.get(componentId);
+      if (other !== undefined) {
+        throw new InstallerMetadataError("The files \"" + other + "\" and \"" + filename + "\" would get the same installer identifier.");
+      }
+      owners.set(componentId, filename);
+      return { componentId, fileId, name: xmlAttribute(filename), source: xmlAttribute("dist/" + filename) };
+    });
+
+    const components = entries.map(entry => {
+      return `          <Component Id="${entry.componentId}" Guid="*" Win64="yes">
+            <File Id="${entry.fileId}"
+                  Name="${entry.name}"
+                  Source="${entry.source}"
                   KeyPath="yes" />
           </Component>`;
     }).join("\n");
 
-    const componentRefs = files.map(filename => {
-      const safeId = sanitizeId(filename);
-      return `      <ComponentRef Id="Cmp_${safeId}" />`;
-    }).join("\n");
+    const componentRefs = entries.map(entry => `      <ComponentRef Id="${entry.componentId}" />`).join("\n");
 
     const wxs = `<?xml version="1.0" encoding="utf-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
 
   <Product Id="*"
-           Name="${config.productName}"
+           Name="${productName}"
            Language="1033"
-           Version="${config.version}"
-           Manufacturer="${config.manufacturer}"
+           Version="${version}"
+           Manufacturer="${manufacturer}"
            UpgradeCode="${config.upgradeCode}">
 
     <Package InstallerVersion="200"
@@ -223,13 +266,13 @@ class Installer {
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
-        <Directory Id="INSTALLFOLDER" Name="${config.productName}">
+        <Directory Id="INSTALLFOLDER" Name="${productName}">
 ${components}
         </Directory>
       </Directory>
     </Directory>
 
-    <Feature Id="ProductFeature" Title="${config.productName}" Level="1">
+    <Feature Id="ProductFeature" Title="${productName}" Level="1">
 ${componentRefs}
     </Feature>
 
@@ -237,7 +280,7 @@ ${componentRefs}
 </Wix>
 `;
 
-    const wxsFilename = `${config.productName}-${config.version}.wxs`;
+    const wxsFilename = `${config.productName}-${config.packageVersion}.wxs`;
     const wxsPath = path.join(projectDir, wxsFilename);
     fs.writeFileSync(wxsPath, wxs, "utf-8");
     return wxsPath;
@@ -248,85 +291,101 @@ ${componentRefs}
    * Returns true on success.
    */
   compileMsi = (projectDir: string, wxsPath: string, outputPath: string): boolean => {
+    return this.compile(projectDir, wxsPath, outputPath) === null;
+  };
+
+  /** Does the work of compileMsi, printing what it reports. Resolves null on success, otherwise the message it printed. */
+  private compile = (projectDir: string, wxsPath: string, outputPath: string): string | null => {
     try {
       execFileSync("wixl", ["-v", "-a", "x64", "-o", outputPath, wxsPath], {
         cwd: projectDir,
         stdio: "pipe"
       });
-      return true;
+      return null;
     } catch (err) {
+      let message: string;
       if (err && typeof err === "object" && "stderr" in err) {
         const stderr = (err as { stderr: Buffer }).stderr;
-        console.error("Error: wixl compilation failed:\n" + stderr.toString());
+        message = "Error: wixl compilation failed:\n" + stderr.toString();
       } else {
-        console.error("Error: wixl compilation failed: " + (err instanceof Error ? err.message : String(err)));
+        message = "Error: wixl compilation failed: " + (err instanceof Error ? err.message : String(err));
       }
-      return false;
+      console.error(message);
+      return message;
     }
   };
 
   /**
-   * Full pipeline: validate → ensure dist → generate → compile.
-   * Resolves the path of the installer, or null on failure. Without the native component it prints the one message
-   * naming the step that builds it, resolves null and generates nothing.
+   * Full pipeline: component check → wixl check → metadata → ensure dist → generate → compile.
+   * Resolves the path of the installer, or the status and message of the failure; each message is printed
+   * once, here. Status 2 is for something missing or unusable, 1 for packaging or compilation that failed.
    */
-  run = async (projectDir: string): Promise<string | null> => {
+  run = async (projectDir: string): Promise<InstallerRunResult> => {
+    const failure = (status: 1 | 2, message: string, printed = false): InstallerRunResult => {
+      if (!printed) {
+        console.error(message);
+      }
+      return { ok: false, status, message };
+    };
+
     // The installer is built from the packaged files, which needs the native component
     try {
       requireNativeComponent();
     } catch (err) {
       if (err instanceof NativeComponentMissingError) {
-        console.error(err.message);
-        return null;
+        return failure(2, err.message);
       }
       throw err;
     }
 
     // Step 1: Validate wixl is installed
     if (!this.checkWixl()) {
-      console.error("Error: wixl is not installed. Install it with: sudo apt install msitools");
-      return null;
+      return failure(2, "Error: wixl is not installed. Install it with: sudo apt install msitools");
     }
 
     // Step 2: Read project metadata
     const metadata = this.readProjectMetadata(projectDir);
-    if (!metadata) {
-      return null;
+    if (!metadata.ok) {
+      return failure(2, "Error: " + metadata.message);
+    }
+    for (const note of metadata.notes) {
+      console.log(note);
     }
 
     // Step 3: Ensure dist/ directory
-    if (!(await this.ensureDist(projectDir))) {
-      return null;
+    const distFailure = await this.prepareDist(projectDir);
+    if (distFailure !== null) {
+      return failure(1, distFailure, true);
     }
 
     // Step 4: Read dist/ contents
-    const distDir = path.join(projectDir, "dist");
-    const files = fs.readdirSync(distDir).filter(f => {
-      const stat = fs.statSync(path.join(distDir, f));
-      return stat.isFile();
-    });
-
-    if (files.length === 0) {
-      console.error("Error: dist/ directory is empty.");
-      return null;
-    }
+    const files = this.listDistFiles(projectDir);
 
     // Step 5: Generate .wxs file
     console.log("Generating WiX XML source...");
-    const wxsPath = this.generateWxs(projectDir, metadata, files);
+    let wxsPath: string;
+    try {
+      wxsPath = this.generateWxs(projectDir, metadata.config, files);
+    } catch (err) {
+      if (err instanceof InstallerMetadataError) {
+        return failure(2, "Error: " + err.message);
+      }
+      throw err;
+    }
     console.log("Generated: " + path.basename(wxsPath));
 
     // Step 6: Invoke wixl
-    const msiFilename = `${metadata.productName}-${metadata.version}.msi`;
+    const msiFilename = `${metadata.config.productName}-${metadata.config.packageVersion}.msi`;
     const msiPath = path.join(projectDir, msiFilename);
     console.log("Compiling MSI installer...");
-    if (!this.compileMsi(projectDir, wxsPath, msiPath)) {
-      return null;
+    const compileError = this.compile(projectDir, wxsPath, msiPath);
+    if (compileError !== null) {
+      return failure(1, compileError, true);
     }
 
     // Step 7: Success
     console.log("Installer created: " + msiFilename);
-    return msiPath;
+    return { ok: true, msiPath };
   };
 }
 
