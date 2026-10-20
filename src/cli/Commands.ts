@@ -260,7 +260,7 @@ export const COMMANDS: CommandSpec[] = [
     subcommands: [
       sub({
         name: "create",
-        summary: "Create a resource pak project in the current directory",
+        summary: "Create a resource pak project in the prefix's projects directory",
         handler: "resource-pak.create",
         interactive: true,
       }),

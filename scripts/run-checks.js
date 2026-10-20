@@ -428,6 +428,10 @@ function unitStage(jestArgs) {
       const summary = summariseResults(results, readKnownGapList(packageRoot).entries || []);
       summary.lines.forEach((line) => console.log(line));
       summaryFailed = summary.failed;
+      const readmeFailed = (Array.isArray(results.testResults) ? results.testResults : []).some(
+        (group) => group.status === "failed" && /Readme\.test\.ts$/.test(String(group.name || "")),
+      );
+      if (readmeFailed) console.log("README out of date: compare README.md with test-results/README.expected.md");
     }
 
     const leftovers = findLeftovers(root);
