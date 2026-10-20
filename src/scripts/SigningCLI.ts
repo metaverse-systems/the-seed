@@ -4,9 +4,9 @@ import Signing, { MISSING_FILE_REASON } from "../Signing";
 import { exitStatusOf } from "../Trust";
 import { CertInfo, IntegrityResult, MachOSliceResult, TrustResult, VerifyResult, VerifyStatus } from "../types";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
-import { CliError, HandlerResult, UsageError } from "../cli/ExitStatus";
+import { FailedError, HandlerResult, MissingError, UsageError } from "../cli/ExitStatus";
 import { chooseScope } from "../cli/ScopeChoice";
-import { forceHint } from "../cli/Hints";
+import { createCertHint, forceHint } from "../cli/Hints";
 
 /** The words after "Trust:" in a report. */
 function describeTrust(trust: TrustResult): string {
@@ -118,19 +118,6 @@ function fileReport(signing: Signing, result: VerifyResult): string[] {
   return lines;
 }
 
-/** The message of a thrown value. */
-function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-/** Today's exit status for a failed `sign`, chosen from the message until the errors are typed. */
-function signStatus(message: string): number {
-  if (message.includes("No signing certificate")) return 1;
-  if (message.includes("expired")) return 2;
-  if (message.includes("No binary files")) return 4;
-  return 3;
-}
-
 /** Stops with the "--force" usage error when a certificate exists and may not be replaced without asking. */
 async function confirmReplace(signing: Signing, scope: string, parsed: ParsedCommand, context: CliContext): Promise<boolean> {
   if (!signing.hasCert(scope) || parsed.options.force === true) {
@@ -173,20 +160,15 @@ async function verifyCommand(signing: Signing, parsed: ParsedCommand): Promise<H
   const certFiles = (parsed.options.cert as string[] | undefined) ?? [];
 
   // Supplied certificates are read before the target is examined; an unusable one stops the command.
-  let trust;
-  try {
-    trust = signing.loadTrust(certFiles.length > 0 ? certFiles : undefined);
-  } catch (err: unknown) {
-    throw new CliError(2, messageOf(err));
-  }
+  const trust = signing.loadTrust(certFiles.length > 0 ? certFiles : undefined);
 
   let exitStatus = 0;
-  try {
+  {
     const fs = await import("fs");
     const resolvedPath = path.resolve(targetPath);
 
     if (!fs.existsSync(resolvedPath)) {
-      throw new CliError(2, `File not found: ${resolvedPath}`);
+      throw new MissingError(`File not found: ${resolvedPath}`);
     }
 
     const stat = fs.statSync(resolvedPath);
@@ -260,16 +242,6 @@ async function verifyCommand(signing: Signing, parsed: ParsedCommand): Promise<H
       }
       exitStatus = exitStatusOf(result.status);
     }
-  } catch (err: unknown) {
-    if (err instanceof CliError) throw err;
-    const message = messageOf(err);
-    if (message.includes("No .signatures.json")) {
-      throw new CliError(2, message);
-    }
-    if (message.includes("malformed") || message.includes("is a signature file;") || message.includes("is a directory manifest;")) {
-      throw new CliError(3, message);
-    }
-    throw new CliError(2, message);
   }
   if (exitStatus !== 0) {
     return { status: exitStatus };
@@ -286,15 +258,10 @@ const SigningCLI = async (parsed: ParsedCommand, context: CliContext): Promise<H
 
       const scope = await chooseScope(signing, requestedScope, context.interactive);
       if (!(await confirmReplace(signing, scope, parsed, context))) {
-        return { status: 1 };
+        throw new FailedError("Aborted. Existing certificate unchanged.", { reported: true });
       }
 
-      let certInfo;
-      try {
-        certInfo = await signing.createCert({ validityDays, scope });
-      } catch (err: unknown) {
-        throw new CliError(2, messageOf(err));
-      }
+      const certInfo = await signing.createCert({ validityDays, scope });
       printStored(signing, "Certificate created successfully.", certInfo, false);
       break;
     }
@@ -304,18 +271,10 @@ const SigningCLI = async (parsed: ParsedCommand, context: CliContext): Promise<H
 
       const scope = await chooseScope(signing, requestedScope, context.interactive);
       if (!(await confirmReplace(signing, scope, parsed, context))) {
-        return { status: 1 };
+        throw new FailedError("Aborted. Existing certificate unchanged.", { reported: true });
       }
 
-      let certInfo;
-      try {
-        certInfo = await signing.importCert(resolvedCert, resolvedKey, scope);
-      } catch (err: unknown) {
-        const message = messageOf(err);
-        const mismatch = message.includes("mismatch") || message.includes("do not match") || message.includes("Unsupported");
-        const missing = message.includes("ENOENT") || message.includes("no such file");
-        throw new CliError(mismatch && !missing ? 3 : 2, message);
-      }
+      const certInfo = await signing.importCert(resolvedCert, resolvedKey, scope);
       printStored(signing, "Certificate imported successfully.", certInfo, true);
       break;
     }
@@ -326,9 +285,12 @@ const SigningCLI = async (parsed: ParsedCommand, context: CliContext): Promise<H
 
       const scope = await chooseScope(signing, requestedScope, context.interactive);
 
-      try {
+      {
         const fs = await import("fs");
         const resolvedPath = path.resolve(targetPath);
+        if (!fs.existsSync(resolvedPath)) {
+          throw new MissingError(`File not found: ${resolvedPath}`);
+        }
         const stat = fs.statSync(resolvedPath);
 
         if (stat.isDirectory()) {
@@ -366,9 +328,6 @@ const SigningCLI = async (parsed: ParsedCommand, context: CliContext): Promise<H
             console.log(`  Warning: ${warning}`);
           }
         }
-      } catch (err: unknown) {
-        const message = messageOf(err);
-        throw new CliError(signStatus(message), message);
       }
       break;
     }
@@ -379,8 +338,8 @@ const SigningCLI = async (parsed: ParsedCommand, context: CliContext): Promise<H
 
       const certInfo = signing.getCertInfo(scope);
       if (!certInfo) {
-        throw new CliError(1, `No signing certificate found for scope '${scope}'.`, {
-          hint: "Run 'the-seed signing create-cert' to generate one, or 'the-seed signing import-cert' to import an existing certificate.",
+        throw new MissingError(`No signing certificate found for scope '${scope}'.`, {
+          hint: `${createCertHint(scope)} To use an existing certificate, import it with "the-seed signing import-cert --cert <file> --key <file> --scope ${scope}".`,
         });
       }
 
@@ -406,16 +365,11 @@ const SigningCLI = async (parsed: ParsedCommand, context: CliContext): Promise<H
 
       const certInfo = signing.getCertInfo(scope);
       if (!certInfo) {
-        throw new CliError(1, `No signing certificate found for scope '${scope}'.`);
+        throw new MissingError(`No signing certificate found for scope '${scope}'.`, { hint: createCertHint(scope) });
       }
 
       const resolvedOutput = path.resolve(outputPath);
-      try {
-        await signing.exportCert(resolvedOutput, scope);
-      } catch (err: unknown) {
-        const message = messageOf(err);
-        throw new CliError(message.includes("No signing certificate") ? 1 : 2, message);
-      }
+      await signing.exportCert(resolvedOutput, scope);
 
       console.log(`Certificate exported to: ${resolvedOutput}`);
       console.log(`  Fingerprint: ${certInfo.fingerprint}`);

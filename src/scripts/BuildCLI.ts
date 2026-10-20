@@ -3,9 +3,8 @@ import Config from "../Config";
 import Build from "../Build";
 import { buildRecursive } from "../RecursiveBuild";
 import { DependencyDiscoveryError } from "../DependencyWalker";
-import { NativeComponentMissingError } from "../NativeComponent";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
-import { HandlerResult } from "../cli/ExitStatus";
+import { FailedError, HandlerResult } from "../cli/ExitStatus";
 
 /** How a build ended: stopped by a signal, failed, or neither. */
 interface BuildOutcome {
@@ -53,7 +52,7 @@ const withCancellation = async (
       return { status: firstSignal ? 128 + os.constants.signals[firstSignal] : 1 };
     }
     if (outcome.failed) {
-      return { status: 1 };
+      throw new FailedError("Build failed.", { reported: true });
     }
   } finally {
     process.removeListener("SIGINT", onInterrupt);
@@ -77,7 +76,7 @@ const runRecursiveBuild = (target: string, release: boolean, parallel: number, j
         forceSignal,
       });
     } catch (error) {
-      if (error instanceof DependencyDiscoveryError || error instanceof NativeComponentMissingError) {
+      if (error instanceof DependencyDiscoveryError) {
         console.error(error.message);
         return { cancelled: false, failed: true };
       }
@@ -89,24 +88,15 @@ const runRecursiveBuild = (target: string, release: boolean, parallel: number, j
 /** Runs a plain (target given) or incremental (no target) build of the current project. */
 const runProjectBuild = (build: Build, configDir: string, target: "native" | "windows" | undefined, release: boolean, jobs: number | undefined) =>
   withCancellation(async ({ signal, forceSignal }) => {
-    let result;
-    try {
-      result = await build.buildProject({
-        projectDir: process.cwd(),
-        target,
-        release,
-        jobs,
-        configDir,
-        signal,
-        forceSignal,
-      });
-    } catch (error) {
-      if (error instanceof NativeComponentMissingError) {
-        console.error(error.message);
-        return { cancelled: false, failed: true };
-      }
-      throw error;
-    }
+    const result = await build.buildProject({
+      projectDir: process.cwd(),
+      target,
+      release,
+      jobs,
+      configDir,
+      signal,
+      forceSignal,
+    });
     if (result.status === "failed") {
       console.error(`Build failed at ${result.step}: ${result.message}.`);
     } else if (result.status === "cancelled") {

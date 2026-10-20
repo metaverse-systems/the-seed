@@ -127,13 +127,13 @@ describe("runCli on first use", () => {
     expect(messages).not.toMatch(/\bat .*\(.*:\d+:\d+\)/);
   });
 
-  it("an unwritable home exits 1 with the message and no stack trace", async () => {
+  it("an unwritable home exits 2 with the message and no stack trace", async () => {
     if (!optionalExternalCheck("unwritable-home", process.getuid?.() !== 0, "running as root, permissions are not enforced")) {
       return;
     }
     fs.chmodSync(home, 0o500);
     await runCli(argv("config", "list"), configDir);
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(2);
     expect(errorSpy).toHaveBeenCalledTimes(1);
     const message = String(errorSpy.mock.calls[0][0]);
     expect(message).toContain(configDir);
@@ -155,13 +155,13 @@ describe("runCli on first use", () => {
     expect(fs.readdirSync(home)).toEqual([]);
   });
 
-  it("a malformed prefix exits 1 with the one-line message and no stack trace", async () => {
+  it("a malformed prefix exits 2 with the one-line message and no stack trace", async () => {
     fs.mkdirSync(configDir, { recursive: true });
     const file = path.join(configDir, "config.json");
     const text = JSON.stringify({ prefix: 3, scopes: {} });
     fs.writeFileSync(file, text);
     await runCli(argv("config", "list"), configDir);
-    expect(process.exitCode).toBe(1);
+    expect(process.exitCode).toBe(2);
     expect(errorSpy).toHaveBeenCalledTimes(1);
     const message = String(errorSpy.mock.calls[0][0]);
     expect(message).toContain(file);

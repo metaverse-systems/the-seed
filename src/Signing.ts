@@ -8,6 +8,7 @@ import { pipeline } from "stream/promises";
 import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
 import Config from "./Config";
+import { addScopeHint, createCertHint, editScopeHint, replaceCertHint } from "./cli/Hints";
 import { NativeComponentMissingError, loadNativeComponent, requireNativeComponent } from "./NativeComponent";
 import { buildSignatureContainer, containerCapacity } from "./CmsBuilder";
 import { EARLIER_FORM_NOTICE_WINDOWS, NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates, worst } from "./Trust";
@@ -46,10 +47,44 @@ export const DEFAULT_VALIDITY_DAYS = 365;
 /** The largest validity, in days, a new certificate may be given. */
 export const MAX_VALIDITY_DAYS = 3650;
 
-/** Raised when a scope's key cannot be used for signing; no file has been changed. */
-export class UnsupportedSigningKey extends Error {
-  constructor(message: string) {
+/** The situations in which the signing library fails, each with its own code. */
+export type SigningErrorCode =
+  | "scope-required"
+  | "unknown-scope"
+  | "author-name-missing"
+  | "certificate-missing"
+  | "certificate-expired"
+  | "certificate-unreadable"
+  | "key-mismatch"
+  | "unsupported-key"
+  | "invalid-validity"
+  | "path-not-found"
+  | "not-binary"
+  | "read-only"
+  | "no-binaries"
+  | "manifest-missing"
+  | "manifest-malformed"
+  | "wrong-target"
+  | "signing-failed";
+
+/** A failure of the signing library: `code` names the situation, `hint` (when there is one) says what to do about it. */
+export class SigningError extends Error {
+  code: SigningErrorCode;
+  hint?: string;
+
+  constructor(code: SigningErrorCode, message: string, hint?: string) {
     super(message);
+    Object.setPrototypeOf(this, new.target.prototype);
+    this.name = "SigningError";
+    this.code = code;
+    this.hint = hint;
+  }
+}
+
+/** Raised when a scope's key cannot be used for signing; no file has been changed. */
+export class UnsupportedSigningKey extends SigningError {
+  constructor(message: string) {
+    super("unsupported-key", message);
     this.name = "UnsupportedSigningKey";
   }
 }
@@ -159,8 +194,12 @@ class Signing {
       return null;
     }
 
-    const certPem = fs.readFileSync(certFilePath, "utf-8");
-    const x509Cert = new crypto.X509Certificate(certPem);
+    let x509Cert: crypto.X509Certificate;
+    try {
+      x509Cert = new crypto.X509Certificate(fs.readFileSync(certFilePath, "utf-8"));
+    } catch (error) {
+      throw new SigningError("certificate-unreadable", `The signing certificate ${certFilePath} cannot be read: ${(error as Error).message}`);
+    }
 
     return { ...this._buildSignerInfo(x509Cert), certPath: certFilePath };
   }
@@ -291,7 +330,13 @@ class Signing {
 
     if (certificatePaths !== undefined) {
       for (const certPath of certificatePaths) {
-        for (const der of readCertificates(certPath)) {
+        let certificates: Buffer[];
+        try {
+          certificates = readCertificates(certPath);
+        } catch (error) {
+          throw new SigningError("certificate-unreadable", (error as Error).message);
+        }
+        for (const der of certificates) {
           anchors.push({ source: "supplied", path: certPath, fingerprint: certificateFingerprint(der) });
         }
       }
@@ -330,11 +375,11 @@ class Signing {
     const scopeData = configData.scopes[scope];
 
     if (!scopeData) {
-      throw new Error(`Scope '${scope}' not found in config. Run 'the-seed config edit' to set it up.`);
+      throw new SigningError("unknown-scope", `Scope '${scope}' not found in config.`, addScopeHint());
     }
 
     if (!scopeData.author?.name) {
-      throw new Error(`Required author name is missing for scope '${scope}'. Run 'the-seed config edit' to set it.`);
+      throw new SigningError("author-name-missing", `Required author name is missing for scope '${scope}'.`, editScopeHint(scope));
     }
 
     return {
@@ -351,7 +396,7 @@ class Signing {
    */
   async createCert(options?: CertOptions): Promise<CertInfo> {
     if (!options?.scope) {
-      throw new Error("A scope must be specified for certificate creation.");
+      throw new SigningError("scope-required", "A scope must be specified for certificate creation.");
     }
     const scope = options.scope;
     const subject = this._getSubjectFromConfig(scope);
@@ -588,7 +633,8 @@ class Signing {
         (data) => crypto.sign("sha256", data, privateKey),
       );
       if (container.length > capacity) {
-        throw new Error(
+        throw new SigningError(
+          "signing-failed",
           `${resolvedPath}: the signature container (${container.length} bytes) does not fit the room reserved for it (${capacity} bytes)`
         );
       }
@@ -663,7 +709,8 @@ class Signing {
     // Read the signature back from the finished file
     const check = addon.msiCheckSignature(resolvedPath);
     if (check.state !== "matches") {
-      throw new Error(
+      throw new SigningError(
+        "signing-failed",
         `Installer signature was written but does not read back (${check.detail || check.state})`
       );
     }
@@ -707,34 +754,34 @@ class Signing {
    */
   async signFile(filePath: string, options?: SignOptions): Promise<SignResult> {
     if (!options?.scope) {
-      throw new Error("A scope must be specified for signing.");
+      throw new SigningError("scope-required", "A scope must be specified for signing.");
     }
     const scope = options.scope;
     const certPath = this.scopeCertPath(scope);
     const certInfo = this.getCertInfo(scope);
     if (!certInfo) {
-      throw new Error(`No signing certificate found for scope '${scope}'. Run 'the-seed signing create-cert' first.`);
+      throw new SigningError("certificate-missing", `No signing certificate found for scope '${scope}'.`, createCertHint(scope));
     }
     if (certInfo.isExpired && !options?.force) {
-      throw new Error("Signing certificate is expired. Use --force to sign anyway.");
+      throw new SigningError("certificate-expired", "Signing certificate is expired. Use --force to sign anyway.", replaceCertHint(scope));
     }
     const privateKey = this.loadSigningKey(scope);
 
     const resolvedPath = path.resolve(filePath);
     if (!fs.existsSync(resolvedPath)) {
-      throw new Error(`File not found: ${resolvedPath}`);
+      throw new SigningError("path-not-found", `File not found: ${resolvedPath}`);
     }
 
     const binary = await this.isBinaryFile(resolvedPath);
     if (!binary) {
-      throw new Error(`File is not binary: ${resolvedPath}`);
+      throw new SigningError("not-binary", `File is not binary: ${resolvedPath}`);
     }
 
     // Check write permission
     try {
       fs.accessSync(resolvedPath, fs.constants.W_OK);
     } catch {
-      throw new Error(`Cannot sign read-only file: ${resolvedPath}. Set write permission (chmod +w) before signing.`);
+      throw new SigningError("read-only", `Cannot sign read-only file: ${resolvedPath}. Set write permission (chmod +w) before signing.`);
     }
 
     // Detect format and determine signing strategy
@@ -792,22 +839,22 @@ class Signing {
    */
   async signDirectory(dirPath: string, options?: SignOptions): Promise<DirectorySignResult> {
     if (!options?.scope) {
-      throw new Error("A scope must be specified for signing.");
+      throw new SigningError("scope-required", "A scope must be specified for signing.");
     }
     const scope = options.scope;
     const certPath = this.scopeCertPath(scope);
     const certInfo = this.getCertInfo(scope);
     if (!certInfo) {
-      throw new Error(`No signing certificate found for scope '${scope}'. Run 'the-seed signing create-cert' first.`);
+      throw new SigningError("certificate-missing", `No signing certificate found for scope '${scope}'.`, createCertHint(scope));
     }
     if (certInfo.isExpired && !options?.force) {
-      throw new Error("Signing certificate is expired. Use --force to sign anyway.");
+      throw new SigningError("certificate-expired", "Signing certificate is expired. Use --force to sign anyway.", replaceCertHint(scope));
     }
     this.loadSigningKey(scope);
 
     const resolvedDir = path.resolve(dirPath);
     if (!fs.existsSync(resolvedDir) || !fs.statSync(resolvedDir).isDirectory()) {
-      throw new Error(`Directory not found: ${resolvedDir}`);
+      throw new SigningError("path-not-found", `Directory not found: ${resolvedDir}`);
     }
 
     // Recursively find all files
@@ -848,7 +895,7 @@ class Signing {
     }
 
     if (signed.length === 0) {
-      throw new Error("No binary files found in directory.");
+      throw new SigningError("no-binaries", "No binary files found in directory.");
     }
 
     // Generate v2 .signatures.json manifest
@@ -903,10 +950,10 @@ class Signing {
    */
   async exportCert(outputPath: string, scope?: string): Promise<void> {
     if (!scope) {
-      throw new Error("A scope must be specified for certificate export.");
+      throw new SigningError("scope-required", "A scope must be specified for certificate export.");
     }
     if (!this.hasCert(scope)) {
-      throw new Error(`No signing certificate found for scope '${scope}'.`);
+      throw new SigningError("certificate-missing", `No signing certificate found for scope '${scope}'.`);
     }
     const certPem = fs.readFileSync(this.scopeCertPath(scope), "utf-8");
     fs.writeFileSync(outputPath, certPem);
@@ -919,26 +966,38 @@ class Signing {
    */
   async importCert(certInputPath: string, keyInputPath: string, scope?: string): Promise<CertInfo> {
     if (!scope) {
-      throw new Error("A scope must be specified for certificate import.");
+      throw new SigningError("scope-required", "A scope must be specified for certificate import.");
     }
 
     // Read and parse certificate
-    const certPem = fs.readFileSync(certInputPath, "utf-8");
-    const x509Cert = new crypto.X509Certificate(certPem);
+    let x509Cert: crypto.X509Certificate;
+    let certPem: string;
+    let keyPem: string;
+    try {
+      certPem = fs.readFileSync(certInputPath, "utf-8");
+      x509Cert = new crypto.X509Certificate(certPem);
+    } catch (error) {
+      throw new SigningError("certificate-unreadable", `The certificate file ${certInputPath} cannot be read: ${(error as Error).message}`);
+    }
 
     // Read and parse private key
-    const keyPem = fs.readFileSync(keyInputPath, "utf-8");
-    const privateKey = crypto.createPrivateKey(keyPem);
+    let privateKey: crypto.KeyObject;
+    try {
+      keyPem = fs.readFileSync(keyInputPath, "utf-8");
+      privateKey = crypto.createPrivateKey(keyPem);
+    } catch (error) {
+      throw new SigningError("certificate-unreadable", `The key file ${keyInputPath} cannot be read: ${(error as Error).message}`);
+    }
     // x509Cert.publicKey is already a KeyObject of type 'public'
     const publicKey = x509Cert.publicKey;
 
     // Validate key type is ECDSA P-256
     if (publicKey.asymmetricKeyType !== "ec") {
-      throw new Error("Unsupported key type. Only ECDSA keys are supported.");
+      throw new SigningError("unsupported-key", "Unsupported key type. Only ECDSA keys are supported.");
     }
     const details = publicKey.asymmetricKeyDetails;
     if (!details || details.namedCurve !== "prime256v1") {
-      throw new Error("Unsupported curve. Only P-256 (prime256v1) is supported.");
+      throw new SigningError("unsupported-key", "Unsupported curve. Only P-256 (prime256v1) is supported.");
     }
 
     // Validate key matches certificate by signing and verifying test data
@@ -950,7 +1009,7 @@ class Signing {
     const verify = crypto.createVerify("SHA256");
     verify.update(testData);
     if (!verify.verify(publicKey, testSig)) {
-      throw new Error("Certificate and key do not match.");
+      throw new SigningError("key-mismatch", "Certificate and key do not match.");
     }
 
     // Ensure scope signing directory exists
@@ -1065,13 +1124,13 @@ class Signing {
   async verifyFile(filePath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const resolvedPath = path.resolve(filePath);
     if (!fs.existsSync(resolvedPath)) {
-      throw new Error(`File not found: ${resolvedPath}`);
+      throw new SigningError("path-not-found", `File not found: ${resolvedPath}`);
     }
     if (path.basename(resolvedPath) === ".signatures.json") {
-      throw new Error(`${resolvedPath} is a directory manifest; verify the directory ${path.dirname(resolvedPath)} instead`);
+      throw new SigningError("wrong-target", `${resolvedPath} is a directory manifest; verify the directory ${path.dirname(resolvedPath)} instead`);
     }
     if (resolvedPath.endsWith(".sig") && fs.existsSync(resolvedPath.slice(0, -4))) {
-      throw new Error(`${resolvedPath} is a signature file; verify ${resolvedPath.slice(0, -4)} instead`);
+      throw new SigningError("wrong-target", `${resolvedPath} is a signature file; verify ${resolvedPath.slice(0, -4)} instead`);
     }
 
     const resolvedOptions: VerifyOptions = { trust: options?.trust ?? this.loadTrust() };
@@ -1458,10 +1517,10 @@ class Signing {
     const manifestPath = path.join(resolvedDir, ".signatures.json");
 
     if (!fs.existsSync(manifestPath)) {
-      throw new Error(`No .signatures.json manifest found in ${resolvedDir}`);
+      throw new SigningError("manifest-missing", `No .signatures.json manifest found in ${resolvedDir}`);
     }
 
-    const malformed = (detail: string): Error => new Error(`Manifest file .signatures.json is malformed: ${detail}`);
+    const malformed = (detail: string): SigningError => new SigningError("manifest-malformed", `Manifest file .signatures.json is malformed: ${detail}`);
     let manifest: SigningManifestFormat;
     try {
       manifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));

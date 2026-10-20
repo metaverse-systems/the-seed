@@ -7,6 +7,8 @@ import { runTheSeed, snapshotTree } from "./helpers/RunCli";
 import { replaceScopeKey } from "./helpers/IndependentCheck";
 import { makeUniversal } from "./helpers/Universal";
 import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
+import { signingErrorClass } from "./helpers/SigningErrors";
+import { createCertHint } from "../src/cli/Hints";
 
 // The commands, run through runTheSeed with a scratch configuration directory and a scratch HOME.
 // Two configurations are used: A (scope @ta) and B (scope @tb). The command's status is the process
@@ -725,7 +727,7 @@ describe("signing help", () => {
 // Choices: the configuration has one scope so no prompt appears; the file is a copy of the arm64 Mac sample
 // whose modification time is first set to a fixed past date; the message is the key check's own, after "Error: ".
 describe("signing sign with an unsupported scope key", () => {
-  it("prints the message on stderr, exits 3 and leaves the file byte-for-byte unchanged with the same modification time", async () => {
+  it("prints the message on stderr, exits 2 and leaves the file byte-for-byte unchanged with the same modification time", async () => {
     const config = await makeConfiguration("@tk");
     replaceScopeKey(config.configDir, "@tk", "rsa2048");
     const file = path.join(tempDir("cli-sign-file-"), "tiny-macho-arm64");
@@ -737,7 +739,7 @@ describe("signing sign with an unsupported scope key", () => {
 
     const run = await runSign([file], config.configDir, home);
 
-    expect(run.status).toBe(3);
+    expect(run.status).toBe(2);
     expect(run.err).toBe("Error: Cannot sign with scope '@tk': its key is RSA (2048-bit); only ECDSA P-256 keys are supported. No file was changed.");
     expect(run.out).not.toContain("Signed:");
     expect(fs.readFileSync(file).equals(before)).toBe(true);
@@ -777,14 +779,14 @@ describe("signing without the native component", () => {
     jest.dontMock(nativeComponentPath);
   });
 
-  it("sign refuses a Windows program: the message alone on standard error, exit 3, nothing changed", async () => {
+  it("sign refuses a Windows program: the message alone on standard error, exit 2, nothing changed", async () => {
     const file = path.join(dir, "tiny.exe");
     fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), file);
     const before = fileDigest(file);
 
     const run = await runWith(commands, "sign", [file]);
 
-    expect(run.status).toBe(3);
+    expect(run.status).toBe(2);
     expect(run.err).toBe("Error: " + component.nativeComponentMessage());
     expect(run.out).not.toContain("Signed:");
     expect(fileDigest(file)).toBe(before);
@@ -1018,5 +1020,159 @@ describe("signing --scope", () => {
     expect(run.status).toBe(3);
     expect(run.stderr).toContain("--forse");
     expect(fileDigest(file)).toBe(before);
+  });
+});
+
+// The exit status of a failure comes from the kind of error, never from its text. Choices: the error
+// class is built as `new SigningError(code, message, hint?)`; a library method is replaced for one case
+// by a spy on the prototype and restored afterwards; the expected statuses below are written out here
+// from the table of statuses and do not use the code under test.
+describe("signing statuses come from the error kind", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function signingError(code: string, message: string, hint?: string): Error {
+    const ErrorClass = signingErrorClass() as unknown as new (code: string, message: string, hint?: string) => Error;
+    if (ErrorClass === undefined) {
+      throw new Error("SigningError is not exported from src/Signing.ts");
+    }
+    return new ErrorClass(code, message, hint);
+  }
+
+  const statusOfCode: Array<[string, number]> = [
+    ["scope-required", 1],
+    ["unknown-scope", 2],
+    ["author-name-missing", 2],
+    ["certificate-missing", 2],
+    ["certificate-expired", 2],
+    ["certificate-unreadable", 2],
+    ["key-mismatch", 2],
+    ["unsupported-key", 2],
+    ["invalid-validity", 1],
+    ["path-not-found", 2],
+    ["not-binary", 1],
+    ["read-only", 1],
+    ["no-binaries", 1],
+    ["manifest-missing", 2],
+    ["manifest-malformed", 3],
+    ["wrong-target", 3],
+    ["signing-failed", 1],
+  ];
+
+  it.each(statusOfCode)("sign: a SigningError with code %s ends with status %i, the message and the hint on standard error", async (code, status) => {
+    jest.spyOn(Signing.prototype, "signFile").mockRejectedValue(signingError(code, `Failure of kind ${code}.`, `Hint for ${code}.`));
+    const run = await runSigning("sign", [signedInB, "--scope", "@ta"], A.configDir, home);
+    expect(run.status).toBe(status);
+    expect(run.err).toBe(`Error: Failure of kind ${code}.\nHint for ${code}.`);
+    expect(run.out).toBe("");
+  });
+
+  it.each(statusOfCode)("import-cert: a SigningError with code %s ends with status %i", async (code, status) => {
+    jest.spyOn(Signing.prototype, "importCert").mockRejectedValue(signingError(code, `Failure of kind ${code}.`));
+    const run = await runSigning("import-cert", ["--cert", A.certFile, "--key", A.certFile, "--scope", "@ta", "--force"], A.configDir, home);
+    expect(run.status).toBe(status);
+    expect(run.err).toBe(`Error: Failure of kind ${code}.`);
+  });
+
+  it("sign: a message that used to select a status does not (a SigningError with code signing-failed saying no scopes are configured gives 1)", async () => {
+    jest.spyOn(Signing.prototype, "signFile").mockRejectedValue(signingError("signing-failed", "No scopes configured, No signing certificate, expired, No binary files."));
+    const run = await runSigning("sign", [signedInB, "--scope", "@ta"], A.configDir, home);
+    expect(run.status).toBe(1);
+  });
+
+  it("import-cert: a plain Error whose text says mismatch is an unexpected error with status 1, not 2 or 3", async () => {
+    jest.spyOn(Signing.prototype, "importCert").mockRejectedValue(new Error("Certificate and key do not match (mismatch)"));
+    const run = await runSigning("import-cert", ["--cert", A.certFile, "--key", A.certFile, "--scope", "@ta", "--force"], A.configDir, home);
+    expect(run.status).toBe(1);
+    expect(run.err).toBe("Error: Unexpected error in \"the-seed signing import-cert\": Certificate and key do not match (mismatch)");
+  });
+
+  it("sign: a plain Error whose text names an expired certificate is an unexpected error with status 1", async () => {
+    jest.spyOn(Signing.prototype, "signFile").mockRejectedValue(new Error("Signing certificate is expired."));
+    const run = await runSigning("sign", [signedInB, "--scope", "@ta"], A.configDir, home);
+    expect(run.status).toBe(1);
+    expect(run.err).toBe("Error: Unexpected error in \"the-seed signing sign\": Signing certificate is expired.");
+  });
+
+  it.each([
+    ["verifyFile", "manifest-missing", 2],
+    ["verifyFile", "manifest-malformed", 3],
+    ["verifyFile", "wrong-target", 3],
+    ["verifyFile", "path-not-found", 2],
+  ])("verify: %s throwing a SigningError with code %s ends with status %i", async (method, code, status) => {
+    jest.spyOn(Signing.prototype, method as "verifyFile").mockRejectedValue(signingError(code, `Failure of kind ${code}.`));
+    const run = await runVerify([signedInB], A.configDir, home);
+    expect(run.status).toBe(status);
+    expect(run.err).toBe(`Error: Failure of kind ${code}.`);
+  });
+
+  it.each([
+    ["manifest-missing", 2],
+    ["manifest-malformed", 3],
+  ])("verify of a directory: verifyDirectory throwing a SigningError with code %s ends with status %i", async (code, status) => {
+    jest.spyOn(Signing.prototype, "verifyDirectory").mockRejectedValue(signingError(code, `Failure of kind ${code}.`));
+    const run = await runVerify([tempDir("cli-dir-")], A.configDir, home);
+    expect(run.status).toBe(status);
+    expect(run.err).toBe(`Error: Failure of kind ${code}.`);
+  });
+
+  describe("cert-info", () => {
+    it("with no certificate prints the error and the hint on standard error, nothing on standard output, and ends with 2", async () => {
+      const config = await makeConfiguration("@tn");
+      fs.rmSync(path.join(config.configDir, "signing"), { recursive: true, force: true });
+      const run = await runSigning("cert-info", [], config.configDir, home);
+      expect(run.status).toBe(2);
+      expect(run.out).toBe("");
+      expect(run.err).toContain("Error: No signing certificate found for scope '@tn'.");
+      expect(run.err).toContain(createCertHint("@tn"));
+    });
+
+    it("with no scopes prints the error on standard error, nothing on standard output, and ends with 2", async () => {
+      const configDir = tempDir("cli-noscopes-");
+      fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(configDir, "prefix"), scopes: {} }));
+      const run = await runSigning("cert-info", [], configDir, home);
+      expect(run.status).toBe(2);
+      expect(run.out).toBe("");
+      expect(run.err).toContain("Error:");
+    });
+
+    it("with an unknown --scope prints the error on standard error and nothing on standard output", async () => {
+      const run = await runSigning("cert-info", ["--scope", "@nope"], A.configDir, home);
+      expect(run.status).toBe(2);
+      expect(run.out).toBe("");
+      expect(run.err).toContain("@nope");
+    });
+
+    it("prints a certificate on standard output with standard error empty", async () => {
+      const run = await runSigning("cert-info", [], A.configDir, home);
+      expect(run.status).toBe(0);
+      expect(run.err).toBe("");
+      expect(run.out).toContain("Signing Certificate:");
+    });
+  });
+
+  describe("real failures of sign", () => {
+    it("a path that does not exist ends with 2", async () => {
+      const run = await runSign([path.join(tempDir("cli-none-"), "absent.bin"), "--scope", "@ta"], A.configDir, home);
+      expect(run.status).toBe(2);
+      expect(run.err).toMatch(/^Error: File not found: /);
+    });
+
+    it("a file that is not binary ends with 1", async () => {
+      const text = path.join(tempDir("cli-text-"), "notes.txt");
+      fs.writeFileSync(text, "plain text\n");
+      const run = await runSign([text, "--scope", "@ta"], A.configDir, home);
+      expect(run.status).toBe(1);
+      expect(run.err).toBe(`Error: File is not binary: ${text}`);
+    });
+
+    it("a directory with no binary files ends with 1", async () => {
+      const dir = tempDir("cli-texts-");
+      fs.writeFileSync(path.join(dir, "a.txt"), "plain text\n");
+      const run = await runSign([dir, "--scope", "@ta"], A.configDir, home);
+      expect(run.status).toBe(1);
+      expect(run.err).toBe("Error: No binary files found in directory.");
+    });
   });
 });

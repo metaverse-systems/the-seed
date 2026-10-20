@@ -10,7 +10,7 @@ import InstallerCLI from "./InstallerCLI";
 import { parseCommandLine } from "../cli/ParseArgs";
 import { findCommand } from "../cli/Commands";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
-import { CliError, HandlerResult, UsageError } from "../cli/ExitStatus";
+import { CliError, FailedError, HandlerResult, UsageError, toCliError } from "../cli/ExitStatus";
 import { commandUsage, subcommandUsage } from "../cli/Help";
 import { helpHint } from "../cli/Hints";
 
@@ -49,6 +49,7 @@ function completeUsageError(error: UsageError, parsed: ParsedCommand): UsageErro
 }
 
 function printError(error: CliError): void {
+  if (error instanceof FailedError && error.reported) return;
   console.error(`Error: ${error.message}`);
   if (error instanceof UsageError) {
     console.error(error.usage);
@@ -92,18 +93,14 @@ export async function runCli(argv: string[], configDir: string, context: RunCont
       process.exitCode = result.status;
     }
   } catch (error) {
-    if (error instanceof CliError) {
-      const shown = error instanceof UsageError ? completeUsageError(error, parsed) : error;
+    const known = toCliError(error);
+    if (known) {
+      const shown = known instanceof UsageError ? completeUsageError(known, parsed) : known;
       printError(shown);
       process.exitCode = shown.status;
       return;
     }
-    if (error instanceof Error && error.name === "ConfigError") {
-      console.error(error.message);
-      process.exitCode = 1;
-      return;
-    }
-    // Until the failures are classified, every other error is one line and status 1.
+    // Any other error is one line and status 1; the stack follows only when asked for.
     const label = parsed.subcommand ? `${parsed.command} ${parsed.subcommand}` : parsed.command;
     const message = error instanceof Error ? error.message : String(error);
     console.error(`Error: Unexpected error in "the-seed ${label}": ${message}`);

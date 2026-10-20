@@ -1,11 +1,15 @@
 import Config from "../Config";
 import Package from "../Package";
+import { requireNativeComponent } from "../NativeComponent";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
 import { HandlerResult } from "../cli/ExitStatus";
 
 const PackageCLI = async (parsed: ParsedCommand, context: CliContext): Promise<HandlerResult> => {
   const outputDir = parsed.positionals["output-directory"] as string;
   const projectDirs = parsed.positionals["project-dir"] as string[];
+
+  // Packaging needs the native component; its absence is reported before anything is read or written
+  requireNativeComponent();
 
   const config = new Config(context.configDir);
   const pkg = new Package(config);

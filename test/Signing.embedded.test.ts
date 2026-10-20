@@ -12,6 +12,8 @@ import { CfbPackage, loadReference, parsePackage, storedDigest } from "./helpers
 import { optionalExternalCheck } from "./helpers/ExternalTools";
 import { makeUniversal } from "./helpers/Universal";
 import { ReplacementKey, replaceScopeKey } from "./helpers/IndependentCheck";
+import { signingErrorOf } from "./helpers/SigningErrors";
+import * as CmsBuilder from "../src/CmsBuilder";
 
 /**
  * Create a temporary directory for test isolation.
@@ -1623,5 +1625,39 @@ describe("scope keys", () => {
       expect(fs.readdirSync(dir).sort()).toEqual(placed.map((file) => path.basename(file)).sort());
       expect(fs.existsSync(path.join(dir, ".signatures.json"))).toBe(false);
     });
+  });
+});
+
+// ── Typed errors after the checks ───────────────────────────
+
+// A failure after the checks have passed is a SigningError with code `signing-failed`; the messages keep
+// their wording. The native component is the real one; the two situations are made by replacing one
+// function for the length of the case (the builder's container for one that is too large, and the
+// addon's read-back of the installer for a result that does not match).
+describe("signing-failed errors", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it("a Mach-O signature container that does not fit the room reserved for it", async () => {
+    const { signing, scope } = await setupSigning();
+    const dir = createTempDir();
+    const file = copyGenuine("tiny-macho-arm64", dir);
+    const before = sha256File(file);
+    jest.spyOn(CmsBuilder, "buildSignatureContainer").mockReturnValue(Buffer.alloc(1_000_000));
+    const error = await signingErrorOf(() => signing.signFileMachO(file, scope));
+    expect(error.code).toBe("signing-failed");
+    expect(error.message).toMatch(/the signature container \(1000000 bytes\) does not fit the room reserved for it/);
+    expect(sha256File(file)).toBe(before);
+  });
+
+  it("an installer signature that does not read back", async () => {
+    const { signing, scope } = await setupSigning();
+    const dir = createTempDir();
+    const file = copyMsi("tiny.msi", dir);
+    jest.spyOn(loadAddon(), "msiCheckSignature").mockReturnValue({ state: "mismatch", detail: "digest differs" });
+    const error = await signingErrorOf(() => signing.signFileMsi(file, scope));
+    expect(error.code).toBe("signing-failed");
+    expect(error.message).toBe("Installer signature was written but does not read back (digest differs)");
   });
 });

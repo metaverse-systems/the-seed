@@ -1,6 +1,7 @@
 import { checkLibEcs, checkLibTheSeed, installLibEcs, installLibTheSeed } from "../Dependencies";
 import Config from "../Config";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
+import { FailedError } from "../cli/ExitStatus";
 
 const DependenciesCLI = async (parsed: ParsedCommand, context: CliContext): Promise<void> => {
   const config = new Config(context.configDir);
@@ -25,7 +26,7 @@ const DependenciesCLI = async (parsed: ParsedCommand, context: CliContext): Prom
     if (await installLibEcs(config, target)) {
       console.log("libecs-cpp installed successfully.");
     } else {
-      console.error("Failed to install libecs-cpp.");
+      throw new FailedError("Failed to install libecs-cpp.");
     }
   }
   if (!checkLibTheSeed(config, target)) {
@@ -33,7 +34,7 @@ const DependenciesCLI = async (parsed: ParsedCommand, context: CliContext): Prom
     if (await installLibTheSeed(config, target)) {
       console.log("libthe-seed installed successfully.");
     } else {
-      console.error("Failed to install libthe-seed.");
+      throw new FailedError("Failed to install libthe-seed.");
     }
   }
 };

@@ -821,10 +821,12 @@ describe("BuildCLI without the native component", () => {
     [["windows"]],
     [["windows", "--release"]],
     [["windows", "--release", "--recursive"]],
-  ])("prints the missing component message alone on standard error and exits 1 for build %p", async (args) => {
+  ])("prints the missing component message alone on standard error and exits 2 for build %p", async (args) => {
     const run = await isolated.run(["build", ...args], { configDir: CONFIG_DIR });
 
-    expect(run.stderr).toBe(stderrOf(isolated.component.nativeComponentMessage()));
-    expect(run.status).toBe(1);
+    expect(run.stderr).toBe(stderrOf("Error: " + isolated.component.nativeComponentMessage()));
+    expect(run.stderr).not.toContain("Build failed");
+    expect(run.stderr).not.toMatch(/\n\s+at /);
+    expect(run.status).toBe(2);
   });
 });

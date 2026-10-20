@@ -2,7 +2,8 @@ import Config from "./Config";
 import Scopes from "./Scopes";
 import Package from "./Package";
 import Build from "./Build";
-import Signing, { UnsupportedSigningKey } from "./Signing";
+import Signing, { SigningError, UnsupportedSigningKey } from "./Signing";
+import type { SigningErrorCode } from "./Signing";
 import type { SignedContent } from "./CmsBuilder";
 import Installer from "./Installer";
 import { NativeComponentMissingError, nativeComponentMessage } from "./NativeComponent";
@@ -13,6 +14,7 @@ import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeD
 import { DependencyDiscoveryError, CyclicDependencyError, ConflictingProjectError, ProjectManifestError, DiscoveryCancelledError } from "./DependencyWalker";
 
 export {
+  SigningError,
   Config,
   Scopes,
   Package,
@@ -22,6 +24,7 @@ export {
   NativeComponentMissingError,
   nativeComponentMessage,
   SignedContent,
+  SigningErrorCode,
   Installer,
   readElfNames,
   ElfNames,

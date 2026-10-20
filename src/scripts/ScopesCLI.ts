@@ -2,6 +2,7 @@ import inquirer from "inquirer";
 import Config from "../Config";
 import Scopes from "../Scopes";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
+import { addScopeHint } from "../cli/Hints";
 
 const ScopesCLI = async (parsed: ParsedCommand, context: CliContext): Promise<void> => {
   const config = new Config(context.configDir);
@@ -13,7 +14,8 @@ const ScopesCLI = async (parsed: ParsedCommand, context: CliContext): Promise<vo
       break;
     case "edit": {
       if (Object.keys(config.config.scopes).length === 0) {
-        console.log("There are no scopes to edit.");
+        console.error("There are no scopes to edit.");
+        console.error(addScopeHint());
         break;
       }
       const { scopeName } = await inquirer.prompt(scopes.askWhichScope());
@@ -31,7 +33,8 @@ const ScopesCLI = async (parsed: ParsedCommand, context: CliContext): Promise<vo
     }
     case "delete": {
       if (Object.keys(config.config.scopes).length === 0) {
-        console.log("There are no scopes to edit.");
+        console.error("There are no scopes to edit.");
+        console.error(addScopeHint());
         break;
       }
       const { scopeName } = await inquirer.prompt(scopes.askWhichScope());

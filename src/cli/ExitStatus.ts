@@ -1,3 +1,4 @@
+import type { SigningErrorCode } from "../Signing";
 import { helpHint } from "./Hints";
 
 /** One row of the table of exit statuses shown in the help and the README. */
@@ -90,4 +91,62 @@ export class FailedError extends CliError {
     this.name = "FailedError";
     this.reported = options?.reported ?? false;
   }
+}
+
+/** The exit status the command line ends with for each way the signing library can fail. */
+export function signingErrorStatus(code: SigningErrorCode): number {
+  switch (code) {
+    case "unknown-scope":
+    case "author-name-missing":
+    case "certificate-missing":
+    case "certificate-expired":
+    case "certificate-unreadable":
+    case "key-mismatch":
+    case "unsupported-key":
+    case "path-not-found":
+    case "manifest-missing":
+      return 2;
+    case "manifest-malformed":
+    case "wrong-target":
+      return 3;
+    case "scope-required":
+    case "invalid-validity":
+    case "not-binary":
+    case "read-only":
+    case "no-binaries":
+    case "signing-failed":
+    default:
+      return 1;
+  }
+}
+
+/** Whether the error, or a class it extends, has the given name (classes are matched by name so that a reloaded module still matches). */
+function hasClassName(error: Error, name: string): boolean {
+  for (let proto: object | null = Object.getPrototypeOf(error); proto !== null; proto = Object.getPrototypeOf(proto)) {
+    if ((proto as { constructor?: { name?: string } }).constructor?.name === name) return true;
+  }
+  return error.name === name;
+}
+
+/**
+ * Turns an error of a class the tool knows into the error the command line reports, with the status
+ * of its kind; any other error gives null.
+ */
+export function toCliError(error: unknown): CliError | null {
+  if (!(error instanceof Error)) return null;
+  if (error instanceof CliError) return error;
+  if (hasClassName(error, "SigningError")) {
+    const signing = error as Error & { code: SigningErrorCode; hint?: string };
+    return new CliError(signingErrorStatus(signing.code), signing.message, { hint: signing.hint });
+  }
+  if (hasClassName(error, "ConfigError") || hasClassName(error, "NativeComponentMissingError") || hasClassName(error, "InstallerMetadataError")) {
+    return new MissingError(error.message);
+  }
+  if (hasClassName(error, "DependencyDiscoveryError")) {
+    return new FailedError(error.message);
+  }
+  if (hasClassName(error, "ScopeNameError")) {
+    return new CliError(3, error.message);
+  }
+  return null;
 }
