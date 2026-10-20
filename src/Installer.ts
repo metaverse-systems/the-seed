@@ -304,7 +304,10 @@ ${componentRefs}
       return null;
     } catch (err) {
       let message: string;
-      if (err && typeof err === "object" && "stderr" in err) {
+      const signal = err && typeof err === "object" && "signal" in err ? (err as { signal?: string | null }).signal : null;
+      if (signal) {
+        message = "Error: wixl was killed by signal " + signal + " while compiling the installer";
+      } else if (err && typeof err === "object" && "stderr" in err) {
         const stderr = (err as { stderr: Buffer }).stderr;
         message = "Error: wixl compilation failed:\n" + stderr.toString();
       } else {
