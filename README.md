@@ -246,7 +246,7 @@ With only one scope configured `--scope` can be left out. The certificate is val
 ### Step 7: Sign and verify a file
 
 ```bash
-cp "$(command -v true)" hello-tool
+cp /bin/true hello-tool
 the-seed signing sign hello-tool
 the-seed signing verify hello-tool
 ```

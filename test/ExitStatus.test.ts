@@ -688,7 +688,7 @@ describe("end to end", () => {
   });
 
   describe("statuses per command", () => {
-    // The statuses of contracts/exit-status.md's rows, by command, for the conditions these cases can produce.
+    // The status of each command, by condition, for the conditions these cases can produce.
     const allowed: Record<string, number[]> = {
       config: [0, 2, 3],
       scopes: [0, 2, 3],
