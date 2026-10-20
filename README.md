@@ -484,7 +484,7 @@ Error: Two different files would be packaged as libfoo.so.1:
 Nothing was written.
 ```
 
-**Changes from earlier versions.** Packaged output now includes the dependency projects declared with `file:` and each Linux library under its loadable name (for example `libgreet.so.0`). It no longer includes `lib<name>.so` development copies or fully versioned names such as `libgreet.so.0.0.0`; scripts that look for those names must change.
+**Changes from earlier versions.** Packaged output now includes the dependency projects declared in `package.json` (whether `file:` paths or packages installed from npm into `node_modules`) and each Linux library under its loadable name (for example `libgreet.so.0`). It no longer includes `lib<name>.so` development copies or fully versioned names such as `libgreet.so.0.0.0`; scripts that look for those names must change.
 
 Search paths for shared library resolution include `<prefix>/<target>/lib`, `<prefix>/<target>/bin`, and MinGW cross-compiler runtime directories.
 

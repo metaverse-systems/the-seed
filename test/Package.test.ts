@@ -1088,12 +1088,14 @@ describe("test Package", () => {
       consoleSpy.mockRestore();
       const help = logCalls.join("\n");
 
-      // The help is printed after the usage lines; the four lines are matched
+      // The help is printed after the usage lines; the lines are matched
       // as a whole text so the choice of one console.log call or several is open.
       const lines = [
-        "Dependency projects are found the way \"the-seed build --recursive\" finds them: \"file:\" paths",
-        "relative to the declaring project, other names in its node_modules. Linux libraries are written",
-        "under the name programs load them by (for example libgreet.so.0), each with its .sig when signed.",
+        "Dependency projects are found the way \"the-seed build --recursive\" finds them, from the",
+        "\"dependencies\" of each project's package.json: a \"file:\" path is taken relative to the declaring",
+        "project, and any other dependency (for example one installed from npm) is looked up in that",
+        "project's node_modules. Linux libraries are written under the name programs load them by",
+        "(for example libgreet.so.0), each with its .sig when signed.",
         "Two different files with the same name are refused; nothing is written."
       ];
       for (const line of lines) {

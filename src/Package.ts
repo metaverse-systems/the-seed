@@ -22,8 +22,10 @@ import {
 /**
  * Packages project binaries with the shared libraries they need into one directory.
  *
- * Dependency projects are found by the rule the recursive build uses (`file:` paths relative to the
- * declaring project, other names in its own node_modules, each project once by real location).
+ * Dependency projects are found by the rule the recursive build uses: for each entry in a project's
+ * package.json `dependencies`, a `file:` path is taken relative to the declaring project and any
+ * other dependency (for example one installed from npm) is looked up in that project's own
+ * node_modules, each project once by real location.
  * A Linux library is written under the name programs load it by (its soname), as a regular file,
  * with its signature under the same name; programs and Windows files keep their names. Two
  * different files for one name are refused and nothing is written. Libraries needed but left to
