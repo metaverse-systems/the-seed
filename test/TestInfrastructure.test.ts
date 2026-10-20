@@ -15,6 +15,8 @@ import { toolEnv as nativeToolEnv } from "./helpers/NativeTree";
 import { elfImage } from "./helpers/ElfImage";
 import { withoutNativeComponent, nativeComponentPath, fileDigest } from "./helpers/NativeAbsent";
 import { writeProject, linkModule, readBound, onRead } from "./helpers/ScratchProjects";
+import { readWxs } from "./helpers/WxsReader";
+import { snapshotTree } from "./helpers/RunCli";
 
 // Expected shapes of the runner's pure functions, as exercised here:
 //   summariseResults(jest, entries) -> { lines: string[], failed: boolean }
@@ -1196,5 +1198,83 @@ describe("native absence helper", () => {
     expect(fileDigest(file)).toBe(crypto.createHash("sha256").update(bytes).digest("hex"));
     fs.writeFileSync(file, Buffer.alloc(0));
     expect(fileDigest(file)).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  });
+});
+
+describe("cli test helpers", () => {
+  let scratch: string;
+
+  beforeEach(() => {
+    scratch = fs.mkdtempSync(path.join(os.tmpdir(), "cli-helpers-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  });
+
+  it("WxsReader imports nothing from the source tree", () => {
+    const lines = fs
+      .readFileSync(rel("test", "helpers", "WxsReader.ts"), "utf8")
+      .split("\n")
+      .filter((line) => /^\s*import\b|\brequire\(|^\s*}?\s*from\s/.test(line));
+    for (const line of lines) {
+      expect(line).not.toMatch(/src\/|\.\.\/\.\./);
+    }
+  });
+
+  it("WxsReader reads elements and attributes in document order", () => {
+    const elements = readWxs(
+      "<?xml version=\"1.0\"?>\n<Wix>\n  <Product Name=\"Demo\" Version=\"1.2.3\">\n    <File Id=\"a\" Source=\"dist/a.exe\"/>\n  </Product>\n</Wix>\n",
+    );
+    expect(elements.map((element) => element.name)).toEqual(["Wix", "Product", "File"]);
+    expect(elements[1].attributes).toEqual({ Name: "Demo", Version: "1.2.3" });
+    expect(elements[2].attributes).toEqual({ Id: "a", Source: "dist/a.exe" });
+  });
+
+  it("WxsReader decodes the five entities", () => {
+    const elements = readWxs("<Product Manufacturer=\"Smith &amp; Jones &lt;sales@example.com&gt;\" Name=\"&quot;x&quot; &apos;y&apos;\"/>");
+    expect(elements[0].attributes.Manufacturer).toBe("Smith & Jones <sales@example.com>");
+    expect(elements[0].attributes.Name).toBe("\"x\" 'y'");
+  });
+
+  it("WxsReader decodes decimal and hexadecimal references", () => {
+    const elements = readWxs("<Product Name=\"&#65;&#x42;&#x63;\"/>");
+    expect(elements[0].attributes.Name).toBe("ABc");
+  });
+
+  it("WxsReader rejects any other ampersand and names it", () => {
+    expect(() => readWxs("<Product Name=\"Smith & Jones\"/>")).toThrow(/&/);
+    expect(() => readWxs("<Product Name=\"a &nbsp; b\"/>")).toThrow(/&nbsp;/);
+  });
+
+  it("snapshotTree is equal for an untouched tree", () => {
+    fs.mkdirSync(path.join(scratch, "sub"));
+    fs.writeFileSync(path.join(scratch, "sub", "a.txt"), "one");
+    fs.writeFileSync(path.join(scratch, "b.txt"), "two");
+    expect(snapshotTree(scratch)).toEqual(snapshotTree(scratch));
+  });
+
+  it("snapshotTree differs after a file is created", () => {
+    fs.writeFileSync(path.join(scratch, "a.txt"), "one");
+    const before = snapshotTree(scratch);
+    fs.writeFileSync(path.join(scratch, "new.txt"), "x");
+    expect(snapshotTree(scratch)).not.toEqual(before);
+  });
+
+  it("snapshotTree differs after a file is deleted", () => {
+    fs.writeFileSync(path.join(scratch, "a.txt"), "one");
+    fs.writeFileSync(path.join(scratch, "b.txt"), "two");
+    const before = snapshotTree(scratch);
+    fs.rmSync(path.join(scratch, "b.txt"));
+    expect(snapshotTree(scratch)).not.toEqual(before);
+  });
+
+  it("snapshotTree differs after a file changes to other bytes of the same size", () => {
+    const file = path.join(scratch, "a.txt");
+    fs.writeFileSync(file, "abcd");
+    const before = snapshotTree(scratch);
+    fs.writeFileSync(file, "abce");
+    expect(fs.statSync(file).size).toBe(4);
+    expect(snapshotTree(scratch)).not.toEqual(before);
   });
 });
