@@ -149,4 +149,26 @@ describe("NativeComponent", () => {
       mod.resetNativeComponentForTests();
     });
   });
+
+  it("gives the same build step as the report of the build helper", () => {
+    withoutNativeComponent(() => {
+      const mod = loadModule();
+      const build = jest.requireActual<{ renderReport: (report: unknown) => string }>("../native/build.js");
+      const text = build.renderReport({
+        built: false,
+        libraryVersion: null,
+        libraryDir: null,
+        missing: [{ name: "libthe-seed", state: "missing", detail: "", found: null }],
+        buildOutput: null,
+        prefix: { prefix: "/p", source: "default", configPath: "/p/config.json", note: null },
+        packageRoot: mod.packageRoot(),
+        requiredVersion: requiredLibTheSeedVersion
+      });
+      const stepLine = text.split("\n").find((line) => line.includes("To build it:"));
+      expect(stepLine).toBeDefined();
+      const reportStep = (stepLine as string).slice((stepLine as string).indexOf("then: ") + "then: ".length);
+      expect(reportStep).toBe("cd \"" + mod.packageRoot() + "\" && " + mod.NATIVE_COMPONENT_STEP);
+      expect(mod.nativeComponentMessage()).toContain(reportStep);
+    });
+  });
 });

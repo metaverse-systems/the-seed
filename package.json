@@ -8,7 +8,7 @@
     "lint": "node scripts/run-checks.js lint",
     "lint-fix": "node ./node_modules/eslint/bin/eslint.js --ext .ts src test --fix",
     "build": "tsc",
-    "build-addon": "node-gyp rebuild --directory=native",
+    "build-addon": "node native/build.js",
     "test": "node scripts/run-checks.js"
   },
   "repository": {
