@@ -5,6 +5,7 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 import * as x509 from "@peculiar/x509";
 import Signing from "../src/Signing";
+import * as SigningModule from "../src/Signing";
 import Config from "../src/Config";
 import { expectPresent } from "./helpers/Assert";
 import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
@@ -643,5 +644,18 @@ describe("Signing without the native component", () => {
       expect(() => signing.removeEmbeddedSignature(file)).toThrow(missing.nativeComponentMessage());
       expect(fileDigest(file)).toBe(before);
     });
+  });
+});
+
+describe("validity constants", () => {
+  // Looked up on the module so that this file compiles whether or not the exports exist.
+  const constants = SigningModule as unknown as { DEFAULT_VALIDITY_DAYS?: number; MAX_VALIDITY_DAYS?: number };
+
+  it("exports the default validity of 365 days", () => {
+    expect(constants.DEFAULT_VALIDITY_DAYS).toBe(365);
+  });
+
+  it("exports the largest validity of 3650 days", () => {
+    expect(constants.MAX_VALIDITY_DAYS).toBe(3650);
   });
 });

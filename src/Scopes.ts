@@ -2,6 +2,24 @@ import fs from "fs";
 import { ConfigType, ScopeAnswersType, ScopeDefaultsType } from "./types";
 import Config from "./Config";
 
+/**
+ * Checks a scope name as typed, with or without its leading "@".
+ * @returns null when the name is usable, otherwise the reason it is not
+ */
+export function validateScopeName(name: string): string | null {
+  const bare = name.startsWith("@") ? name.slice(1) : name;
+  if (bare === "") {
+    return "A scope name cannot be empty.";
+  }
+  if (bare.includes("/")) {
+    return "A scope name cannot contain \"/\".";
+  }
+  if (/\s/.test(bare)) {
+    return "A scope name cannot contain spaces or other whitespace.";
+  }
+  return null;
+}
+
 class Scopes {
   config: Config;
 

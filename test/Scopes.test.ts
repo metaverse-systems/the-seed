@@ -3,6 +3,11 @@ import path from "path";
 import fs from "fs";
 import Config from "../src/Config";
 import Scopes from "../src/Scopes";
+import * as ScopesModule from "../src/Scopes";
+
+// Looked up on the module so that this file compiles whether or not the export exists.
+const validateScopeName = (ScopesModule as unknown as { validateScopeName: (name: string) => string | null })
+  .validateScopeName;
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "scopes-test-"));
@@ -75,5 +80,27 @@ describe("Scopes on a file without scopes", () => {
 
   afterAll(() => {
     fs.rmSync(configDir, { recursive: true });
+  });
+});
+
+describe("validateScopeName", () => {
+  const EMPTY = "A scope name cannot be empty.";
+  const SLASH = "A scope name cannot contain \"/\".";
+  const WHITESPACE = "A scope name cannot contain spaces or other whitespace.";
+
+  it.each(["a", "@a", "@my-scope"])("accepts %p", (name) => {
+    expect(validateScopeName(name)).toBeNull();
+  });
+
+  it.each(["", "@"])("refuses %p as empty", (name) => {
+    expect(validateScopeName(name)).toBe(EMPTY);
+  });
+
+  it.each(["a/b", "@a/b"])("refuses %p for the slash", (name) => {
+    expect(validateScopeName(name)).toBe(SLASH);
+  });
+
+  it.each(["a b", "@a\tb"])("refuses %p for the whitespace", (name) => {
+    expect(validateScopeName(name)).toBe(WHITESPACE);
   });
 });

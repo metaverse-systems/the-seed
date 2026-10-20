@@ -40,6 +40,12 @@ import {
   VerifyStatus,
 } from "./types";
 
+/** Days a new certificate is valid when no validity is given. */
+export const DEFAULT_VALIDITY_DAYS = 365;
+
+/** The largest validity, in days, a new certificate may be given. */
+export const MAX_VALIDITY_DAYS = 3650;
+
 /** Raised when a scope's key cannot be used for signing; no file has been changed. */
 export class UnsupportedSigningKey extends Error {
   constructor(message: string) {
