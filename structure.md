@@ -65,3 +65,13 @@ Windows installer exports:
 * `test/ElfNames.test.ts` checks the reader against images written by `test/helpers/ElfImage.ts`, which builds minimal ELF files (including malformed ones) in memory.
 * `test/PackageLayout.test.ts` packages scratch trees with the real addon and checks the written names, signatures, collisions, the not-packaged list and the files counted. `test/helpers/NativeTree.ts` compiles the libraries and programs those trees hold directly with `cc` (or the MinGW compiler) and runs a packaged program with a fixed environment.
 * `test/RecursiveDiscovery.test.ts` runs the real walker, the recursive build and the build command against scratch trees with every build step mocked: cycles, links, conflicts and stop requests during scanning. `test/helpers/ScratchProjects.ts` writes those trees and holds the read bound that makes a looping walk fail after 200 reads.
+
+## Native component and installation
+
+* `native/build.js` builds the native component (`npm run build-addon`, and the package's `install` script with `--install`): it reads the configured prefix, checks the prerequisites, runs node-gyp and prints a report; a failed build does not fail an installation.
+* `native/pkg-config.js` holds what `native/build.js` and the install check share: finding the prefix the way the tool does, the pkg-config search setting (prefix first, then the caller's `PKG_CONFIG_PATH`) and the libthe-seed version `native/binding.gyp` requires.
+* `src/NativeComponent.ts` is the one place the native component is loaded: `loadNativeComponent`, `requireNativeComponent`, `NativeComponentMissingError` and the message that names the step.
+* `test/helpers/NativeAbsent.ts` makes the component absent, or present but not loading, inside one test, without touching the built files.
+* `test/NativeComponent.test.ts`, `test/NativeBuild.test.ts` and `test/PackageContents.test.ts` check the loader and its message, the build script (with injected probes and runner, never a real node-gyp build) and the files the published package contains.
+* `test/InstallPhase.test.ts` checks the install phase when signing is not possible.
+* The `install` stage of `scripts/run-checks.js` (`npm test -- install`) packs the package, installs the tarball into scratch locations and checks signing with and without libthe-seed, and an install from git; it is not part of a plain `npm test`.

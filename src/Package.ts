@@ -183,6 +183,7 @@ class Package {
   /**
    * Invoke the native addon's listDependencies() to call DependencyLister::ListDependencies() directly.
    * Returns the result as a plain JS object.
+   * @throws NativeComponentMissingError when the native component is not built
    */
   resolveDependencies = (binaryPaths: string[], searchPaths: string[]): DependencyResultType => {
     const addon = loadNativeComponent<{ listDependencies(binaryPaths: string[], searchPaths: string[]): DependencyResultType }>();
@@ -194,7 +195,8 @@ class Package {
    * Dependency projects are found with the walker the recursive build uses; a directory that is
    * not a project contributes itself alone. Resolves a refusal (not a rejection) for a dependency
    * cycle, two different directories with one package name, an unreadable package.json, a malformed
-   * ELF file, or two different files that would be written under one name.
+   * ELF file, or two different files that would be written under one name. It also resolves a refusal, naming the
+   * step that builds it, when the native component is not built.
    */
   plan = async (projectDirs: string[]): Promise<PackagePlan> => {
     const refuse = (message: string): PackagePlan => ({ ok: false, message });
@@ -485,7 +487,8 @@ class Package {
   /**
    * Main entry point: validate inputs, decide what to package, create the directory, copy files.
    * Resolves a PackageResult (it no longer returns a boolean); a refusal or failure is printed once
-   * as "Error: <message>", `success` is false and nothing is left written.
+   * as "Error: <message>", `success` is false and nothing is left written. Without the native component the
+   * refusal names the step that builds it, and nothing is read or written.
    */
   run = async (outputDir: string, projectDirs: string[]): Promise<PackageResult> => {
     const failed = (message: string): PackageResult => {

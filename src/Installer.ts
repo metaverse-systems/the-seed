@@ -266,7 +266,8 @@ ${componentRefs}
 
   /**
    * Full pipeline: validate → ensure dist → generate → compile.
-   * Resolves the path of the installer, or null on failure.
+   * Resolves the path of the installer, or null on failure. Without the native component it prints the one message
+   * naming the step that builds it, resolves null and generates nothing.
    */
   run = async (projectDir: string): Promise<string | null> => {
     // The installer is built from the packaged files, which needs the native component

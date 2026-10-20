@@ -477,7 +477,8 @@ class Signing {
    * buildSignatureContainer; the native addon computes the digest and embeds the result, replacing any earlier
    * signature. Works for any certificate the scope holds.
    * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
-   * @throws if file is not a valid PE binary, or UnsupportedSigningKey before any change
+   * @throws if file is not a valid PE binary, or UnsupportedSigningKey before any change, or
+   * NativeComponentMissingError when the native component is not built
    */
   async signFileAuthenticode(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
@@ -695,7 +696,8 @@ class Signing {
    * signFileAuthenticode, signFileMsi or signFileMachO (embedded, standard container) or writes a detached .sig file.
    * @param options.scope - The scope whose certificate to use for signing
    * @throws if no certificate, certificate expired (and force=false), file is not binary, or UnsupportedSigningKey
-   * (nothing is changed in that case)
+   * (nothing is changed in that case), or NativeComponentMissingError when the file announces a Windows program,
+   * Mac program or installer, no detached signature is asked for and the native component is not built
    */
   async signFile(filePath: string, options?: SignOptions): Promise<SignResult> {
     if (!options?.scope) {
@@ -779,7 +781,8 @@ class Signing {
    * verification can account for them.
    * @param options.scope - The scope whose certificate to use for signing
    * @throws if no certificate or certificate expired (and force=false), or UnsupportedSigningKey before any file is
-   * changed
+   * changed, or NativeComponentMissingError before any file is signed when a file announces an embedded form, no
+   * detached signature is asked for and the native component is not built
    */
   async signDirectory(dirPath: string, options?: SignOptions): Promise<DirectorySignResult> {
     if (!options?.scope) {
@@ -1050,6 +1053,8 @@ class Signing {
    * detached]) and the top level is the worse one, the embedded one on a tie.
    * Trust is evaluated against options.trust, or the certificates of the configured scopes.
    * Throws for a path that does not exist, a `.sig` file whose file exists and a directory manifest.
+   * Without the native component an embedded signature is reported as not checked, with the message that names the
+   * step that builds it.
    */
   async verifyFile(filePath: string, options?: VerifyOptions): Promise<VerifyResult> {
     const resolvedPath = path.resolve(filePath);

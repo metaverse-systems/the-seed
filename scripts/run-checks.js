@@ -385,7 +385,7 @@ function isolatedEnvironment(base, scratchHome, scratchTmp) {
 
 function unitStage(jestArgs) {
   if (!fs.existsSync(path.join(packageRoot, ADDON_PATH))) {
-    console.error('Native addon not built: run "npm run build-addon" (libthe-seed must be reachable by pkg-config; see README)');
+    console.error('Native addon not built: run "npm run build-addon" (it finds libthe-seed through the configured prefix; see README)');
     return false;
   }
 
