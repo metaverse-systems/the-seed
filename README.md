@@ -32,6 +32,17 @@ GitHub: https://github.com/metaverse-systems/the-seed-vscode
 sudo apt install build-essential libtool pkg-config autoconf automake curl git
 ```
 
+### The native component
+
+Signing and verifying Windows programs, Mac programs and installers, packaging, the installer command and Windows builds use a native component (a C++ N-API addon) that is compiled on your machine when the package is installed. Building it needs:
+
+- a C++ compiler and `make` (`build-essential`),
+- `python3` (used by node-gyp),
+- `pkg-config`, and
+- libthe-seed 0.8.0 or later with libecs-cpp, which `the-seed dependencies install` builds into the prefix.
+
+Everything else in the tool works without it.
+
 ### Optional: Windows Cross-Compilation
 
 These packages are only needed if you intend to cross-compile projects for Windows:
@@ -50,15 +61,33 @@ sudo apt install msitools
 
 ## Installation
 
-```bash
-npm install -g @metaverse-systems/the-seed
-```
+Install in this order:
 
-Verify the installation:
+1. Install the system packages listed under Prerequisites.
+2. Install the tool. Add `--foreground-scripts` to see the native component's build report; npm hides it otherwise.
 
-```bash
-the-seed help
-```
+   ```bash
+   npm install -g --foreground-scripts @metaverse-systems/the-seed
+   ```
+
+   On a fresh machine the report says the native component was not built because libthe-seed is missing. The installation still succeeds and every other command works.
+3. Optionally set the prefix (`the-seed config edit`), then install the libraries into it:
+
+   ```bash
+   the-seed dependencies install
+   ```
+
+4. Build the native component:
+
+   ```bash
+   cd "$(npm root -g)/@metaverse-systems/the-seed" && npm run build-addon
+   ```
+
+5. Verify the installation:
+
+   ```bash
+   the-seed help
+   ```
 
 Expected output:
 
@@ -76,6 +105,34 @@ Commands:
   signing
   installer
 ```
+
+### Commands that need the native component
+
+Without the native component these stop with one message that names the step above, and change nothing:
+
+- `signing sign` of a Windows program, Mac program or installer, or of a directory holding one (`--detached` and files of other kinds do not need it);
+- `package` and `installer`;
+- `build windows`, plain or release, checked before any step; an incremental build (`build` with no target) of a tree that produces Windows programs is stopped before installing them.
+
+`signing verify` does not fail: it reports an embedded signature as not checked and gives the same message as the reason.
+
+The message is also the error `NativeComponentMissingError` carries (see the API reference).
+
+### How the library is found
+
+The native component's build looks for libthe-seed in this order:
+
+1. the configured prefix (`<prefix>/x86_64-linux-gnu/lib/pkgconfig`), read from `~/the-seed/config.json` when the build runs (the default prefix when there is none);
+2. your own `PKG_CONFIG_PATH`;
+3. pkg-config's default directories.
+
+No `PKG_CONFIG_PATH` is needed when the libraries are in the configured prefix. If you change the prefix later, repeat step 4 so the component is built against the new one.
+
+### Other ways to install
+
+- From git, as a dependency of a project or from a remote (`npm install git+https://github.com/metaverse-systems/the-seed.git`): npm compiles the tool and builds the native component as it does for a registry install.
+- With `--ignore-scripts`, npm skips both the compile (for a git install, which has no compiled files) and the native component's build; run `npm run build` and `npm run build-addon` in the package directory afterwards.
+- With `npm link` or `npm install -g .` from a checkout, the checkout's own component is used; build it there with `npm run build-addon`.
 
 ## Quick Start
 
@@ -758,6 +815,19 @@ constructor(config: Config)
 
 `ensureDist(projectDir)` resolves `boolean` and `run(projectDir)` resolves `string | null`: the path of the installer, or `null` when packaging was refused or a later step failed (no `.wxs` or `.msi` is written for a refusal).
 
+#### NativeComponentMissingError
+
+Thrown when the native component is absent or does not load. Its message names the step that builds it (`cd "<package directory>" && npm run build-addon`) and, when the component exists but cannot be loaded, ends with the first line of the loading error; `loadError` holds that line or `null`. `nativeComponentMessage(loadError?)` returns the same text.
+
+| Thrown by | When |
+|-----------|------|
+| `Signing.signFile`, `signFileAuthenticode`, `signFileMsi`, `signFileMachO`, `signDirectory` | the file announces a Windows program, Mac program or installer, and no detached signature is asked for (nothing is written) |
+| `Signing.detectBinaryFormat` | the first bytes announce one of those forms |
+| `buildProject`, `buildRecursive` | the target is `windows`, plain or release, before any step; an incremental build is stopped by the install phase instead |
+| `Package.resolveDependencies` | always, without the component; `plan` and `run` refuse with the message instead of throwing |
+
+`Installer.run` prints the message and resolves `null`. `Signing.verifyFile` does not throw: an embedded signature is reported as not checked, with the message as the reason.
+
 #### Dependency discovery
 
 `walkDependencies(projectDir, options?)` (from `@metaverse-systems/the-seed/dist/DependencyWalker`) resolves the `DependencyGraph` of a project by the rule in [Recursive Builds](#recursive-builds). `options.signal` is an `AbortSignal`; aborting it rejects with `DiscoveryCancelledError`. It rejects with one of these error classes, all exported from the package:
@@ -1029,12 +1099,7 @@ console.log(verify.status, verify.integrity.state, verify.trust.state); // "VALI
 
 ### Prerequisites
 
-- libthe-seed (0.8.0 or later) and libecs-cpp (2.1.0 or later) installed and reachable by `pkg-config`. If they are in a non-system prefix, such as the one `the-seed dependencies install` makes, point `PKG_CONFIG_PATH` at its `lib/pkgconfig` directory:
-
-  ```bash
-  export PKG_CONFIG_PATH="$HOME/the-seed/x86_64-linux-gnu/lib/pkgconfig:$PKG_CONFIG_PATH"
-  pkg-config --modversion the-seed ecs-cpp
-  ```
+- libthe-seed (0.8.0 or later) and libecs-cpp (2.1.0 or later), in the configured prefix (what `the-seed dependencies install` makes) or reachable by `pkg-config`. The native component's build finds the prefix by itself, so `PKG_CONFIG_PATH` is not needed for it.
 
 - `openssl` (one signing test generates a certificate with it).
 - Optional: `python3`. The independent Mach-O cross-check in `test/Signing.embedded.test.ts` runs `../libthe-seed/tests/fixtures/check_pages.py` when the parent repository is present. Without it the case prints a `SKIPPED CHECK:` line and carries on, unless `THE_SEED_REQUIRE_TOOLS=1` is set, in which case a missing tool fails the case.
@@ -1042,8 +1107,8 @@ console.log(verify.status, verify.integrity.state, verify.trust.state); // "VALI
 ### Build and run
 
 ```bash
-npm ci
-npm run build-addon     # the tests load the native addon
+npm ci                  # compiles the tool and builds the native component
+npm run build-addon     # optional: the strict gate, which fails when the component cannot be built
 npm test                # typecheck, then lint, then unit
 ```
 
@@ -1058,6 +1123,16 @@ npm test -- unit test/Signing.test.ts
 ```
 
 Failures are named as `FAILED: <file> › <case>` or `FAILED GROUP: <file>: <message>` (a test file that could not run, or whose hook failed), and the run ends with a `Totals:` line. Skipped cases are reported and counted.
+
+### Install check
+
+```bash
+npm test -- install
+```
+
+This fourth stage is not part of a plain `npm test`. It packs the package, installs the tarball into a scratch global prefix with a scratch home and checks the result: with libthe-seed in the prefix, signing a Windows program works; with no library, the installation still succeeds, says the native component was not built, and signing a Windows program stops with the one message; and, on a clean working tree, installing from git works. Everything it writes goes to a scratch directory under the system temporary directory, which it removes afterwards, and it reports `REAL HOME CHANGED:` if your `~/the-seed` differs. The first run needs the network (dependencies and the Node headers); later runs use the npm and node-gyp caches. A case it cannot run prints `SKIPPED CHECK:`, which fails the run when `THE_SEED_REQUIRE_TOOLS=1` is set.
+
+`npm pack` (and so the install check) briefly empties `dist/` and compiles it again; run `npm run build` if it is interrupted.
 
 ### Known gaps
 

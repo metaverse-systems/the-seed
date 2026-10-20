@@ -7,6 +7,7 @@ import * as x509 from "@peculiar/x509";
 import Signing from "../src/Signing";
 import Config from "../src/Config";
 import { expectPresent } from "./helpers/Assert";
+import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 import {
   CertInfo,
   SigFileFormat,
@@ -521,3 +522,126 @@ function generateSelfSignedRSACert(publicKey: crypto.KeyObject, privateKey: cryp
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
+
+// ── without the native component ─────────────────────────────
+
+describe("Signing without the native component", () => {
+  type SigningModule = typeof import("../src/Signing");
+  type ComponentModule = typeof import("../src/NativeComponent");
+
+  const fixtures = path.join(__dirname, "fixtures", "binaries");
+  let configDir: string;
+  let workDir: string;
+  let signing: Signing;
+  let missing: ComponentModule;
+
+  /** Loads Signing and the component module in one registry in which the component is unavailable. */
+  function loadWithout(): { Signing: SigningModule["default"]; component: ComponentModule } {
+    return withoutNativeComponent(() => ({
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
+      Signing: (require("../src/Signing") as SigningModule).default,
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the same registry must supply the error class
+      component: require("../src/NativeComponent") as ComponentModule,
+    }));
+  }
+
+  function copyOf(source: string, name: string): string {
+    const target = path.join(workDir, name);
+    fs.copyFileSync(source, target);
+    return target;
+  }
+
+  function expectNoSignature(file: string): void {
+    expect(fs.existsSync(file + ".sig")).toBe(false);
+  }
+
+  beforeEach(async () => {
+    configDir = createTempDir();
+    workDir = createTempDir();
+    writeConfig(configDir, { name: "Test User", email: "test@example.com" });
+    const real = new Signing(configDir);
+    await real.createCert({ scope: "@test" });
+    const loaded = loadWithout();
+    signing = new loaded.Signing(configDir);
+    missing = loaded.component;
+  });
+
+  afterEach(() => {
+    jest.dontMock(nativeComponentPath);
+    fs.rmSync(configDir, { recursive: true, force: true });
+    fs.rmSync(workDir, { recursive: true, force: true });
+  });
+
+  describe("detectBinaryFormat", () => {
+    it("answers other for a text file without needing the component", () => {
+      const file = path.join(workDir, "notes.txt");
+      writeTextFile(file, "plain text\n");
+      expect(signing.detectBinaryFormat(file)).toEqual({ format: "other", subFormat: null });
+    });
+
+    it("answers other for a Linux program without needing the component", () => {
+      const file = copyOf("/bin/true", "linux-program");
+      expect(signing.detectBinaryFormat(file)).toEqual({ format: "other", subFormat: null });
+    });
+
+    it("throws the missing component error for a Windows program", () => {
+      const file = copyOf(path.join(fixtures, "tiny.exe"), "tiny.exe");
+      expect(() => signing.detectBinaryFormat(file)).toThrow(missing.NativeComponentMissingError);
+      expect(() => signing.detectBinaryFormat(file)).toThrow(missing.nativeComponentMessage());
+    });
+  });
+
+  describe("signFile", () => {
+    it.each([
+      ["tiny.exe", path.join(fixtures, "tiny.exe")],
+      ["tiny-macho-arm64", path.join(fixtures, "genuine", "tiny-macho-arm64")],
+      ["tiny.msi", path.join(fixtures, "tiny.msi")],
+    ])("refuses %s with the missing component message and changes nothing", async (name, source) => {
+      const file = copyOf(source, name);
+      const before = fileDigest(file);
+
+      let thrown: unknown;
+      try {
+        await signing.signFile(file, { scope: "@test" });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(missing.NativeComponentMissingError);
+      expect((thrown as Error).message).toBe(missing.nativeComponentMessage());
+      expect(fileDigest(file)).toBe(before);
+      expectNoSignature(file);
+    });
+
+    it("still signs a Windows program detached", async () => {
+      const file = copyOf(path.join(fixtures, "tiny.exe"), "tiny.exe");
+      const before = fileDigest(file);
+
+      const result = await signing.signFile(file, { scope: "@test", detached: true });
+
+      expect(result.signatureType).toBe("detached");
+      expect(fs.existsSync(file + ".sig")).toBe(true);
+      expect(fileDigest(file)).toBe(before);
+    });
+
+    it("still signs a Linux program detached", async () => {
+      const file = copyOf("/bin/true", "linux-program");
+
+      const result = await signing.signFile(file, { scope: "@test" });
+
+      expect(result.signatureType).toBe("detached");
+      expect(fs.existsSync(file + ".sig")).toBe(true);
+    });
+  });
+
+  describe("removeEmbeddedSignature", () => {
+    it("refuses a Windows program with the missing component message and changes nothing", () => {
+      const file = copyOf(path.join(fixtures, "tiny.exe"), "tiny.exe");
+      const before = fileDigest(file);
+
+      expect(() => signing.removeEmbeddedSignature(file)).toThrow(missing.NativeComponentMissingError);
+      expect(() => signing.removeEmbeddedSignature(file)).toThrow(missing.nativeComponentMessage());
+      expect(fileDigest(file)).toBe(before);
+    });
+  });
+});

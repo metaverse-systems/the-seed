@@ -8,6 +8,7 @@ import { DependencyResultType, PackagePlan, ScriptArgsType } from "../src/types"
 import PackageCLI from "../src/scripts/PackageCLI";
 import fse from "fs-extra";
 import { elfImage } from "./helpers/ElfImage";
+import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 
 // Mock the native addon
 jest.mock("../native/build/Release/dependency_lister.node", () => ({
@@ -1148,5 +1149,70 @@ describe("test Package", () => {
 
       expect(errorCalls.some(msg => msg.includes("Usage: the-seed package"))).toBe(true);
     });
+  });
+});
+
+describe("Package without the native component", () => {
+  type PackageModule = typeof import("../src/Package");
+  type WalkerModule = typeof import("../src/DependencyWalker");
+  type ComponentModule = typeof import("../src/NativeComponent");
+
+  let configDir: string;
+  let tempDir: string;
+  let loaded: { Package: PackageModule["default"]; walker: WalkerModule; component: ComponentModule; walkSpy: jest.SpyInstance };
+  let pkg: Package;
+
+  beforeEach(() => {
+    configDir = createTempDir();
+    tempDir = createTempDir();
+    const config = new Config(configDir);
+    config.config.prefix = path.join(tempDir, "prefix");
+    // The file-wide mock of the component is already built; forget it so the absent mock applies
+    jest.resetModules();
+    loaded = withoutNativeComponent(() => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
+      const walker = require("../src/DependencyWalker") as WalkerModule;
+      const walkSpy = jest.spyOn(walker, "walkDependencies");
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- loaded after the walker so the spy is in place
+        Package: (require("../src/Package") as PackageModule).default,
+        walker,
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- the message comes from the same registry
+        component: require("../src/NativeComponent") as ComponentModule,
+        walkSpy,
+      };
+    });
+    pkg = new loaded.Package(config);
+  });
+
+  afterEach(() => {
+    jest.dontMock(nativeComponentPath);
+    // Put the file-wide mock of the component back for any later case
+    jest.doMock(nativeComponentPath, () => mockAddon, { virtual: true });
+    fs.rmSync(configDir, { recursive: true, force: true });
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("plan refuses with the missing component message before discovery", async () => {
+    const projectDir = createProjectDir(tempDir, "app", "bin_PROGRAMS = app\n");
+
+    const plan = await pkg.plan([projectDir]);
+
+    expect(plan).toEqual({ ok: false, message: loaded.component.nativeComponentMessage() });
+    expect(loaded.walkSpy).not.toHaveBeenCalled();
+  });
+
+  it("run refuses with the missing component message, creates no output directory and starts no discovery", async () => {
+    const projectDir = createProjectDir(tempDir, "app", "bin_PROGRAMS = app\n");
+    const outputDir = path.join(tempDir, "release");
+    const errorSpy = jest.spyOn(console, "error").mockImplementation();
+
+    const result = await pkg.run(outputDir, [projectDir]);
+    errorSpy.mockRestore();
+
+    expect(result.success).toBe(false);
+    expect(result.message).toBe(loaded.component.nativeComponentMessage());
+    expect(fs.existsSync(outputDir)).toBe(false);
+    expect(loaded.walkSpy).not.toHaveBeenCalled();
   });
 });

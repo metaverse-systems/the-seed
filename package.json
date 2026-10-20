@@ -7,8 +7,11 @@
     "typecheck": "node scripts/run-checks.js typecheck",
     "lint": "node scripts/run-checks.js lint",
     "lint-fix": "node ./node_modules/eslint/bin/eslint.js --ext .ts src test --fix",
-    "build": "tsc",
-    "build-addon": "node-gyp rebuild --directory=native",
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/scripts/the-seed.js', 0o755)\"",
+    "build-addon": "node native/build.js",
+    "install": "node native/build.js --install",
+    "prepare": "npm run build",
+    "prepack": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "test": "node scripts/run-checks.js"
   },
   "repository": {
@@ -34,6 +37,15 @@
     "tslib": "^2.3.1",
     "typescript": "^4.6.2"
   },
+  "files": [
+    "dist/",
+    "!dist/**/*.map",
+    "templates/",
+    "native/binding.gyp",
+    "native/src/",
+    "native/build.js",
+    "native/pkg-config.js"
+  ],
   "bin": {
     "the-seed": "dist/scripts/the-seed.js"
   },

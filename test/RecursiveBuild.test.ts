@@ -81,6 +81,7 @@ import { runCommand, formatCommand, formatFailureOutput, CommandResult } from ".
 import { buildRecursive, getRecursiveBuildSteps } from "../src/RecursiveBuild";
 import { runInstallPhase } from "../src/InstallPhase";
 import type { InstallPhaseOptions, InstallPhaseResult, InstallReport } from "../src/types";
+import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 
 const mockedRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
 const mockedInstallPhase = runInstallPhase as jest.MockedFunction<typeof runInstallPhase>;
@@ -1507,4 +1508,88 @@ describe("RecursiveBuild cancellation", () => {
     },
     15000
   );
+});
+
+describe("RecursiveBuild without the native component", () => {
+  type RecursiveModule = typeof import("../src/RecursiveBuild");
+  type WalkerModule = typeof import("../src/DependencyWalker");
+  type RunnerModule = typeof import("../src/ProcessRunner");
+  type PhaseModule = typeof import("../src/InstallPhase");
+  type ComponentModule = typeof import("../src/NativeComponent");
+
+  const project = makeProject("only", "/fake/only", ProjectType.Program);
+  let isolated: {
+    buildRecursive: RecursiveModule["buildRecursive"];
+    walk: jest.MockedFunction<WalkerModule["walkDependencies"]>;
+    order: jest.MockedFunction<WalkerModule["resolveBuildOrder"]>;
+    run: jest.MockedFunction<RunnerModule["runCommand"]>;
+    component: ComponentModule;
+  };
+  let logSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+    isolated = withoutNativeComponent(() => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
+      const walker = require("../src/DependencyWalker") as WalkerModule;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the install phase of the same registry
+      const phase = require("../src/InstallPhase") as PhaseModule;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the step runner of the same registry
+      const runner = require("../src/ProcessRunner") as RunnerModule;
+      (phase.runInstallPhase as jest.MockedFunction<PhaseModule["runInstallPhase"]>).mockImplementation(async () => ({
+        status: "completed",
+        report: FAKE_REPORT,
+      }));
+      (runner.runCommand as jest.MockedFunction<RunnerModule["runCommand"]>).mockResolvedValue(commandResult());
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- loaded after the mocks are configured
+        buildRecursive: (require("../src/RecursiveBuild") as RecursiveModule).buildRecursive,
+        walk: walker.walkDependencies as jest.MockedFunction<WalkerModule["walkDependencies"]>,
+        order: walker.resolveBuildOrder as jest.MockedFunction<WalkerModule["resolveBuildOrder"]>,
+        run: runner.runCommand as jest.MockedFunction<RunnerModule["runCommand"]>,
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- the error class of the same registry
+        component: require("../src/NativeComponent") as ComponentModule,
+      };
+    });
+    isolated.walk.mockReset();
+    isolated.order.mockReset();
+    // The step runner mock is shared with the cases above: forget their calls
+    isolated.run.mockClear();
+    isolated.walk.mockResolvedValue({ projects: new Map([[project.path, project]]), edges: new Map([[project.path, []]]) });
+    isolated.order.mockReturnValue([project]);
+  });
+
+  afterEach(() => {
+    jest.dontMock(nativeComponentPath);
+    isolated.run.mockReset();
+    logSpy.mockRestore();
+  });
+
+  it.each([
+    ["release", true],
+    ["plain", false],
+  ])("a %s Windows build rejects with the missing component error before discovery", async (_name, release) => {
+    let thrown: unknown;
+    try {
+      await isolated.buildRecursive({ target: "windows", fullReconfigure: true, projectDir: project.path, release });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(isolated.component.NativeComponentMissingError);
+    expect((thrown as Error).message).toBe(isolated.component.nativeComponentMessage());
+    expect(isolated.walk).not.toHaveBeenCalled();
+    expect(isolated.run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["release", true],
+    ["plain", false],
+  ])("a %s native build is unaffected", async (_name, release) => {
+    const result = await isolated.buildRecursive({ target: "native", fullReconfigure: true, projectDir: project.path, release });
+
+    expect(result.success).toBe(true);
+    expect(result.completed).toEqual([project]);
+    expect(isolated.walk).toHaveBeenCalledTimes(1);
+  });
 });

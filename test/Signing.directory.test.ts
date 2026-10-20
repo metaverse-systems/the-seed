@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import Signing from "../src/Signing";
 import { expectPresent } from "./helpers/Assert";
+import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 
 // Directory verification against the manifest. One configuration (scope @ta) signs and verifies
 // everything here; every directory is created under os.tmpdir() and removed afterwards.
@@ -23,6 +24,7 @@ import { expectPresent } from "./helpers/Assert";
 const created: string[] = [];
 let savedHome: string | undefined;
 let signing: Signing;
+let configDirectory: string;
 
 function tempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -86,6 +88,7 @@ beforeAll(async () => {
   savedHome = process.env.HOME;
   process.env.HOME = tempDir("directory-home-");
   const configDir = tempDir("directory-config-");
+  configDirectory = configDir;
   const scopes = { "@ta": { author: { name: "Signer A", email: "signer@example.com", url: "" } } };
   fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(configDir, "prefix"), scopes }, null, 2));
   signing = new Signing(configDir);
@@ -390,5 +393,92 @@ describe("verifyDirectory", () => {
     expect(result.status).toBe("VALID");
     expect(result.directory).toBe(path.resolve(odd));
     expect(result.counts.valid).toBe(3);
+  });
+});
+
+describe("signDirectory without the native component", () => {
+  type SigningModule = typeof import("../src/Signing");
+  type ComponentModule = typeof import("../src/NativeComponent");
+
+  let root: string;
+  let dir: string;
+  let withoutComponent: Signing;
+  let component: ComponentModule;
+
+  /** Every regular file under a directory with its digest, for asserting nothing changed. */
+  function snapshot(directory: string): Record<string, string> {
+    const result: Record<string, string> = {};
+    const walk = (current: string): void => {
+      for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+        const full = path.join(current, entry.name);
+        if (entry.isDirectory()) {
+          walk(full);
+        } else {
+          result[path.relative(directory, full)] = fileDigest(full);
+        }
+      }
+    };
+    walk(directory);
+    return result;
+  }
+
+  beforeEach(() => {
+    root = tempDir("directory-absent-");
+    dir = path.join(root, "tree");
+    fs.mkdirSync(dir);
+    fs.copyFileSync("/bin/true", path.join(dir, "linux-program"));
+    fs.writeFileSync(path.join(dir, "notes.txt"), "plain text\n");
+    const loaded = withoutNativeComponent(() => ({
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
+      Signing: (require("../src/Signing") as SigningModule).default,
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the same registry must supply the error class
+      component: require("../src/NativeComponent") as ComponentModule,
+    }));
+    withoutComponent = new loaded.Signing(configDirectory);
+    component = loaded.component;
+  });
+
+  afterEach(() => {
+    jest.dontMock(nativeComponentPath);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("refuses a directory holding a Windows program before any file is signed", async () => {
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), path.join(dir, "tiny.exe"));
+    const before = snapshot(dir);
+
+    let thrown: unknown;
+    try {
+      await withoutComponent.signDirectory(dir, { scope: "@ta" });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(component.NativeComponentMissingError);
+    expect((thrown as Error).message).toBe(component.nativeComponentMessage());
+    expect(snapshot(dir)).toEqual(before);
+    expect(fs.existsSync(path.join(dir, ".signatures.json"))).toBe(false);
+    expect(fs.readdirSync(dir).filter((name) => name.endsWith(".sig"))).toEqual([]);
+  });
+
+  it("signs a directory of text and Linux programs as it does with the component", async () => {
+    const result = await withoutComponent.signDirectory(dir, { scope: "@ta" });
+
+    expect(result.signed.map((entry) => path.basename(entry.filePath))).toEqual(["linux-program"]);
+    expect(fs.existsSync(path.join(dir, "linux-program.sig"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, ".signatures.json"))).toBe(true);
+  });
+
+  it("signs a directory holding a Windows program detached", async () => {
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), path.join(dir, "tiny.exe"));
+    const exeBefore = fileDigest(path.join(dir, "tiny.exe"));
+
+    const result = await withoutComponent.signDirectory(dir, { scope: "@ta", detached: true });
+
+    expect(result.signed.map((entry) => entry.signatureType)).toEqual(expect.arrayContaining(["detached"]));
+    expect(result.signed.every((entry) => entry.signatureType === "detached")).toBe(true);
+    expect(fs.existsSync(path.join(dir, "tiny.exe.sig"))).toBe(true);
+    expect(fs.existsSync(path.join(dir, "linux-program.sig"))).toBe(true);
+    expect(fileDigest(path.join(dir, "tiny.exe"))).toBe(exeBefore);
   });
 });

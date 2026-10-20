@@ -5,11 +5,12 @@
       "sources": ["src/addon.cpp"],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
-        "<!@(pkg-config --cflags-only-I 'the-seed >= 0.8.0' | sed 's/-I//g')"
+        "<!@(node pkg-config.js --cflags-only-I 'the-seed >= 0.8.0' | sed 's/-I//g')"
       ],
+      # The helper searches the configured install prefix first, then PKG_CONFIG_PATH, then the system directories.
       "libraries": [
-        "<!@(pkg-config --libs 'the-seed >= 0.8.0')",
-        "<!@(pkg-config --libs-only-L 'the-seed >= 0.8.0' | sed 's/-L/-Wl,-rpath,/g')"
+        "<!@(node pkg-config.js --libs 'the-seed >= 0.8.0')",
+        "<!@(node pkg-config.js --libs-only-L 'the-seed >= 0.8.0' | sed 's/-L/-Wl,-rpath,/g')"
       ],
       "cflags!": ["-fno-exceptions"],
       "cflags_cc!": ["-fno-exceptions"],

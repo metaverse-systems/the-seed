@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { extractScope, getStripTool, targets } from "./Build";
 import Signing from "./Signing";
+import { NativeComponentMissingError, requireNativeComponent } from "./NativeComponent";
 import { commandFailedMessage, findOnPath, formatCommand, runCommand } from "./ProcessRunner";
 import { runStep, stepText } from "./StepRunner";
 import {
@@ -68,6 +69,24 @@ export function outputKind(file: string, target: TargetName): OutputKind | null 
     return peKind(fd, head.subarray(0, count));
   } catch (err) {
     throw new Error("cannot read " + file + ": " + reasonOf(err));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Whether a file's first bytes announce a Windows program (the "MZ" header). */
+function announcesWindowsProgram(file: string): boolean {
+  let fd: number;
+  try {
+    fd = fs.openSync(file, "r");
+  } catch {
+    return false;
+  }
+  try {
+    const head = Buffer.alloc(2);
+    return fs.readSync(fd, head, 0, 2, 0) === 2 && head[0] === 0x4d && head[1] === 0x5a;
+  } catch {
+    return false;
   } finally {
     fs.closeSync(fd);
   }
@@ -1056,6 +1075,18 @@ export async function runInstallPhase(options: InstallPhaseOptions): Promise<Ins
       return { status: "failed", step: "install", message: reasonOf(err) };
     }
     const processed = [...groups, ...buildTree];
+
+    // Windows programs are stripped, signed or unsigned with the native component: stop before anything is changed
+    if (target === "windows" && processed.some((group) => announcesWindowsProgram(group.file))) {
+      try {
+        requireNativeComponent();
+      } catch (err) {
+        if (err instanceof NativeComponentMissingError) {
+          return { status: "failed", step: "sign", message: err.message };
+        }
+        throw err;
+      }
+    }
     let signingResult: SigningOutcome;
     try {
       signingResult = signingOutcome(options.projectDir, options.configDir);

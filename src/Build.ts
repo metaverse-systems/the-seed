@@ -4,6 +4,7 @@ import { processorCount } from "./BuildScheduler";
 import { librarySearchEnv } from "./LibrarySearch";
 import { runStep, stepText } from "./StepRunner";
 import { runInstallPhase } from "./InstallPhase";
+import { requireNativeComponent } from "./NativeComponent";
 
 export const targets: {
   [key: string]: string;
@@ -37,12 +38,23 @@ class Build {
    * release build with a target) and signed (when the project's scope has a
    * certificate) before they are placed in the prefix.
    *
+   * Rejects with NativeComponentMissingError, before any step, for a Windows
+   * target when the native component is unavailable. An incremental build (no
+   * target) is not checked here: its install phase fails as step "sign" when
+   * it installs a Windows program.
+   *
    * Each step's output is passed on as it arrives, never kept, so a build can
    * write any amount. The first cancellation stops the running step and
    * starts no other; the install phase runs under the force signal so a
    * single Ctrl+C lets an install in progress finish.
    */
   buildProject = async (options: ProjectBuildOptions): Promise<ProjectBuildResult> => {
+    // A Windows build signs and strips Windows programs, which needs the native component; an incremental build
+    // (no target) is stopped by the install phase instead, only when it installs a Windows program
+    if (options.target === "windows") {
+      requireNativeComponent();
+    }
+
     const log = options.log ?? ((line: string) => console.log(line));
     const output = options.output ?? ownOutput;
     const fullReconfigure = options.target !== undefined;

@@ -47,6 +47,7 @@ import {
 } from "../src/DependencyWalker";
 import BuildCLI from "../src/scripts/BuildCLI";
 import { ScriptArgsType, RecursiveBuildResult, ProjectBuildResult } from "../src/types";
+import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 
 const mockedBuildRecursive = buildRecursive as jest.MockedFunction<typeof buildRecursive>;
 
@@ -848,5 +849,56 @@ describe("BuildCLI help › lists --jobs with its default", () => {
     const text = await helpText();
     expect(text).toContain("the-seed build native --jobs 4");
     expect(text).toContain("Build for Linux with at most 4 compile jobs");
+  });
+});
+
+describe("BuildCLI without the native component", () => {
+  type CliModule = typeof import("../src/scripts/BuildCLI");
+  type RecursiveModule = typeof import("../src/RecursiveBuild");
+  type ComponentModule = typeof import("../src/NativeComponent");
+
+  let isolated: { BuildCLI: CliModule["default"]; recursive: jest.MockedFunction<RecursiveModule["buildRecursive"]>; component: ComponentModule };
+  let errorSpy: jest.SpyInstance;
+  let logSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockBuildProject.mockReset();
+    process.exitCode = undefined;
+    errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
+    logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+    isolated = withoutNativeComponent(() => ({
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
+      BuildCLI: (require("../src/scripts/BuildCLI") as CliModule).default,
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the recursive build of the same registry
+      recursive: (require("../src/RecursiveBuild") as RecursiveModule).buildRecursive as jest.MockedFunction<RecursiveModule["buildRecursive"]>,
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the error class of the same registry
+      component: require("../src/NativeComponent") as ComponentModule,
+    }));
+    // The builds refuse a Windows target the way the real ones do without the component.
+    mockBuildProject.mockImplementation(async () => {
+      throw new isolated.component.NativeComponentMissingError();
+    });
+    isolated.recursive.mockImplementation(async () => {
+      throw new isolated.component.NativeComponentMissingError();
+    });
+  });
+
+  afterEach(() => {
+    jest.dontMock(nativeComponentPath);
+    errorSpy.mockRestore();
+    logSpy.mockRestore();
+    process.exitCode = undefined;
+  });
+
+  it.each([
+    [["windows"]],
+    [["windows", "--release"]],
+    [["windows", "--release", "--recursive"]],
+  ])("prints the missing component message alone on standard error and exits 1 for build %p", async (args) => {
+    await isolated.BuildCLI(makeArgs(args));
+
+    expect(errorSpy.mock.calls.map((call) => call[0])).toEqual([isolated.component.nativeComponentMessage()]);
+    expect(process.exitCode).toBe(1);
   });
 });
