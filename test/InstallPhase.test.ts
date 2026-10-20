@@ -6,6 +6,7 @@ import { buildTreeCopies, groupOutputs, notice, outputKind, placeStaged, readSta
 import Signing from "../src/Signing";
 import { findOnPath } from "../src/ProcessRunner";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 import { replaceScopeKey } from "./helpers/IndependentCheck";
 import { InstallPhaseOptions, InstallPhaseResult, OutputGroup } from "../src/types";
 
@@ -2678,6 +2679,69 @@ describe("runInstallPhase", () => {
     }
     expect(snapshot(c.configPrefix)).toEqual(before);
     stageNothingLeft(c);
+  });
+
+  // ── Without the native component ──────────────────────────
+
+  describe("without the native component", () => {
+    type PhaseModule = typeof import("../src/InstallPhase");
+    type ComponentModule = typeof import("../src/NativeComponent");
+
+    const tinyExe = path.join(__dirname, "fixtures", "binaries", "tiny.exe");
+    let isolated: { runInstallPhase: PhaseModule["runInstallPhase"]; component: ComponentModule };
+
+    beforeEach(() => {
+      isolated = withoutNativeComponent(() => ({
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
+        runInstallPhase: (require("../src/InstallPhase") as PhaseModule).runInstallPhase,
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- the message comes from the same registry
+        component: require("../src/NativeComponent") as ComponentModule,
+      }));
+    });
+
+    afterEach(() => {
+      jest.dontMock(nativeComponentPath);
+    });
+
+    it.each([
+      ["a Windows target", "windows" as const],
+      ["an incremental build whose stage is under the Windows prefix", undefined],
+    ])("fails at sign with the missing component message for a staged Windows program and %s, placing nothing and stripping nothing", async (_name, target) => {
+      const c = makeCase("windows");
+      const before = populatePrefix(c);
+      payload(c, "bin/tiny.exe", fs.readFileSync(tinyExe));
+      fakeMake(c);
+
+      const result = await isolated.runInstallPhase(options(c, { target, release: true }));
+
+      expect(result).toEqual({ status: "failed", step: "sign", message: isolated.component.nativeComponentMessage() });
+      expect(snapshot(c.configPrefix)).toEqual(before);
+      expect(fs.existsSync(path.join(c.prefix, "bin", "tiny.exe"))).toBe(false);
+      expect(fs.existsSync(c.stripLog) ? readLines(c.stripLog) : []).toEqual([]);
+      stageNothingLeft(c);
+    });
+
+    it("installs a native stage as it does with the component", async () => {
+      const c = makeCase("native");
+      payload(c, "bin/tiny", elfHeader(2));
+      fakeMake(c);
+
+      const result = expectCompleted(await isolated.runInstallPhase(options(c)));
+
+      expect(result.report.prefix).toBe(c.prefix);
+      expect(fs.existsSync(path.join(c.prefix, "bin", "tiny"))).toBe(true);
+    });
+
+    it("installs a Windows stage holding only a text file as it does with the component", async () => {
+      const c = makeCase("windows");
+      payload(c, "share/x/notes.txt", "notes\n", 0o644);
+      fakeMake(c);
+
+      const result = expectCompleted(await isolated.runInstallPhase(options(c, { target: "windows" })));
+
+      expect(result.report.prefix).toBe(c.prefix);
+      expect(fs.readFileSync(path.join(c.prefix, "share", "x", "notes.txt"), "utf8")).toBe("notes\n");
+    });
   });
 });
 

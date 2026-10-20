@@ -5,6 +5,7 @@ import { execFileSync } from "child_process";
 import Config from "../src/Config";
 import Installer, { sanitizeId, generateUpgradeCode, InstallerConfig } from "../src/Installer";
 import { ScriptArgsType } from "../src/types";
+import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 
 // Mock child_process for wixl/which detection
 jest.mock("child_process", () => ({
@@ -577,5 +578,52 @@ describe("Installer", () => {
         expect(mockedExecFileSync).not.toHaveBeenCalledWith("wixl", expect.anything(), expect.anything());
       });
     });
+  });
+});
+
+describe("Installer without the native component", () => {
+  type InstallerModule = typeof import("../src/Installer");
+  type ComponentModule = typeof import("../src/NativeComponent");
+
+  let configDir: string;
+  let tempDir: string;
+
+  beforeEach(() => {
+    configDir = createTempDir();
+    tempDir = createTempDir();
+  });
+
+  afterEach(() => {
+    jest.dontMock(nativeComponentPath);
+    // Put the file-wide mock of the component back for any later case
+    jest.doMock(nativeComponentPath, () => ({ listDependencies: mockedListDependencies }), { virtual: true });
+    fs.rmSync(configDir, { recursive: true, force: true });
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("resolves null, prints the missing component message and creates nothing in the project", async () => {
+    // The file-wide mock of the component is already built; forget it so the absent mock applies
+    jest.resetModules();
+    const loaded = withoutNativeComponent(() => ({
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
+      Installer: (require("../src/Installer") as InstallerModule).default,
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the message comes from the same registry
+      component: require("../src/NativeComponent") as ComponentModule,
+    }));
+    const config = new Config(configDir);
+    config.config.prefix = path.join(tempDir, "prefix");
+    const projectDir = createProjectDir(tempDir, { name: "test-app", version: "1.0.0", author: "Dev" });
+    const before = fs.readdirSync(projectDir).sort();
+    const consoleSpy = jest.spyOn(console, "error").mockImplementation();
+
+    const result = await new loaded.Installer(config).run(projectDir);
+    const printed = consoleSpy.mock.calls.map((call) => String(call[0]));
+    consoleSpy.mockRestore();
+
+    expect(result).toBeNull();
+    expect(printed).toContain(loaded.component.nativeComponentMessage());
+    expect(fs.readdirSync(projectDir).sort()).toEqual(before);
+    expect(fs.existsSync(path.join(projectDir, "dist"))).toBe(false);
+    expect(fs.readdirSync(projectDir).filter((name) => name.endsWith(".wxs") || name.endsWith(".msi"))).toEqual([]);
   });
 });

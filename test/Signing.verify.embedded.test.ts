@@ -7,6 +7,7 @@ import { SigningManifestFormat } from "../src/types";
 import { EARLIER_FORM_NOTICE_MAC, EARLIER_FORM_NOTICE_WINDOWS } from "../src/Trust";
 import { expectPresent } from "./helpers/Assert";
 import { checkMachO } from "./helpers/MachOChecker";
+import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "signing-verify-test-"));
@@ -362,7 +363,6 @@ describe("verifyFile with both kinds of signature and other edge cases", () => {
   let B: { signing: Signing; configDir: string; scope: string };
   let tempDir: string;
   let savedHome: string | undefined;
-  const addonPath = path.join(__dirname, "..", "native", "build", "Release", "dependency_lister.node");
 
   beforeAll(async () => {
     savedHome = process.env.HOME;
@@ -377,7 +377,7 @@ describe("verifyFile with both kinds of signature and other edge cases", () => {
   });
 
   afterEach(() => {
-    jest.dontMock(addonPath);
+    jest.dontMock(nativeComponentPath);
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -441,37 +441,53 @@ describe("verifyFile with both kinds of signature and other edge cases", () => {
   });
 
   describe("without the native component", () => {
-    /** A Signing whose native addon cannot be loaded; the mock stays active until the case ends. */
-    function signingWithoutAddon(configDir: string): Signing {
-      let created: Signing | undefined;
-      jest.isolateModules(() => {
-        jest.doMock(addonPath, () => {
-          throw new Error("the native component cannot be loaded");
-        });
+    const sharedLibraryError = "libthe-seed.so.1: cannot open shared object file: No such file or directory";
+
+    /** A Signing, with the message builder of its own module registry, whose native component is unavailable; the mock stays active until the case ends. */
+    function signingWithoutComponent(
+      configDir: string,
+      mode: "absent" | "fails-to-load"
+    ): { signing: Signing; nativeComponentMessage: (loadError?: string | null) => string } {
+      const loaded = withoutNativeComponent(() => {
         // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module instance is needed for each case
         const module = require("../src/Signing") as { default: new (dir: string) => Signing };
-        created = new module.default(configDir);
-      });
-      return expectPresent(created, "Signing without the addon");
+        // eslint-disable-next-line @typescript-eslint/no-var-requires -- the message comes from the same registry
+        const component = require("../src/NativeComponent") as { nativeComponentMessage: (loadError?: string | null) => string };
+        return { signing: new module.default(configDir), nativeComponentMessage: component.nativeComponentMessage };
+      }, mode);
+      return loaded;
     }
 
-    it("a Windows program with an embedded signature is not checked, with the native component named", async () => {
+    it("a Windows program with an embedded signature is not checked, with the missing component message as the reason", async () => {
       const file = copyFixture("tiny.exe", tempDir);
       await A.signing.signFile(file, { scope: "@ta" });
 
-      const result = await signingWithoutAddon(A.configDir).verifyFile(file);
+      const without = signingWithoutComponent(A.configDir, "absent");
+      const result = await without.signing.verifyFile(file);
       expect(result.status).toBe("NOT_CHECKED");
       expect(result.integrity.state).toBe("not-checked");
-      expect(result.reason).toMatch(/native component/i);
+      expect(result.reason).toBe(without.nativeComponentMessage());
     });
 
-    it("a Mac program with an embedded signature is not checked, with the native component named", async () => {
+    it("a Windows program with an embedded signature is not checked, with the loading error added when the component fails to load", async () => {
+      const file = copyFixture("tiny.exe", tempDir);
+      await A.signing.signFile(file, { scope: "@ta" });
+
+      const without = signingWithoutComponent(A.configDir, "fails-to-load");
+      const result = await without.signing.verifyFile(file);
+      expect(result.status).toBe("NOT_CHECKED");
+      expect(result.integrity.state).toBe("not-checked");
+      expect(result.reason).toBe(without.nativeComponentMessage(sharedLibraryError));
+    });
+
+    it("a Mac program with an embedded signature is not checked, with the missing component message as the reason", async () => {
       const file = copyFixture("tiny-macho-arm64", tempDir);
       await A.signing.signFileMachO(file, "@ta");
 
-      const result = await signingWithoutAddon(A.configDir).verifyFile(file);
+      const without = signingWithoutComponent(A.configDir, "absent");
+      const result = await without.signing.verifyFile(file);
       expect(result.status).toBe("NOT_CHECKED");
-      expect(result.reason).toMatch(/native component/i);
+      expect(result.reason).toBe(without.nativeComponentMessage());
     });
 
     it("a binary file in no known program format still verifies by its detached signature without the native component", async () => {
@@ -479,7 +495,7 @@ describe("verifyFile with both kinds of signature and other edge cases", () => {
       fs.writeFileSync(file, OPAQUE_DATA);
       await A.signing.signFile(file, { scope: "@ta", detached: true });
 
-      const result = await signingWithoutAddon(A.configDir).verifyFile(file);
+      const result = await signingWithoutComponent(A.configDir, "absent").signing.verifyFile(file);
       expect(result.status).toBe("VALID");
       expect(result.signatureType).toBe("detached");
     });

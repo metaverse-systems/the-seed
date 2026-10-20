@@ -4,6 +4,7 @@ import { execFileSync } from "child_process";
 import { createHash } from "crypto";
 import Config from "./Config";
 import Package from "./Package";
+import { NativeComponentMissingError, requireNativeComponent } from "./NativeComponent";
 
 export interface InstallerConfig {
   productName: string;
@@ -268,6 +269,17 @@ ${componentRefs}
    * Resolves the path of the installer, or null on failure.
    */
   run = async (projectDir: string): Promise<string | null> => {
+    // The installer is built from the packaged files, which needs the native component
+    try {
+      requireNativeComponent();
+    } catch (err) {
+      if (err instanceof NativeComponentMissingError) {
+        console.error(err.message);
+        return null;
+      }
+      throw err;
+    }
+
     // Step 1: Validate wixl is installed
     if (!this.checkWixl()) {
       console.error("Error: wixl is not installed. Install it with: sudo apt install msitools");

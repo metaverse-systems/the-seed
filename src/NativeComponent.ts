@@ -1,5 +1,4 @@
 import path from "path";
-import { requiredLibTheSeedVersion } from "./Dependencies";
 
 /** The command that builds the native component. */
 export const NATIVE_COMPONENT_STEP = "npm run build-addon";
@@ -14,6 +13,9 @@ export function packageRoot(): string {
  * When the component file exists but does not load, loadError (the first line of the loading error) is appended.
  */
 export function nativeComponentMessage(loadError?: string | null): string {
+  // Read when the message is made: Dependencies reaches the build modules, which load this module
+  // eslint-disable-next-line @typescript-eslint/no-var-requires -- loaded late to keep the modules from importing each other in a cycle
+  const { requiredLibTheSeedVersion } = require("./Dependencies") as typeof import("./Dependencies");
   const message =
     "The native component is not built; it is needed to sign or verify Windows programs, Mac programs and installers, to package, and for Windows builds. " +
     "Build it with: cd \"" +
@@ -66,6 +68,19 @@ export function loadNativeComponent<T = unknown>(): T {
       cachedFailure = new NativeComponentMissingError(text.split(/\r?\n/)[0]);
     }
     throw cachedFailure;
+  }
+}
+
+/**
+ * Loads the native component now if it has not been tried yet, and keeps the outcome without throwing.
+ * Modules that need the component call this when they are loaded, so that its availability is settled once
+ * for them; loadNativeComponent() then answers from the kept outcome.
+ */
+export function preloadNativeComponent(): void {
+  try {
+    loadNativeComponent();
+  } catch {
+    // The failure is kept and thrown by the next loadNativeComponent() call
   }
 }
 

@@ -1,4 +1,5 @@
 import fs from "fs-extra";
+import { NativeComponentMissingError, loadNativeComponent, preloadNativeComponent, requireNativeComponent } from "./NativeComponent";
 import path from "path";
 import crypto from "crypto";
 import { execSync } from "child_process";
@@ -18,6 +19,8 @@ import {
   PlannedFile,
   UnpackagedLibrary,
 } from "./types";
+
+preloadNativeComponent();
 
 /**
  * Packages project binaries with the shared libraries they need into one directory.
@@ -182,8 +185,7 @@ class Package {
    * Returns the result as a plain JS object.
    */
   resolveDependencies = (binaryPaths: string[], searchPaths: string[]): DependencyResultType => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations and is loaded on first use
-    const addon = require("../native/build/Release/dependency_lister.node");
+    const addon = loadNativeComponent<{ listDependencies(binaryPaths: string[], searchPaths: string[]): DependencyResultType }>();
     return addon.listDependencies(binaryPaths, searchPaths);
   };
 
@@ -196,6 +198,16 @@ class Package {
    */
   plan = async (projectDirs: string[]): Promise<PackagePlan> => {
     const refuse = (message: string): PackagePlan => ({ ok: false, message });
+
+    // Packaging needs the native component: refuse before discovery or any output
+    try {
+      requireNativeComponent();
+    } catch (error) {
+      if (error instanceof NativeComponentMissingError) {
+        return refuse(error.message);
+      }
+      throw error;
+    }
 
     // Discovery: merge the projects of every given directory by real location
     const projectNames = new Map<string, string>();

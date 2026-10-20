@@ -7,6 +7,7 @@ import { expectPresent } from "./helpers/Assert";
 import { runSign, runVerify } from "./helpers/Command";
 import { replaceScopeKey } from "./helpers/IndependentCheck";
 import { makeUniversal } from "./helpers/Universal";
+import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 
 // The verify command, run through runCli with a scratch configuration directory and a scratch HOME.
 // Two configurations are used: A (scope @ta) and B (scope @tb). The command's status is the first
@@ -733,5 +734,69 @@ describe("signing sign with an unsupported scope key", () => {
     expect(fs.readFileSync(file).equals(before)).toBe(true);
     expect(fs.statSync(file).mtimeMs).toBe(mtimeBefore);
     expect(fs.readdirSync(path.dirname(file))).toEqual(["tiny-macho-arm64"]);
+  });
+});
+
+// Choices: the commands are run through a command runner loaded in a module registry in which the native component
+// is unavailable; files are signed with the component first where a signed file is needed; a Linux program is a copy of /bin/true.
+describe("signing without the native component", () => {
+  type CommandModule = typeof import("./helpers/Command");
+  type ComponentModule = typeof import("../src/NativeComponent");
+
+  let commands: CommandModule;
+  let component: ComponentModule;
+  let dir: string;
+
+  beforeEach(() => {
+    dir = tempDir("cli-absent-");
+    const loaded = withoutNativeComponent(() => ({
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
+      commands: require("./helpers/Command") as CommandModule,
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the message comes from the same registry
+      component: require("../src/NativeComponent") as ComponentModule,
+    }));
+    commands = loaded.commands;
+    component = loaded.component;
+  });
+
+  afterEach(() => {
+    jest.dontMock(nativeComponentPath);
+  });
+
+  it("sign refuses a Windows program: the message alone on standard error, exit 3, nothing changed", async () => {
+    const file = path.join(dir, "tiny.exe");
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), file);
+    const before = fileDigest(file);
+
+    const run = await commands.runSign([file], A.configDir, home);
+
+    expect(run.status).toBe(3);
+    expect(run.err).toBe("Error: " + component.nativeComponentMessage());
+    expect(run.out).not.toContain("Signed:");
+    expect(fileDigest(file)).toBe(before);
+    expect(fs.existsSync(file + ".sig")).toBe(false);
+  });
+
+  it("verify reports a signed Windows program as not checked, with the message as the reason", async () => {
+    const file = path.join(dir, "tiny.exe");
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), file);
+    await A.signing.signFile(file, { scope: "@ta" });
+
+    const run = await commands.runVerify([file], A.configDir, home);
+
+    expect(run.status).toBe(1);
+    expect(run.out).toContain("Verification: SIGNATURE NOT CHECKED ✗");
+    expect(run.out).toContain(component.nativeComponentMessage());
+  });
+
+  it("sign still signs a Linux program with a detached signature", async () => {
+    const file = path.join(dir, "linux-program");
+    fs.copyFileSync("/bin/true", file);
+
+    const run = await commands.runSign([file], A.configDir, home);
+
+    expect(run.status).toBe(0);
+    expect(run.out).toContain("Signed: " + file);
+    expect(fs.existsSync(file + ".sig")).toBe(true);
   });
 });

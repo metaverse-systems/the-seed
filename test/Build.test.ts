@@ -6,6 +6,7 @@ import Build, { targets, extractScope, getStripTool } from "../src/Build";
 import { BuildStep, InstallPhaseOptions, InstallPhaseResult } from "../src/types";
 import { runInstallPhase } from "../src/InstallPhase";
 import { librarySearchEnv } from "../src/LibrarySearch";
+import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 
 // The install phase has its own cases in InstallPhase.test.ts; here it is replaced so
 // buildProject's hand-over to it and the mapping of its result can be observed.
@@ -237,6 +238,65 @@ describe("test Build", () => {
       expect(env.PKG_CONFIG_PATH).toBe(
         path.join(config.config.prefix, "x86_64-linux-gnu", "lib", "pkgconfig") + ":/base/only/path"
       );
+    });
+
+    describe("without the native component", () => {
+      type BuildModule = typeof import("../src/Build");
+      type ComponentModule = typeof import("../src/NativeComponent");
+
+      let isolated: { Build: BuildModule["default"]; run: jest.MockedFunction<typeof runCommand>; phase: jest.MockedFunction<typeof runInstallPhase>; component: ComponentModule };
+      let withoutComponent: Build;
+
+      beforeEach(() => {
+        isolated = withoutNativeComponent(() => ({
+          // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
+          Build: (require("../src/Build") as BuildModule).default,
+          // eslint-disable-next-line @typescript-eslint/no-var-requires -- the step runner of the same registry
+          run: (require("../src/ProcessRunner") as { runCommand: jest.MockedFunction<typeof runCommand> }).runCommand,
+          // eslint-disable-next-line @typescript-eslint/no-var-requires -- the install phase of the same registry
+          phase: (require("../src/InstallPhase") as { runInstallPhase: jest.MockedFunction<typeof runInstallPhase> }).runInstallPhase,
+          // eslint-disable-next-line @typescript-eslint/no-var-requires -- the error class of the same registry
+          component: require("../src/NativeComponent") as ComponentModule,
+        }));
+        isolated.run.mockReset();
+        isolated.phase.mockReset();
+        isolated.run.mockImplementation(async () => commandResult());
+        isolated.phase.mockImplementation(async () => completedPhase());
+        withoutComponent = new isolated.Build(config);
+      });
+
+      afterEach(() => {
+        jest.dontMock(nativeComponentPath);
+      });
+
+      it.each([
+        ["release", true],
+        ["plain", false],
+      ])("a %s Windows build rejects with the missing component error before any step", async (_name, release) => {
+        let thrown: unknown;
+        try {
+          await withoutComponent.buildProject(buildOptions({ target: "windows", release }));
+        } catch (error) {
+          thrown = error;
+        }
+
+        expect(thrown).toBeInstanceOf(isolated.component.NativeComponentMissingError);
+        expect((thrown as Error).message).toBe(isolated.component.nativeComponentMessage());
+        expect(isolated.run).not.toHaveBeenCalled();
+        expect(isolated.phase).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ["a release native build", { target: "native", release: true }],
+        ["a plain native build", { target: "native", release: false }],
+        ["an incremental build", { target: undefined, release: false }],
+      ])("%s is not refused up front", async (_name, extra) => {
+        const result = await withoutComponent.buildProject(buildOptions(extra));
+
+        expect(result).toEqual({ status: "completed" });
+        expect(isolated.run).toHaveBeenCalled();
+        expect(isolated.phase).toHaveBeenCalledTimes(1);
+      });
     });
 
     it("precedes each step with '==> <label>: <stepText>' through log, the install step too (a line starting with the install command, before the phase runs)", async () => {

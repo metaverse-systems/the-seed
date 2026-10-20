@@ -8,6 +8,7 @@ import { pipeline } from "stream/promises";
 import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
 import Config from "./Config";
+import { NativeComponentMissingError, loadNativeComponent, requireNativeComponent } from "./NativeComponent";
 import { buildSignatureContainer, containerCapacity } from "./CmsBuilder";
 import { EARLIER_FORM_NOTICE_WINDOWS, NOT_CHECKED_ALWAYS, certificateFingerprint, evaluateTrust, outcomeOf, readCertificates, worst } from "./Trust";
 import { MachOSliceInfo, checkMachO } from "./MachOVerifier";
@@ -81,11 +82,6 @@ interface NativeAddon {
   msiStripSignature(filePath: string): boolean;
   msiExtractSignature(filePath: string): Buffer | null;
   msiHasEmbeddedSignature(filePath: string): boolean;
-}
-
-function loadNativeAddon(): NativeAddon {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations and is loaded on first use
-  return require("../native/build/Release/dependency_lister.node") as NativeAddon;
 }
 
 class Signing {
@@ -172,18 +168,23 @@ class Signing {
 
   /**
    * Detect the binary format of a file by inspecting its magic bytes/headers.
-   * Returns "pe", "macho", or "other".
+   * Returns "pe", "macho", "msi" or "other". Throws NativeComponentMissingError when the first bytes announce a
+   * Windows program, Mac program or installer and the native component is unavailable.
    */
   detectBinaryFormat(filePath: string): FormatDetectionResult {
+    // A file whose first bytes announce no embedded form is "other" without the native component
+    if (this._embeddedFormFromMagic(filePath) === undefined) {
+      return { format: "other", subFormat: null };
+    }
+    const addon = loadNativeComponent<NativeAddon>();
     try {
-      const addon = loadNativeAddon();
       const result = addon.detectBinaryFormat(filePath);
       return {
         format: result.format as BinaryFormat,
         subFormat: result.subFormat as FormatDetectionResult["subFormat"],
       };
     } catch {
-      // If native addon fails, fall back to "other"
+      // A file the native component cannot read is treated as "other"
       return { format: "other", subFormat: null };
     }
   }
@@ -197,7 +198,7 @@ class Signing {
     if (this.detectBinaryFormat(filePath).format !== "pe") {
       return false;
     }
-    const addon = loadNativeAddon();
+    const addon = loadNativeComponent<NativeAddon>();
     if (!addon.peHasEmbeddedSignature(filePath)) {
       return false;
     }
@@ -485,7 +486,7 @@ class Signing {
     const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
-    const addon = loadNativeAddon();
+    const addon = loadNativeComponent<NativeAddon>();
 
     // Strip existing signature if present
     if (addon.peHasEmbeddedSignature(resolvedPath)) {
@@ -554,7 +555,7 @@ class Signing {
     const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
-    const addon = loadNativeAddon();
+    const addon = loadNativeComponent<NativeAddon>();
 
     // Check for existing signature
     if (addon.machoHasEmbeddedSignature(resolvedPath)) {
@@ -627,7 +628,7 @@ class Signing {
     const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
-    const addon = loadNativeAddon();
+    const addon = loadNativeComponent<NativeAddon>();
 
     // Check for an existing signature; the check also reports a stored signature
     // that cannot be read (written by an earlier version), which is replaced too
@@ -802,6 +803,20 @@ class Signing {
 
     // Recursively find all files
     const allFiles = this._findFilesRecursive(resolvedDir);
+
+    // Without --detached, a file announcing an embedded form needs the native component: check before any file is signed
+    if (!options.detached) {
+      for (const filePath of allFiles) {
+        const basename = path.basename(filePath);
+        if (basename.endsWith(".sig") || basename === ".signatures.json") {
+          continue;
+        }
+        if (this._embeddedFormFromMagic(filePath) !== undefined && (await this.isBinaryFile(filePath))) {
+          requireNativeComponent();
+          break;
+        }
+      }
+    }
 
     const signed: SignResult[] = [];
     const skipped: string[] = [];
@@ -1053,10 +1068,12 @@ class Signing {
 
     // The native component is loaded once; without it embedded signatures cannot be checked
     let addon: NativeAddon | undefined;
+    let missing: NativeComponentMissingError | undefined;
     try {
-      addon = loadNativeAddon();
-    } catch {
+      addon = loadNativeComponent<NativeAddon>();
+    } catch (error) {
       addon = undefined;
+      missing = error instanceof NativeComponentMissingError ? error : new NativeComponentMissingError(String((error as Error)?.message ?? error).split(/\r?\n/)[0]);
     }
 
     let embedded: VerifyResult | undefined;
@@ -1094,7 +1111,7 @@ class Signing {
     } else {
       const form = this._embeddedFormFromMagic(resolvedPath);
       if (form !== undefined) {
-        const reason = "the native component is needed to check embedded signatures (run 'npm run build-addon')";
+        const reason = (missing as NativeComponentMissingError).message;
         embedded = this._buildVerifyResult(resolvedPath, form, "embedded", { state: "not-checked", reason, checked: [] }, undefined, trust);
       }
     }
@@ -1213,7 +1230,7 @@ class Signing {
       this._buildVerifyResult(resolvedPath, "windows-program", "embedded", { state: "invalid", reason, checked: [] }, signerDer, trust);
 
     try {
-      const addon = loadNativeAddon();
+      const addon = loadNativeComponent<NativeAddon>();
 
       // Extract embedded signature
       const pkcs7Der = addon.peExtractSignature(resolvedPath);
@@ -1237,7 +1254,7 @@ class Signing {
     const trust = options?.trust ?? this.loadTrust();
 
     try {
-      const addon = loadNativeAddon();
+      const addon = loadNativeComponent<NativeAddon>();
       const slices = addon.machoListSlices(resolvedPath);
       const check = checkMachO(fs.readFileSync(resolvedPath), slices);
       if (check.integrity.state === "none") {
@@ -1268,7 +1285,7 @@ class Signing {
       this._buildVerifyResult(resolvedPath, "installer", "embedded", { state: "invalid", reason, checked: [] }, undefined, trust);
 
     try {
-      const addon = loadNativeAddon();
+      const addon = loadNativeComponent<NativeAddon>();
 
       // Read the signature back and compare its fingerprint with the package
       const check = addon.msiCheckSignature(resolvedPath);

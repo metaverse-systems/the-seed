@@ -1,6 +1,7 @@
 import Config from "./Config";
 import Build from "./Build";
 import { runInstallPhase } from "./InstallPhase";
+import { preloadNativeComponent, requireNativeComponent } from "./NativeComponent";
 import { runStep } from "./StepRunner";
 import {
   runSchedule,
@@ -22,6 +23,8 @@ import {
   resolveBuildOrder,
   DiscoveryCancelledError,
 } from "./DependencyWalker";
+
+preloadNativeComponent();
 
 const TIER_NAMES = ["Components", "Systems", "Programs"];
 
@@ -118,8 +121,9 @@ function printReport(result: RecursiveBuildResult, total: number): void {
  * build (`jobs`, or the processor count).
  *
  * Build failures and cancellation are reported in the result; the promise
- * rejects only for discovery errors and an invalid `parallel` or `jobs`, both before
- * any step runs.
+ * rejects only for discovery errors, an invalid `parallel` or `jobs`, and, for
+ * a Windows target, NativeComponentMissingError (the native component is
+ * needed to strip and sign Windows programs), all before any step runs.
  *
  * @param options - Build configuration including target, project, and callbacks
  * @returns Result describing the outcome of the recursive build
@@ -131,6 +135,11 @@ export async function buildRecursive(
 
   validateParallel(options.parallel);
   validateJobs(options.jobs);
+
+  // A Windows build needs the native component: stop before discovery
+  if (target === "windows") {
+    requireNativeComponent();
+  }
 
   // Discover dependency graph and resolve build order
   console.log(`Scanning dependencies of ${projectDir}...`);

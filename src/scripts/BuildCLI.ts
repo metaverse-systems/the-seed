@@ -4,6 +4,7 @@ import Build from "../Build";
 import { ScriptArgsType } from "../types";
 import { buildRecursive } from "../RecursiveBuild";
 import { DependencyDiscoveryError } from "../DependencyWalker";
+import { NativeComponentMissingError } from "../NativeComponent";
 import { parseBuildArgs, optionHelp, VALID_OPTIONS_LINE } from "../BuildArgs";
 
 const printHelp = () => {
@@ -107,7 +108,7 @@ const runRecursiveBuild = (target: string, release: boolean, parallel: number, j
         forceSignal,
       });
     } catch (error) {
-      if (error instanceof DependencyDiscoveryError) {
+      if (error instanceof DependencyDiscoveryError || error instanceof NativeComponentMissingError) {
         console.error(error.message);
         process.exitCode = 1;
         return false;
@@ -123,15 +124,25 @@ const runRecursiveBuild = (target: string, release: boolean, parallel: number, j
 /** Runs a plain (target given) or incremental (no target) build of the current project. */
 const runProjectBuild = (build: Build, configDir: string, target: "native" | "windows" | undefined, release: boolean, jobs: number | undefined) =>
   withCancellation(async ({ signal, forceSignal }) => {
-    const result = await build.buildProject({
-      projectDir: process.cwd(),
-      target,
-      release,
-      jobs,
-      configDir,
-      signal,
-      forceSignal,
-    });
+    let result;
+    try {
+      result = await build.buildProject({
+        projectDir: process.cwd(),
+        target,
+        release,
+        jobs,
+        configDir,
+        signal,
+        forceSignal,
+      });
+    } catch (error) {
+      if (error instanceof NativeComponentMissingError) {
+        console.error(error.message);
+        process.exitCode = 1;
+        return false;
+      }
+      throw error;
+    }
     if (result.status === "failed") {
       console.error(`Build failed at ${result.step}: ${result.message}.`);
       process.exitCode = 1;
