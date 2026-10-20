@@ -13,6 +13,9 @@
  *   first listed value for one with a fixed set, `@s/hello` for the template name) and `sample`
  *   for the value of a required option. An unknown option in the middle sits between the first
  *   two words of the sample arguments (for one word or none it is the same as first or last).
+ * - The group `scopes list` writes a configuration file with the wanted scopes into a scratch home
+ *   and passes it as `home`; scopes carry an author with a name, an email and an empty url. The
+ *   note for no scopes is compared as the whole of standard error, one line.
  * - A command line that is a command and its subcommand shows the label `<command> <subcommand>`
  *   in the sentence; a command without subcommands shows `<command>`.
  */
@@ -399,5 +402,66 @@ describe("usage errors before work", () => {
       expect(twice.stdout).toBe("");
       expect(twice.stderr.split("\n")[0]).toBe(`Error: ${option} was given more than once.`);
     });
+  });
+});
+
+describe("scopes list", () => {
+  const author = { name: "Author", email: "a@example.com", url: "" };
+  let home: string;
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "cli-scopes-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  const writeScopes = (names: string[]): void => {
+    const configDir = path.join(home, "the-seed");
+    fs.mkdirSync(configDir, { recursive: true });
+    const scopes: Record<string, { author: typeof author }> = {};
+    for (const name of names) {
+      scopes[name] = { author };
+    }
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: configDir, scopes }));
+  };
+
+  it("prints one name per line and nothing else for several scopes", async () => {
+    writeScopes(["@a", "@b"]);
+    const run = await runTheSeed(["scopes", "list"], { home });
+    expect(run.stdout).toBe("@a\n@b\n");
+    expect(run.stderr).toBe("");
+    expect(run.status).toBe(0);
+  });
+
+  it("prints the one name for one scope", async () => {
+    writeScopes(["@a"]);
+    const run = await runTheSeed(["scopes", "list"], { home });
+    expect(run.stdout).toBe("@a\n");
+    expect(run.stderr).toBe("");
+    expect(run.status).toBe(0);
+  });
+
+  it("with no scopes prints nothing on standard output and the note with the hint on standard error", async () => {
+    writeScopes([]);
+    const run = await runTheSeed(["scopes", "list"], { home });
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toBe("No scopes are configured. Add one with \"the-seed scopes add\".\n");
+    expect(run.status).toBe(0);
+  });
+
+  it("config scopes list is a usage error naming \"the-seed scopes list\"", async () => {
+    writeScopes(["@a"]);
+    const run = await runTheSeed(["config", "scopes", "list"], { home });
+    expect(run.status).toBe(3);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toContain("Scopes are listed with \"the-seed scopes list\".");
+  });
+
+  it("config help does not mention scopes", async () => {
+    const run = await runTheSeed(["config", "--help"], { home });
+    expect(run.status).toBe(0);
+    expect(run.stdout).not.toMatch(/scopes/i);
   });
 });

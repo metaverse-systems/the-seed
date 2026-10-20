@@ -10,8 +10,17 @@ const ScopesCLI = async (parsed: ParsedCommand, context: CliContext): Promise<vo
 
   switch (parsed.subcommand) {
     case "list":
-      console.log(Object.keys(config.config.scopes));
+    {
+      const names = Object.keys(config.config.scopes);
+      if (names.length === 0) {
+        console.error(`No scopes are configured. ${addScopeHint()}`);
+        break;
+      }
+      for (const name of names) {
+        console.log(name);
+      }
       break;
+    }
     case "edit": {
       if (Object.keys(config.config.scopes).length === 0) {
         console.error("There are no scopes to edit.");
