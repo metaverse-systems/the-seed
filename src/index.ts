@@ -5,6 +5,7 @@ import Build from "./Build";
 import Signing, { UnsupportedSigningKey } from "./Signing";
 import type { SignedContent } from "./CmsBuilder";
 import Installer from "./Installer";
+import { NativeComponentMissingError, nativeComponentMessage } from "./NativeComponent";
 import { readElfNames } from "./ElfNames";
 import type { ElfNames } from "./ElfNames";
 import { InstallerConfig } from "./Installer";
@@ -18,6 +19,8 @@ export {
   Build,
   Signing,
   UnsupportedSigningKey,
+  NativeComponentMissingError,
+  nativeComponentMessage,
   SignedContent,
   Installer,
   readElfNames,
