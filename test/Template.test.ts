@@ -258,4 +258,20 @@ describe("template command line", () => {
       expect([snapshotTree(cwd), snapshotTree(configDir)]).toEqual(before);
     });
   }
+
+  it("component @nope/x with a scope that is not configured is refused before anything is written", async () => {
+    const before = [snapshotTree(cwd), snapshotTree(configDir)];
+
+    const run = await runTheSeed(["template", "component", "@nope/x"], { home: root, configDir, cwd, interactive: false });
+
+    expect(run.status).toBe(2);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toContain("Error: Scope \"@nope\" is not configured. Configured scopes: @s.");
+    expect(run.stderr.match(/^Error:/gm)).toHaveLength(1);
+    expect(run.stderr).not.toContain("Unexpected error");
+    expect(run.stderr).not.toContain("Copying template");
+    expect(run.prompts).toEqual([]);
+    expect(mockedExecSync).not.toHaveBeenCalled();
+    expect([snapshotTree(cwd), snapshotTree(configDir)]).toEqual(before);
+  });
 });

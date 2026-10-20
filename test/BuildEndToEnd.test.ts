@@ -253,8 +253,23 @@ describe("BuildEndToEnd", () => {
         process.env[key] = savedEnv[key];
       }
     }
+    stopWineServer();
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  /**
+   * A windows build can leave a wineserver running for the case's wine prefix, still writing under the
+   * scratch home. It is told to stop and waited for, so the directory is not removed while it writes.
+   */
+  function stopWineServer(): void {
+    const winePrefix = path.join(home, ".wine");
+    if (!fs.existsSync(winePrefix)) {
+      return;
+    }
+    const env = { ...process.env, HOME: home, WINEPREFIX: winePrefix };
+    spawnSync("wineserver", ["-k"], { env, stdio: "ignore", timeout: 30000 });
+    spawnSync("wineserver", ["-w"], { env, stdio: "ignore", timeout: 30000 });
+  }
 
   function plainBuild(sink: TailSink, vars: Record<string, string>) {
     const build = new Build(new Config(configDir));

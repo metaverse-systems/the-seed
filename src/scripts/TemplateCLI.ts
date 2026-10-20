@@ -1,6 +1,8 @@
 import inquirer from "inquirer";
 import Config from "../Config";
+import Signing from "../Signing";
 import Template from "../Template";
+import { chooseScope } from "../cli/ScopeChoice";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
 
 const TemplateCLI = async (parsed: ParsedCommand, context: CliContext): Promise<void> => {
@@ -10,7 +12,9 @@ const TemplateCLI = async (parsed: ParsedCommand, context: CliContext): Promise<
 
   const given = parsed.positionals.name as { scope: string; name: string } | undefined;
   if (given) {
-    template.createPackage(given.scope, given.name);
+    // A scope that is not configured is refused before anything is written.
+    const scope = await chooseScope(new Signing(context.configDir), given.scope, false);
+    template.createPackage(scope, given.name);
     return;
   }
 

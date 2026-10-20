@@ -451,6 +451,17 @@ describe("scopes list", () => {
     expect(run.status).toBe(0);
   });
 
+  it("scopes delete with no scopes says there is nothing to delete, with the hint, on standard error and exits 0", async () => {
+    writeScopes([]);
+    const before = snapshotTree(home);
+    const run = await runTheSeed(["scopes", "delete"], { home });
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toBe("There are no scopes to delete.\nAdd one with \"the-seed scopes add\".\n");
+    expect(run.status).toBe(0);
+    expect(run.prompts).toEqual([]);
+    expect(snapshotTree(home)).toEqual(before);
+  });
+
   it("config scopes list is a usage error naming \"the-seed scopes list\"", async () => {
     writeScopes(["@a"]);
     const run = await runTheSeed(["config", "scopes", "list"], { home });

@@ -42,7 +42,7 @@ const ScopesCLI = async (parsed: ParsedCommand, context: CliContext): Promise<vo
     }
     case "delete": {
       if (Object.keys(config.config.scopes).length === 0) {
-        console.error("There are no scopes to edit.");
+        console.error("There are no scopes to delete.");
         console.error(addScopeHint());
         break;
       }
