@@ -2,6 +2,32 @@ import fs from "fs";
 import { ConfigType, ScopeAnswersType, ScopeDefaultsType } from "./types";
 import Config from "./Config";
 
+/**
+ * Checks a scope name as typed, with or without its leading "@".
+ * @returns null when the name is usable, otherwise the reason it is not
+ */
+export function validateScopeName(name: string): string | null {
+  const bare = name.startsWith("@") ? name.slice(1) : name;
+  if (bare === "") {
+    return "A scope name cannot be empty.";
+  }
+  if (bare.includes("/")) {
+    return "A scope name cannot contain \"/\".";
+  }
+  if (/\s/.test(bare)) {
+    return "A scope name cannot contain spaces or other whitespace.";
+  }
+  return null;
+}
+
+/** Thrown when a new scope is given a name that is not usable; the message is the reason. */
+export class ScopeNameError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScopeNameError";
+  }
+}
+
 class Scopes {
   config: Config;
 
@@ -25,6 +51,7 @@ class Scopes {
       {
         "name": "scopeName",
         "message": "Name for scope?",
+        "validate": (input: string): string | boolean => validateScopeName(input) ?? true,
       },
       ...this.askEditScope()
     ];
@@ -54,6 +81,13 @@ class Scopes {
     let name = "";
     if(answers.scopeName[0] != "@") name = "@";
     name += answers.scopeName;
+
+    if (!Object.prototype.hasOwnProperty.call(this.config.config.scopes, name)) {
+      const reason = validateScopeName(answers.scopeName);
+      if (reason !== null) {
+        throw new ScopeNameError(reason);
+      }
+    }
 
     this.config.config.scopes[name] = {
       author: {

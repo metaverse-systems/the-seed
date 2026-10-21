@@ -5,9 +5,13 @@ import crypto from "crypto";
 import { execSync } from "child_process";
 import * as x509 from "@peculiar/x509";
 import Signing from "../src/Signing";
+import * as SigningModule from "../src/Signing";
 import Config from "../src/Config";
 import { expectPresent } from "./helpers/Assert";
 import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
+import { signingErrorClass, signingErrorOf } from "./helpers/SigningErrors";
+import * as Index from "../src/index";
+import { addScopeHint, createCertHint, editScopeHint, replaceCertHint } from "../src/cli/Hints";
 import {
   CertInfo,
   SigFileFormat,
@@ -642,6 +646,336 @@ describe("Signing without the native component", () => {
       expect(() => signing.removeEmbeddedSignature(file)).toThrow(missing.NativeComponentMissingError);
       expect(() => signing.removeEmbeddedSignature(file)).toThrow(missing.nativeComponentMessage());
       expect(fileDigest(file)).toBe(before);
+    });
+  });
+});
+
+// Interfaces fixed here where the contracts leave them open:
+//   - an invalid `validityDays` is a `SigningError` with code `invalid-validity` whose message contains
+//     the value as `String(value)`, and nothing is written under the signing directory
+//   - `undefined` selects the default; `0` is invalid (it is not replaced by the default)
+describe("createCert validity days", () => {
+  let dir: string;
+  let signing: Signing;
+
+  beforeEach(() => {
+    dir = createTempDir();
+    writeConfig(dir, { name: "Test User", email: "test@example.com" });
+    signing = new Signing(dir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const days = (info: CertInfo): number => Math.round((info.notAfter.getTime() - info.notBefore.getTime()) / (1000 * 60 * 60 * 24));
+
+  it.each([NaN, 0, -5, 1.5, 3651, Infinity])("refuses %p and writes nothing", async (value) => {
+    const error = await signingErrorOf(() => signing.createCert({ scope: "@test", validityDays: value }));
+    expect(error.code).toBe("invalid-validity");
+    expect(error.message).toContain(String(value));
+    expect(fs.existsSync(signing.scopeCertPath("@test"))).toBe(false);
+    expect(fs.existsSync(signing.scopeKeyPath("@test"))).toBe(false);
+    expect(fs.existsSync(path.join(dir, "signing"))).toBe(false);
+  });
+
+  it("uses 365 days when the validity is not given", async () => {
+    expect(days(await signing.createCert({ scope: "@test" }))).toBe(365);
+    expect(days(await signing.createCert({ scope: "@test", validityDays: undefined }))).toBe(365);
+  });
+
+  it.each([1, 3650])("accepts %p days", async (value) => {
+    expect(days(await signing.createCert({ scope: "@test", validityDays: value }))).toBe(value);
+  });
+
+  it("exports the validity limits from the package index", () => {
+    const exported = Index as unknown as { DEFAULT_VALIDITY_DAYS?: number; MAX_VALIDITY_DAYS?: number };
+    expect(exported.DEFAULT_VALIDITY_DAYS).toBe(365);
+    expect(exported.MAX_VALIDITY_DAYS).toBe(3650);
+  });
+});
+
+describe("validity constants", () => {
+  // Looked up on the module so that this file compiles whether or not the exports exist.
+  const constants = SigningModule as unknown as { DEFAULT_VALIDITY_DAYS?: number; MAX_VALIDITY_DAYS?: number };
+
+  it("exports the default validity of 365 days", () => {
+    expect(constants.DEFAULT_VALIDITY_DAYS).toBe(365);
+  });
+
+  it("exports the largest validity of 3650 days", () => {
+    expect(constants.MAX_VALIDITY_DAYS).toBe(3650);
+  });
+});
+
+// Every failure the library reports in the situations below is a SigningError whose `code` names the
+// situation. The message keeps its wording; the hint, where there is one, is in `hint` and not in the
+// message. Choices where the interface is open:
+//   - an unreadable, unparsable or missing certificate or key file given to importCert, a certificate
+//     file given to loadTrust, and a scope certificate that cannot be parsed are `certificate-unreadable`
+//   - `UnsupportedSigningKey` (a scope key that cannot sign) has code `unsupported-key`, and so does
+//     importCert for a key that is not ECDSA P-256
+//   - hints are compared with the functions of src/cli/Hints.ts
+describe("SigningError", () => {
+  let dir: string;
+  let signing: Signing;
+
+  beforeEach(() => {
+    dir = createTempDir();
+    writeConfig(dir, { name: "Test User", email: "test@example.com" });
+    signing = new Signing(dir);
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("is exported from the module and from the package index, with its code type", () => {
+    expect(signingErrorClass()).toBeDefined();
+    expect((Index as unknown as { SigningError?: unknown }).SigningError).toBe(signingErrorClass());
+  });
+
+  it("is an Error with a code and an optional hint", async () => {
+    const error = await signingErrorOf(() => signing.createCert({ scope: "@nope" }));
+    expect(error).toBeInstanceOf(Error);
+    expect(error.name).toBe("SigningError");
+    expect(typeof error.code).toBe("string");
+  });
+
+  describe("scope-required", () => {
+    it.each([
+      ["createCert", (s: Signing) => s.createCert({})],
+      ["signFile", (s: Signing) => s.signFile("x", {} as never)],
+      ["signDirectory", (s: Signing) => s.signDirectory("x", {} as never)],
+      ["exportCert", (s: Signing) => s.exportCert("out.pem", "")],
+      ["importCert", (s: Signing) => s.importCert("c.pem", "k.pem", "")],
+    ])("%s without a scope", async (_name, call) => {
+      const error = await signingErrorOf(() => call(signing));
+      expect(error.code).toBe("scope-required");
+      expect(error.message).toMatch(/^A scope must be specified for /);
+    });
+  });
+
+  describe("unknown-scope and author-name-missing", () => {
+    it("createCert for a scope that is not configured", async () => {
+      const error = await signingErrorOf(() => signing.createCert({ scope: "@nope" }));
+      expect(error.code).toBe("unknown-scope");
+      expect(error.message).toBe("Scope '@nope' not found in config.");
+      expect(error.hint).toBe(addScopeHint());
+    });
+
+    it("createCert for a scope whose author has no name", async () => {
+      fs.writeFileSync(
+        path.join(dir, "config.json"),
+        JSON.stringify({ prefix: "/tmp/seed-test-prefix", scopes: { "@noname": { author: { name: "", email: "", url: "" } } } })
+      );
+      const error = await signingErrorOf(() => new Signing(dir).createCert({ scope: "@noname" }));
+      expect(error.code).toBe("author-name-missing");
+      expect(error.message).toBe("Required author name is missing for scope '@noname'.");
+      expect(error.hint).toBe(editScopeHint("@noname"));
+    });
+  });
+
+  describe("certificate-missing, certificate-expired and certificate-unreadable", () => {
+    it.each([
+      ["signFile", (s: Signing, d: string) => s.signFile(path.join(d, "a.bin"), { scope: "@test" })],
+      ["signDirectory", (s: Signing, d: string) => s.signDirectory(d, { scope: "@test" })],
+    ])("%s without a certificate", async (_name, call) => {
+      writeBinaryFile(path.join(dir, "a.bin"));
+      const error = await signingErrorOf(() => call(signing, dir));
+      expect(error.code).toBe("certificate-missing");
+      expect(error.message).toBe("No signing certificate found for scope '@test'.");
+      expect(error.hint).toBe(createCertHint("@test"));
+    });
+
+    it("exportCert without a certificate", async () => {
+      const error = await signingErrorOf(() => signing.exportCert(path.join(dir, "out.pem"), "@test"));
+      expect(error.code).toBe("certificate-missing");
+      expect(error.message).toBe("No signing certificate found for scope '@test'.");
+    });
+
+    it.each([
+      ["signFile", (s: Signing, d: string) => s.signFile(path.join(d, "a.bin"), { scope: "@test" })],
+      ["signDirectory", (s: Signing, d: string) => s.signDirectory(d, { scope: "@test" })],
+    ])("%s with an expired certificate and no force", async (_name, call) => {
+      await signing.createCert({ scope: "@test" });
+      writeBinaryFile(path.join(dir, "a.bin"));
+      const info = expectPresent(signing.getCertInfo("@test"), "certificate");
+      jest.spyOn(signing, "getCertInfo").mockReturnValue({ ...info, isExpired: true });
+      const error = await signingErrorOf(() => call(signing, dir));
+      expect(error.code).toBe("certificate-expired");
+      expect(error.message).toMatch(/^Signing certificate is expired/);
+      expect(error.message).not.toContain("the-seed");
+      expect(error.hint).toBe(replaceCertHint("@test"));
+    });
+
+    it("a scope certificate that cannot be parsed", async () => {
+      await signing.createCert({ scope: "@test" });
+      fs.writeFileSync(signing.scopeCertPath("@test"), "not a certificate\n");
+      writeBinaryFile(path.join(dir, "a.bin"));
+      const error = await signingErrorOf(() => signing.signFile(path.join(dir, "a.bin"), { scope: "@test" }));
+      expect(error.code).toBe("certificate-unreadable");
+    });
+
+    it("loadTrust with a certificate file that does not exist", async () => {
+      const error = await signingErrorOf(() => signing.loadTrust([path.join(dir, "missing.pem")]));
+      expect(error.code).toBe("certificate-unreadable");
+    });
+
+    it("loadTrust with a file that holds no certificate", async () => {
+      const file = path.join(dir, "empty.pem");
+      fs.writeFileSync(file, "nothing here\n");
+      const error = await signingErrorOf(() => signing.loadTrust([file]));
+      expect(error.code).toBe("certificate-unreadable");
+    });
+
+    it("importCert with a certificate file that does not exist", async () => {
+      const error = await signingErrorOf(() => signing.importCert(path.join(dir, "no.pem"), path.join(dir, "no-key.pem"), "@test"));
+      expect(error.code).toBe("certificate-unreadable");
+    });
+
+    it("importCert with a certificate file that is not a certificate", async () => {
+      const bad = path.join(dir, "bad.pem");
+      fs.writeFileSync(bad, "garbage\n");
+      const error = await signingErrorOf(() => signing.importCert(bad, bad, "@test"));
+      expect(error.code).toBe("certificate-unreadable");
+    });
+  });
+
+  describe("key-mismatch and unsupported-key", () => {
+    let external: string;
+    let certPath: string;
+
+    beforeEach(async () => {
+      external = createTempDir();
+      writeConfig(external, { name: "External User", scope: "@external" });
+      await new Signing(external).createCert({ scope: "@external" });
+      certPath = path.join(external, "signing", "@external", "cert.pem");
+    });
+
+    afterEach(() => {
+      fs.rmSync(external, { recursive: true, force: true });
+    });
+
+    it("importCert with a key that does not match the certificate", async () => {
+      const { privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+      const keyFile = path.join(external, "other-key.pem");
+      fs.writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }) as string);
+      const error = await signingErrorOf(() => signing.importCert(certPath, keyFile, "@test"));
+      expect(error.code).toBe("key-mismatch");
+      expect(error.message).toBe("Certificate and key do not match.");
+    });
+
+    it("importCert with an RSA key", async () => {
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const rsaCert = path.join(external, "rsa-cert.pem");
+      const rsaKey = path.join(external, "rsa-key.pem");
+      fs.writeFileSync(rsaCert, generateSelfSignedRSACert(publicKey, privateKey));
+      fs.writeFileSync(rsaKey, privateKey.export({ type: "pkcs8", format: "pem" }) as string);
+      const error = await signingErrorOf(() => signing.importCert(rsaCert, rsaKey, "@test"));
+      expect(error.code).toBe("unsupported-key");
+      expect(error.message).toBe("Unsupported key type. Only ECDSA keys are supported.");
+    });
+
+    it("signFile with a scope key that cannot sign is an UnsupportedSigningKey and a SigningError", async () => {
+      await signing.createCert({ scope: "@test" });
+      const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+      fs.writeFileSync(signing.scopeKeyPath("@test"), privateKey.export({ type: "pkcs8", format: "pem" }) as string);
+      writeBinaryFile(path.join(dir, "a.bin"));
+      const error = await signingErrorOf(() => signing.signFile(path.join(dir, "a.bin"), { scope: "@test" }));
+      expect(error.code).toBe("unsupported-key");
+      expect(error).toBeInstanceOf(SigningModule.UnsupportedSigningKey);
+    });
+  });
+
+  describe("path-not-found, not-binary, read-only and no-binaries", () => {
+    beforeEach(async () => {
+      await signing.createCert({ scope: "@test" });
+    });
+
+    it("signFile of a path that does not exist", async () => {
+      const missing = path.join(dir, "missing.bin");
+      const error = await signingErrorOf(() => signing.signFile(missing, { scope: "@test" }));
+      expect(error.code).toBe("path-not-found");
+      expect(error.message).toBe(`File not found: ${missing}`);
+    });
+
+    it("signDirectory of a directory that does not exist", async () => {
+      const missing = path.join(dir, "missing-dir");
+      const error = await signingErrorOf(() => signing.signDirectory(missing, { scope: "@test" }));
+      expect(error.code).toBe("path-not-found");
+      expect(error.message).toBe(`Directory not found: ${missing}`);
+    });
+
+    it("verifyFile of a path that does not exist", async () => {
+      const missing = path.join(dir, "missing.bin");
+      const error = await signingErrorOf(() => signing.verifyFile(missing));
+      expect(error.code).toBe("path-not-found");
+    });
+
+    it("signFile of a text file", async () => {
+      const text = path.join(dir, "readme.txt");
+      writeTextFile(text);
+      const error = await signingErrorOf(() => signing.signFile(text, { scope: "@test" }));
+      expect(error.code).toBe("not-binary");
+      expect(error.message).toBe(`File is not binary: ${text}`);
+    });
+
+    it("signFile of a read-only file", async () => {
+      if (process.getuid?.() === 0) {
+        return;
+      }
+      const file = path.join(dir, "ro.bin");
+      writeBinaryFile(file);
+      fs.chmodSync(file, 0o444);
+      const error = await signingErrorOf(() => signing.signFile(file, { scope: "@test" }));
+      expect(error.code).toBe("read-only");
+      expect(error.message).toMatch(/^Cannot sign read-only file: /);
+    });
+
+    it("signDirectory of a directory with no binary files", async () => {
+      const empty = path.join(dir, "texts");
+      writeTextFile(path.join(empty, "a.txt"));
+      const error = await signingErrorOf(() => signing.signDirectory(empty, { scope: "@test" }));
+      expect(error.code).toBe("no-binaries");
+      expect(error.message).toBe("No binary files found in directory.");
+    });
+  });
+
+  describe("manifest-missing, manifest-malformed and wrong-target", () => {
+    it("verifyDirectory of a directory without a manifest", async () => {
+      const error = await signingErrorOf(() => signing.verifyDirectory(dir));
+      expect(error.code).toBe("manifest-missing");
+      expect(error.message).toBe(`No .signatures.json manifest found in ${dir}`);
+    });
+
+    it.each([
+      ["not JSON", "this is not json"],
+      ["a JSON array", "[]"],
+      ["an unsupported version", JSON.stringify({ version: 9, files: [], certificate: "x" })],
+      ["no list of files", JSON.stringify({ version: 2, certificate: "x" })],
+    ])("verifyDirectory with a manifest that is %s", async (_name, text) => {
+      fs.writeFileSync(path.join(dir, ".signatures.json"), text);
+      const error = await signingErrorOf(() => signing.verifyDirectory(dir));
+      expect(error.code).toBe("manifest-malformed");
+      expect(error.message).toMatch(/^Manifest file \.signatures\.json is malformed: /);
+    });
+
+    it("verifyFile of the manifest itself", async () => {
+      const manifest = path.join(dir, ".signatures.json");
+      fs.writeFileSync(manifest, "{}");
+      const error = await signingErrorOf(() => signing.verifyFile(manifest));
+      expect(error.code).toBe("wrong-target");
+      expect(error.message).toContain("is a directory manifest;");
+    });
+
+    it("verifyFile of a signature file whose signed file exists", async () => {
+      writeBinaryFile(path.join(dir, "a.bin"));
+      fs.writeFileSync(path.join(dir, "a.bin.sig"), "{}");
+      const error = await signingErrorOf(() => signing.verifyFile(path.join(dir, "a.bin.sig")));
+      expect(error.code).toBe("wrong-target");
+      expect(error.message).toContain("is a signature file;");
     });
   });
 });

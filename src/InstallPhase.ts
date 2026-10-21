@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import { extractScope, getStripTool, targets } from "./Build";
 import Signing from "./Signing";
+import { createCertHint, fullBuildHint, replaceCertHint } from "./cli/Hints";
 import { NativeComponentMissingError, requireNativeComponent } from "./NativeComponent";
 import { commandFailedMessage, findOnPath, formatCommand, runCommand } from "./ProcessRunner";
 import { runStep, stepText } from "./StepRunner";
@@ -145,7 +146,7 @@ function otherPrefixMessage(configPrefix: string): string {
     " or " +
     path.join(configPrefix, targets["windows"]) +
     "; the project was configured for another prefix. " +
-    "Run a full build (the-seed build native or the-seed build windows)."
+    fullBuildHint()
   );
 }
 
@@ -920,14 +921,15 @@ export function notice(outcome: SigningOutcome, projectDir: string): string | nu
         ? "Not signed: " + projectDir + "/package.json has no scope (expected @scope/name)."
         : "Not signed: the package name \"" + outcome.name + "\" has no scope (expected @scope/name).";
     case "noCertificate":
-      return "Not signed: no signing certificate for scope '" + outcome.scope + "'. Create one with \"the-seed signing create-cert\".";
+      return "Not signed: no signing certificate for scope '" + outcome.scope + "'. " + createCertHint(outcome.scope ?? "<scope>");
     case "expired":
       return (
         "Warning: not signed: the signing certificate for scope '" +
         outcome.scope +
         "' expired on " +
         (outcome.expiredOn ?? new Date(0)).toISOString().slice(0, 10) +
-        ". Create a new one with \"the-seed signing create-cert --force\"."
+        ". " +
+        replaceCertHint(outcome.scope ?? "<scope>")
       );
   }
 }

@@ -20,12 +20,6 @@ export interface ConfigType {
   [key: string]: unknown;
 }
 
-export interface ScriptArgsType {
-  binName: string;
-  args: string[];
-  configDir: string;
-}
-
 export interface ResourceType {
   name: string;
   filename: string;
@@ -393,24 +387,6 @@ export interface RecursiveBuildOptions {
    * placement.
    */
   forceSignal?: AbortSignal;
-}
-
-/** The parsed arguments of `the-seed build`. */
-export interface BuildRequest {
-  /** "incremental" when no target is given, "full" for native or windows */
-  mode: "help" | "incremental" | "full";
-  /** Set only when mode is "full" */
-  target?: "native" | "windows";
-  /** Build every buildable dependency first */
-  recursive: boolean;
-  /** Strip the installed programs and libraries (and the build-tree copies "package" reads) before they are signed */
-  release: boolean;
-  /** Maximum number of projects to build at once; 1 unless --parallel was given */
-  parallel: number;
-  /** Compile job limit; absent unless --jobs was given */
-  jobs?: number;
-  /** The deprecated bare word "recursive" was used */
-  deprecatedBareWord: boolean;
 }
 
 /** Options for Build.buildProject(), a plain or incremental build of one project. */

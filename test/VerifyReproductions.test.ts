@@ -3,7 +3,7 @@ import os from "os";
 import path from "path";
 import Signing from "../src/Signing";
 import { expectPresent } from "./helpers/Assert";
-import { runVerify } from "./helpers/Command";
+import { runTheSeed } from "./helpers/RunCli";
 import { makeUniversal } from "./helpers/Universal";
 
 // Reproductions of verification faults, written against Signing.verifyFile. Two configuration
@@ -11,6 +11,13 @@ import { makeUniversal } from "./helpers/Universal";
 // and directory is created under os.tmpdir() and removed afterwards; nothing reads the real home.
 
 const created: string[] = [];
+
+// `the-seed signing verify <args>` with the given scratch configuration directory and HOME; the streams are
+// compared without the newline that ends the last line.
+async function runVerify(args: string[], configDir: string, home: string): Promise<{ status: number; out: string; err: string }> {
+  const run = await runTheSeed(["signing", "verify", ...args], { home, configDir });
+  return { status: run.status, out: run.stdout.replace(/\n$/, ""), err: run.stderr.replace(/\n$/, "") };
+}
 let savedHome: string | undefined;
 
 function tempDir(prefix: string): string {
@@ -317,7 +324,7 @@ describe("cross-signer", () => {
     expect(result.status).toBe("UNTRUSTED");
     expect(result.integrity.state).toBe("intact");
     expect(result.trust.reason).toBe("no-trusted-certificates");
-    expect(result.trust.message).toBe("no trusted certificates are available; create one with 'the-seed signing create-cert' or name one with --cert <file>");
+    expect(result.trust.message).toBe("no trusted certificates are available; create one with \"the-seed signing create-cert\" or name one with --cert <file>");
     expect(result.reason).toBe(result.trust.message);
   });
 

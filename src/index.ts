@@ -1,20 +1,28 @@
 import Config from "./Config";
-import Scopes from "./Scopes";
+import Scopes, { ScopeNameError, validateScopeName } from "./Scopes";
 import Package from "./Package";
 import Build from "./Build";
-import Signing, { UnsupportedSigningKey } from "./Signing";
+import Signing, { DEFAULT_VALIDITY_DAYS, MAX_VALIDITY_DAYS, SigningError, UnsupportedSigningKey } from "./Signing";
+import type { SigningErrorCode } from "./Signing";
 import type { SignedContent } from "./CmsBuilder";
 import Installer from "./Installer";
+import type { InstallerRunResult } from "./Installer";
+import { InstallerMetadataError } from "./InstallerMetadata";
 import { NativeComponentMissingError, nativeComponentMessage } from "./NativeComponent";
 import { readElfNames } from "./ElfNames";
 import type { ElfNames } from "./ElfNames";
 import { InstallerConfig } from "./Installer";
-import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, ScriptArgsType, DependencyResultType, BuildStep, CertSubject, CertOptions, CertInfo, SignResult, DirectorySignResult, VerifyStatus, VerifyResult, DirectoryVerifyResult, SigFileFormat, SigningManifestFormat, SigningManifestEntry, SignatureForm, IntegrityState, IntegrityResult, TrustAnchor, TrustedCertificates, TrustState, UntrustedReason, TrustResult, MachOSliceResult, VerifyOptions, DirectoryFileResult, PlannedFile, UnpackagedLibrary, PackagePlan, PackageResult } from "./types";
+import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, DependencyResultType, BuildStep, CertSubject, CertOptions, CertInfo, SignResult, DirectorySignResult, VerifyStatus, VerifyResult, DirectoryVerifyResult, SigFileFormat, SigningManifestFormat, SigningManifestEntry, SignatureForm, IntegrityState, IntegrityResult, TrustAnchor, TrustedCertificates, TrustState, UntrustedReason, TrustResult, MachOSliceResult, VerifyOptions, DirectoryFileResult, PlannedFile, UnpackagedLibrary, PackagePlan, PackageResult, SignatureType, BinaryFormat, FormatDetectionResult, SignOptions } from "./types";
 import { DependencyDiscoveryError, CyclicDependencyError, ConflictingProjectError, ProjectManifestError, DiscoveryCancelledError } from "./DependencyWalker";
 
 export {
+  SigningError,
   Config,
   Scopes,
+  ScopeNameError,
+  validateScopeName,
+  DEFAULT_VALIDITY_DAYS,
+  MAX_VALIDITY_DAYS,
   Package,
   Build,
   Signing,
@@ -22,7 +30,10 @@ export {
   NativeComponentMissingError,
   nativeComponentMessage,
   SignedContent,
+  SigningErrorCode,
   Installer,
+  InstallerMetadataError,
+  InstallerRunResult,
   readElfNames,
   ElfNames,
   InstallerConfig,
@@ -34,7 +45,6 @@ export {
   ScopeDefaultsType,
   ResourceType,
   PackageType,
-  ScriptArgsType,
   DependencyResultType,
   BuildStep,
   CertSubject,
@@ -63,6 +73,10 @@ export {
   UnpackagedLibrary,
   PackagePlan,
   PackageResult,
+  SignatureType,
+  BinaryFormat,
+  FormatDetectionResult,
+  SignOptions,
   DependencyDiscoveryError,
   CyclicDependencyError,
   ConflictingProjectError,

@@ -9,6 +9,7 @@ const packageRoot = path.resolve(__dirname, "..");
 const allowedPatterns: RegExp[] = [
   /^package\.json$/,
   /^README\.md$/,
+  /^LICENSE$/,
   /^dist\/.+\.js$/,
   /^dist\/.+\.d\.ts$/,
   /^templates\/.+/,
@@ -21,6 +22,7 @@ const allowedPatterns: RegExp[] = [
 const requiredEntries: string[] = [
   "package.json",
   "README.md",
+  "LICENSE",
   "dist/index.js",
   "dist/scripts/the-seed.js",
   "native/binding.gyp",

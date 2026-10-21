@@ -461,8 +461,7 @@ class Package {
       const directory = installed.origin.directory;
       const target = Object.keys(targets).find((key) => directory.startsWith(this.config.config.prefix + "/" + targets[key] + "/")) ?? "native";
       lines.push(
-        "The installed copy differs from the build of " + build.origin.project + "; install it again with \"the-seed build " +
-          target + "\" in " + build.origin.location + ", or remove the stale copy."
+        `The installed copy differs from the build of ${build.origin.project}; install it again with "the-seed build ${target}" in ${build.origin.location}, or remove the stale copy.`
       );
     }
     lines.push("Nothing was written.");

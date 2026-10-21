@@ -9,6 +9,7 @@ import { optionalExternalCheck } from "./helpers/ExternalTools";
 import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 import { replaceScopeKey } from "./helpers/IndependentCheck";
 import { InstallPhaseOptions, InstallPhaseResult, OutputGroup } from "../src/types";
+import { createCertHint, fullBuildHint, replaceCertHint } from "../src/cli/Hints";
 
 // Choices made where the behaviour leaves a detail open (the implementation matches these):
 // - `readStage` and `placeStaged` are synchronous and throw; the two distinguishable errors have
@@ -303,7 +304,8 @@ describe("readStage", () => {
     expect(message).toContain(path.join(configPrefix, nativeTriplet));
     expect(message).toContain(path.join(configPrefix, windowsTriplet));
     expect(message).toContain("configured for another prefix");
-    expect(message).toContain("the-seed build native or the-seed build windows");
+    expect(message).toContain(fullBuildHint());
+    expect(message).not.toContain("the-seed build native or the-seed build windows");
   });
 
   it("fails with the other-prefix message when the given target's root does not exist", () => {
@@ -2839,7 +2841,7 @@ describe("signingOutcome and notice", () => {
 
     expect(outcome).toEqual(expect.objectContaining({ kind: "unsigned", reason: "noCertificate", scope: "@other" }));
     expect(notice(outcome, projectDir)).toBe(
-      "Not signed: no signing certificate for scope '@other'. Create one with \"the-seed signing create-cert\"."
+      "Not signed: no signing certificate for scope '@other'. " + createCertHint("@other")
     );
   });
 
@@ -2854,7 +2856,7 @@ describe("signingOutcome and notice", () => {
 
     expect(outcome).toEqual(expect.objectContaining({ kind: "unsigned", reason: "expired", scope: "@t" }));
     expect(notice(outcome, projectDir)).toBe(
-      "Warning: not signed: the signing certificate for scope '@t' expired on 2024-03-05. Create a new one with \"the-seed signing create-cert --force\"."
+      "Warning: not signed: the signing certificate for scope '@t' expired on 2024-03-05. " + replaceCertHint("@t")
     );
   });
 

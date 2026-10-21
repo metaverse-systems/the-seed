@@ -4,9 +4,10 @@ import os from "os";
 import path from "path";
 import * as x509 from "@peculiar/x509";
 import Signing from "../src/Signing";
-import { certificateFingerprint, evaluateTrust, exitStatusOf, NOT_CHECKED_ALWAYS, outcomeOf, readCertificates, worst } from "../src/Trust";
+import { certificateFingerprint, EARLIER_FORM_NOTICE_MAC, EARLIER_FORM_NOTICE_WINDOWS, evaluateTrust, exitStatusOf, NOT_CHECKED_ALWAYS, outcomeOf, readCertificates, worst } from "../src/Trust";
 import type { IntegrityResult, TrustAnchor, TrustedCertificates, TrustResult } from "../src/types";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { resignHint } from "../src/cli/Hints";
 
 // Status strings of the verification result. The functions under test take the status type, which
 // gains its new members in a later step, so the values are typed through the functions themselves.
@@ -217,8 +218,19 @@ describe("evaluateTrust", () => {
     expect(result.state).toBe("untrusted");
     expect(result.reason).toBe("no-trusted-certificates");
     expect(result.message).toContain("no trusted certificates are available");
-    expect(result.message).toContain("the-seed signing create-cert");
+    expect(result.message).toContain("\"the-seed signing create-cert\"");
+    expect(result.message).not.toContain("'the-seed");
     expect(result.message).toContain("--cert <file>");
+  });
+
+  it.each([
+    ["Windows", EARLIER_FORM_NOTICE_WINDOWS],
+    ["Mac", EARLIER_FORM_NOTICE_MAC],
+  ])("the earlier-form notice for %s quotes the command that signs the file again", (_name, notice) => {
+    const command = /"the-seed [^"]+"/.exec(resignHint()) as RegExpExecArray;
+    expect(command[0]).toBe("\"the-seed signing sign <path>\"");
+    expect(notice).toContain(`sign the file again with ${command[0]}`);
+    expect(notice).not.toContain("'the-seed");
   });
 });
 

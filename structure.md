@@ -1,25 +1,14 @@
 # Directory structure
 
-## Configuration file
+The README describes the tool for its users, including the configuration file and the layout of the installation prefix. This file is the maintainers' map of the source and the tests.
 
-```
-    ~/the-seed/config.json
-```
+## Command line
 
-## The Seed development environment
-
-* Defaults to ~/the-seed
-
-```
-    |-- ~/the-seed
-        |-- include
-        |-- x86_64-linux-gnu
-            |-- bin
-            |-- lib
-        |-- x86_64-w64-mingw32
-            |-- bin
-            |-- lib
-```
+* `src/cli/Commands.ts` is the one registry of commands, subcommands, options, arguments and their help texts; `src/cli/CommandSpec.ts` holds its types. `src/cli/ParseArgs.ts` parses a command line against it, and `src/cli/Help.ts` renders every help screen from it, so the parser and the help cannot disagree.
+* `src/cli/ExitStatus.ts` holds the exit-status table (`EXIT_STATUSES`), the error classes that carry a status (usage, missing, failure) and the conversion of library errors (`SigningError` and the others) into them. `src/cli/Hints.ts` holds the texts that name the next command to run, and `src/cli/ScopeChoice.ts` chooses the scope for the commands that need one.
+* `src/scripts/Cli.ts` (`runCli`) is the one place that parses, runs a handler and sets the exit status; the handlers in `src/scripts/` receive an already validated command and never read `argv` or exit the process.
+* `src/InstallerMetadata.ts` holds the pure functions that check and escape what goes into an installer description: names, versions and identifiers.
+* `test/Readme.test.ts` keeps `README.md` in agreement with the registry, the exit-status table and the exported types and classes, and checks the repository paths named in the README and in this file. `test/Hints.test.ts` finds every `the-seed` command line in the source and parses it. `test/helpers/HintScan.ts` is the scanner and command-line checker both use; `test/helpers/RunCli.ts` runs the command line in-process with a scratch home; `test/helpers/WxsReader.ts` reads an installer description back for the metadata cases.
 
 ## Native addon (`native/src/addon.cpp`)
 
@@ -52,7 +41,7 @@ Windows installer exports:
 ## Test helpers and fixtures
 
 * `test/helpers/CfbChecker.ts` is an independent TypeScript walker of the installer container (Node `crypto` SHA-256, children sorted by raw name bytes, signature streams excluded). It shares no code with `src/` and reads the values recorded in `test/fixtures/binaries/genuine/msi-reference.txt`.
-* `test/helpers/Universal.ts` assembles universal Mac programs from given slices (a 32-bit big-endian table, slices at `2^align` boundaries) for tests that need a partly signed or unsupported-slice program. `test/helpers/Command.ts` runs `signing verify` through `runCli` with a scratch configuration directory and a scratch `HOME`, capturing its output and exit status. Neither shares code with `src/`.
+* `test/helpers/Universal.ts` assembles universal Mac programs from given slices (a 32-bit big-endian table, slices at `2^align` boundaries) for tests that need a partly signed or unsupported-slice program. It shares no code with `src/`.
 * `test/fixtures/binaries/genuine/` holds the installer samples (`tiny.msi`, `tiny-v4.msi`, `tiny-osslsig-*.msi`, `nested.msi`, `legacy-the-seed-0.6.0.msi`) with their SHA-256 values in its `README.md`.
 * `test/helpers/IndependentCheck.ts` runs osslsigncode and openssl on signed files with an explicit child environment and writes edge-case certificates with openssl; it shares no code with `src/` and each check is skipped (and reported) when its tool is missing.
 * `test/CmsBuilder.test.ts` checks the container builder on buffers only; `test/SignatureInterop.test.ts` signs files with the tool and checks them with osslsigncode and openssl, including edge-case and fresh certificates and re-signing.

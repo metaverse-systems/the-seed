@@ -545,6 +545,8 @@ describe("package layout", () => {
     expect(message).toContain(path.join(libs, "libgreet.so.0.0.0"));
     expect(message).toContain(installed);
     expect(message).toContain("The installed copy differs from the build of @t/greet");
+    expect(message).toContain("install it again with \"the-seed build native\" in " + greetDir());
+    expect(message).not.toContain("\\\"");
     expect(message.trimEnd().endsWith("Nothing was written.")).toBe(true);
     expect(fs.existsSync(output)).toBe(false);
   }, BOUND_TIMEOUT);

@@ -1,45 +1,25 @@
 import inquirer from "inquirer";
 import Config from "../Config";
+import Signing from "../Signing";
 import Template from "../Template";
-import { ScriptArgsType } from "../types";
+import { chooseScope } from "../cli/ScopeChoice";
+import { CliContext, ParsedCommand } from "../cli/CommandSpec";
 
-const TemplateCLI = (scriptConfig: ScriptArgsType) => {
-  const config = new Config(scriptConfig.configDir);
-
-  const command = scriptConfig.args[3] || "help";
-
+const TemplateCLI = async (parsed: ParsedCommand, context: CliContext): Promise<void> => {
+  const config = new Config(context.configDir);
   const template = new Template(config);
+  template.type = parsed.subcommand as string;
 
-  let packageName = "";
-  let scope = "";
-  let name = "";
-
-  switch (command) {
-    case "help":
-      console.log("Available template(s):");
-      console.log("  component");
-      console.log("  system");
-      console.log("  program");
-      break;
-    case "component":
-    case "system":
-    case "program":
-      template.type = command;
-      packageName = scriptConfig.args[4];
-      if (packageName) {
-        const [scopeName, templateName] = packageName.split("/");
-        scope = scopeName;
-        name = templateName;
-      }
-      if(scope && name) {
-        template.createPackage(scope, name);
-        break;
-      }
-      inquirer.prompt(template.askName()).then((answers) => {
-        template.createPackage(answers.scopeName, answers.templateName);
-      });
-      break;
+  const given = parsed.positionals.name as { scope: string; name: string } | undefined;
+  if (given) {
+    // A scope that is not configured is refused before anything is written.
+    const scope = await chooseScope(new Signing(context.configDir), given.scope, false);
+    template.createPackage(scope, given.name);
+    return;
   }
+
+  const answers = await inquirer.prompt(template.askName());
+  template.createPackage(answers.scopeName, answers.templateName);
 };
 
 export default TemplateCLI;

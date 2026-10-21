@@ -1,48 +1,32 @@
+import fs from "fs";
 import Config from "../Config";
 import Package from "../Package";
-import { ScriptArgsType } from "../types";
+import { requireNativeComponent } from "../NativeComponent";
+import { CliContext, ParsedCommand } from "../cli/CommandSpec";
+import { HandlerResult, MissingError } from "../cli/ExitStatus";
 
-const PackageCLI = async (scriptConfig: ScriptArgsType) => {
-  const command = scriptConfig.args[3];
+const PackageCLI = async (parsed: ParsedCommand, context: CliContext): Promise<HandlerResult> => {
+  const outputDir = parsed.positionals["output-directory"] as string;
+  const projectDirs = parsed.positionals["project-dir"] as string[];
 
-  // No arguments or help subcommand
-  if (!command || command === "help") {
-    console.log("Usage: the-seed package <output-directory> <project-dir> [project-dir2] ...");
-    console.log("");
-    console.log("Package binaries with their shared library dependencies into a directory.");
-    console.log("");
-    console.log("Arguments:");
-    console.log("  output-directory  Name of the output directory to create");
-    console.log("  project-dir       Project directories containing src/Makefile.am");
-    console.log("");
-    console.log("The command reads src/Makefile.am to determine the binary type and name,");
-    console.log("resolves installed binaries for all build targets, uses DependencyLister");
-    console.log("to find shared library dependencies, and copies everything into the output directory.");
-    console.log("");
-    console.log("Dependency projects are found the way \"the-seed build --recursive\" finds them, from the");
-    console.log("\"dependencies\" of each project's package.json: a \"file:\" path is taken relative to the declaring");
-    console.log("project, and any other dependency (for example one installed from npm) is looked up in that");
-    console.log("project's node_modules. Linux libraries are written under the name programs load them by");
-    console.log("(for example libgreet.so.0), each with its .sig when signed.");
-    console.log("Two different files with the same name are refused; nothing is written.");
-    return;
+  // Packaging needs the native component; its absence is reported before anything is read or written
+  requireNativeComponent();
+
+  // A project directory that does not exist is missing input (an existing output directory is refused by the packaging itself)
+  if (!fs.existsSync(outputDir)) {
+    for (const projectDir of projectDirs) {
+      if (!fs.existsSync(projectDir)) {
+        throw new MissingError("Directory not found: " + projectDir);
+      }
+    }
   }
 
-  const outputDir = command;
-  const projectDirs = scriptConfig.args.slice(4);
-
-  // No project directories specified
-  if (projectDirs.length === 0) {
-    console.error("Usage: the-seed package <output-directory> <project-dir> [project-dir2] ...");
-    process.exit(1);
-  }
-
-  const config = new Config(scriptConfig.configDir);
+  const config = new Config(context.configDir);
   const pkg = new Package(config);
   const result = await pkg.run(outputDir, projectDirs);
 
   if (!result.success) {
-    process.exit(1);
+    return { status: 1 };
   }
 };
 

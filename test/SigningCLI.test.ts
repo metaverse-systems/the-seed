@@ -2,20 +2,26 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import Signing from "../src/Signing";
-import { runCli } from "../src/scripts/Cli";
 import { expectPresent } from "./helpers/Assert";
-import { runSign, runVerify } from "./helpers/Command";
+import { runTheSeed, snapshotTree } from "./helpers/RunCli";
 import { replaceScopeKey } from "./helpers/IndependentCheck";
 import { makeUniversal } from "./helpers/Universal";
 import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
+import { signingErrorClass } from "./helpers/SigningErrors";
+import { createCertHint } from "../src/cli/Hints";
 
-// The verify command, run through runCli with a scratch configuration directory and a scratch HOME.
-// Two configurations are used: A (scope @ta) and B (scope @tb). The command's status is the first
-// status passed to process.exit, or 0 when it never calls it. Usage errors are written to stderr
-// as "Error: <text>"; the tests below fix the wording:
-//   - a --cert without a value:  "Error: --cert needs a file"  followed by the usage line
-//   - an unknown option:         "Error: Unknown option <option>"  followed by the usage line
+// The commands, run through runTheSeed with a scratch configuration directory and a scratch HOME.
+// Two configurations are used: A (scope @ta) and B (scope @tb). The command's status is the process
+// exit status the command line ends with. Usage errors are written to stderr as three lines, and the
+// tests below fix the wording:
+//   - a --cert without a value:  "Error: --cert needs a value."  followed by the usage line
+//   - an unknown option:         'Error: Unknown option "--bogus" for "the-seed signing verify".'  followed by the usage line
+//   - no path:                   "Error: <path> is required."  followed by the usage line
 //   - the usage line:            "Usage: the-seed signing verify [--cert <file>]... <path>"
+// The --scope cases fix these choices: the configuration for them has the scopes @a and @b, each with
+// a certificate made in the scratch configuration directory; "--scope @nope" is refused with
+// status 2 before any file is written, naming the scope and listing "@a, @b"; two scopes, no
+// --scope and not interactive is status 3 naming "--scope".
 // Directory report (forms these tests fix):
 //   - each per-file line is two spaces, the headline word padded with spaces to 17 characters, then
 //     the text (so the text of every line starts in the same column)
@@ -28,6 +34,30 @@ import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpe
 const USAGE = "Usage: the-seed signing verify [--cert <file>]... <path>";
 
 const created: string[] = [];
+
+interface CommandRun {
+  status: number;
+  out: string;
+  err: string;
+}
+
+// The captured streams are compared without the newline that ends the last line.
+function lines(text: string): string {
+  return text.replace(/\n$/, "");
+}
+
+async function runSigning(command: string, args: string[], configDir: string, home: string): Promise<CommandRun> {
+  const run = await runTheSeed(["signing", command, ...args], { home, configDir });
+  return { status: run.status, out: lines(run.stdout), err: lines(run.stderr) };
+}
+
+async function runVerify(args: string[], configDir: string, home: string): Promise<CommandRun> {
+  return runSigning("verify", args, configDir, home);
+}
+
+async function runSign(args: string[], configDir: string, home: string): Promise<CommandRun> {
+  return runSigning("sign", args, configDir, home);
+}
 
 function tempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -105,7 +135,8 @@ describe("signing verify --cert", () => {
   it("never takes the path from a --cert value: with only --cert <file> the path is missing", async () => {
     const run = await runVerify(["--cert", B.certFile], A.configDir, home);
     expect(run.status).toBe(3);
-    expect(run.err).toContain("Missing path argument. " + USAGE);
+    expect(run.err).toContain("Error: <path> is required.");
+    expect(run.err).toContain(USAGE);
     expect(run.out).not.toContain("Verification:");
   });
 
@@ -158,7 +189,7 @@ describe("signing verify --cert", () => {
     it("exits 3 with the usage line for --cert without a value", async () => {
       const run = await runVerify([signedInB, "--cert"], A.configDir, home);
       expect(run.status).toBe(3);
-      expect(run.err).toContain("--cert needs a file");
+      expect(run.err).toContain("Error: --cert needs a value.");
       expect(run.err + run.out).toContain(USAGE);
       expect(run.out).not.toContain("Verification:");
     });
@@ -166,7 +197,7 @@ describe("signing verify --cert", () => {
     it("exits 3 with the usage line for an unknown option", async () => {
       const run = await runVerify(["--bogus", signedInB], A.configDir, home);
       expect(run.status).toBe(3);
-      expect(run.err).toContain("Unknown option --bogus");
+      expect(run.err).toContain("Error: Unknown option \"--bogus\" for \"the-seed signing verify\".");
       expect(run.err + run.out).toContain(USAGE);
       expect(run.out).not.toContain("Verification:");
     });
@@ -473,7 +504,8 @@ describe("signing verify <file>", () => {
     it("exits 3 when no path is given", async () => {
       const run = await runVerify([], A.configDir, home);
       expect(run.status).toBe(3);
-      expect(run.err).toContain("Missing path argument. " + USAGE);
+      expect(run.err).toContain("Error: <path> is required.");
+      expect(run.err).toContain(USAGE);
     });
 
     it("exits 3 for a .sig path, naming the file to verify instead, and prints no report", async () => {
@@ -644,51 +676,30 @@ describe("signing verify <file>", () => {
   });
 });
 
-// The help text, run through runCli with a scratch configuration directory and a scratch HOME.
+// The help text, run through runTheSeed with a scratch configuration directory and a scratch HOME.
 // Form these tests fix:
-//   - the paragraph is printed with the line breaks the help text uses, after the command list;
-//     the test compares it with whitespace collapsed, so only the words and their order are fixed
-//   - the usage line in the "Commands:" list shows "the-seed signing verify [--cert <file>]... <path>"
+//   - "signing help" carries, as notes after the subcommand list, the paragraphs below; they are compared
+//     with whitespace collapsed, so only the words and their order are fixed
+//   - the verify subcommand's own help shows "the-seed signing verify [--cert <file>]... <path>"
 describe("signing help", () => {
-  async function runHelp(): Promise<string> {
-    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-help-config-"));
-    const helpHome = fs.mkdtempSync(path.join(os.tmpdir(), "cli-help-home-"));
-    const savedHome = process.env.HOME;
-    const out: string[] = [];
-    const logSpy = jest.spyOn(console, "log").mockImplementation((...parts: unknown[]) => {
-      out.push(parts.map(String).join(" "));
-    });
-    process.env.HOME = helpHome;
-    try {
-      await runCli(["node", "the-seed", "signing", "help"], configDir, "the-seed");
-    } finally {
-      logSpy.mockRestore();
-      if (savedHome === undefined) {
-        delete process.env.HOME;
-      } else {
-        process.env.HOME = savedHome;
-      }
-      fs.rmSync(configDir, { recursive: true, force: true });
-      fs.rmSync(helpHome, { recursive: true, force: true });
-    }
-    return out.join("\n");
+  async function runHelp(args: string[]): Promise<string> {
+    const run = await runTheSeed(args);
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    return run.stdout;
   }
 
   it("describes verify", async () => {
-    const text = await runHelp();
+    const text = await runHelp(["signing", "help"]);
     const lines = text.split("\n");
-
-    const verifyLine = lines.find((line) => /^ {2}verify {8}/.test(line));
-    expect(verifyLine).toBe("  verify        Verify file signature(s): integrity and trust (--cert <file> to trust a given certificate)");
-    expect(lines.some((line) => line.includes("the-seed signing verify") && line.includes("[--cert <file>]..."))).toBe(true);
+    expect(lines.some((line) => line.includes("verify") && line.includes("[--cert <file>]..."))).toBe(true);
+    expect(await runHelp(["signing", "verify", "--help"])).toContain(USAGE);
 
     const collapsed = text.replace(/\s+/g, " ");
     const paragraph =
       "verify checks that a file is unchanged since it was signed and that its signer " +
       "is one of the certificates of your configured scopes (or of the files named with " +
-      "--cert). Exit status: 0 valid; 4 intact but not trusted; 1 invalid, not fully " +
-      "signed, not checked or no signature; 2 not found or other error; 3 usage or " +
-      "malformed manifest. Certificate chains, revocation, signing time and acceptance " +
+      "--cert). Certificate chains, revocation, signing time and acceptance " +
       "by the platform's own verifier are not checked.";
     expect(collapsed).toContain(paragraph);
   });
@@ -696,7 +707,7 @@ describe("signing help", () => {
   // Choice: the paragraph is compared with whitespace collapsed, so only its words and their order are fixed,
   // and it must come after the verify paragraph.
   it("says what sign writes and what it was checked with", async () => {
-    const collapsed = (await runHelp()).replace(/\s+/g, " ");
+    const collapsed = (await runHelp(["signing", "help"])).replace(/\s+/g, " ");
     const verifyEnd = "by the platform's own verifier are not checked.";
     const paragraph =
       "sign writes standard signature containers (signed attributes, the signer's " +
@@ -712,11 +723,11 @@ describe("signing help", () => {
   });
 });
 
-// `sign` with a scope key the tool cannot use, run through runCli with a scratch configuration and HOME.
+// `sign` with a scope key the tool cannot use, run through runTheSeed with a scratch configuration and HOME.
 // Choices: the configuration has one scope so no prompt appears; the file is a copy of the arm64 Mac sample
 // whose modification time is first set to a fixed past date; the message is the key check's own, after "Error: ".
 describe("signing sign with an unsupported scope key", () => {
-  it("prints the message on stderr, exits 3 and leaves the file byte-for-byte unchanged with the same modification time", async () => {
+  it("prints the message on stderr, exits 2 and leaves the file byte-for-byte unchanged with the same modification time", async () => {
     const config = await makeConfiguration("@tk");
     replaceScopeKey(config.configDir, "@tk", "rsa2048");
     const file = path.join(tempDir("cli-sign-file-"), "tiny-macho-arm64");
@@ -728,7 +739,7 @@ describe("signing sign with an unsupported scope key", () => {
 
     const run = await runSign([file], config.configDir, home);
 
-    expect(run.status).toBe(3);
+    expect(run.status).toBe(2);
     expect(run.err).toBe("Error: Cannot sign with scope '@tk': its key is RSA (2048-bit); only ECDSA P-256 keys are supported. No file was changed.");
     expect(run.out).not.toContain("Signed:");
     expect(fs.readFileSync(file).equals(before)).toBe(true);
@@ -740,18 +751,23 @@ describe("signing sign with an unsupported scope key", () => {
 // Choices: the commands are run through a command runner loaded in a module registry in which the native component
 // is unavailable; files are signed with the component first where a signed file is needed; a Linux program is a copy of /bin/true.
 describe("signing without the native component", () => {
-  type CommandModule = typeof import("./helpers/Command");
+  type CommandModule = typeof import("./helpers/RunCli");
   type ComponentModule = typeof import("../src/NativeComponent");
 
   let commands: CommandModule;
   let component: ComponentModule;
   let dir: string;
 
+  async function runWith(module: CommandModule, command: string, args: string[]): Promise<CommandRun> {
+    const run = await module.runTheSeed(["signing", command, ...args], { home, configDir: A.configDir });
+    return { status: run.status, out: lines(run.stdout), err: lines(run.stderr) };
+  }
+
   beforeEach(() => {
     dir = tempDir("cli-absent-");
     const loaded = withoutNativeComponent(() => ({
       // eslint-disable-next-line @typescript-eslint/no-var-requires -- a fresh module registry is needed for each case
-      commands: require("./helpers/Command") as CommandModule,
+      commands: require("./helpers/RunCli") as CommandModule,
       // eslint-disable-next-line @typescript-eslint/no-var-requires -- the message comes from the same registry
       component: require("../src/NativeComponent") as ComponentModule,
     }));
@@ -763,14 +779,14 @@ describe("signing without the native component", () => {
     jest.dontMock(nativeComponentPath);
   });
 
-  it("sign refuses a Windows program: the message alone on standard error, exit 3, nothing changed", async () => {
+  it("sign refuses a Windows program: the message alone on standard error, exit 2, nothing changed", async () => {
     const file = path.join(dir, "tiny.exe");
     fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), file);
     const before = fileDigest(file);
 
-    const run = await commands.runSign([file], A.configDir, home);
+    const run = await runWith(commands, "sign", [file]);
 
-    expect(run.status).toBe(3);
+    expect(run.status).toBe(2);
     expect(run.err).toBe("Error: " + component.nativeComponentMessage());
     expect(run.out).not.toContain("Signed:");
     expect(fileDigest(file)).toBe(before);
@@ -782,7 +798,7 @@ describe("signing without the native component", () => {
     fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "tiny.exe"), file);
     await A.signing.signFile(file, { scope: "@ta" });
 
-    const run = await commands.runVerify([file], A.configDir, home);
+    const run = await runWith(commands, "verify", [file]);
 
     expect(run.status).toBe(1);
     expect(run.out).toContain("Verification: SIGNATURE NOT CHECKED ✗");
@@ -793,10 +809,372 @@ describe("signing without the native component", () => {
     const file = path.join(dir, "linux-program");
     fs.copyFileSync("/bin/true", file);
 
-    const run = await commands.runSign([file], A.configDir, home);
+    const run = await runWith(commands, "sign", [file]);
 
     expect(run.status).toBe(0);
     expect(run.out).toContain("Signed: " + file);
     expect(fs.existsSync(file + ".sig")).toBe(true);
+  });
+});
+
+// The five subcommands that use a certificate choose their scope with --scope. Choices: the configuration has
+// the scopes @a and @b; where a case needs certificates they are created in the scratch configuration
+// directory (@a's author is "Signer @a"); the file to sign is a copy of the arm64 Mac sample; "nothing changed"
+// is a snapshot of the configuration directory, the working directory and the target's directory.
+describe("signing --scope", () => {
+  interface TwoScopes {
+    configDir: string;
+    signing: Signing;
+    cwd: string;
+  }
+
+  async function twoScopes(withCerts: boolean): Promise<TwoScopes> {
+    const configDir = tempDir("cli-scope-config-");
+    const scopes: Record<string, { author: { name: string; email: string; url: string } }> = {};
+    for (const scope of ["@a", "@b"]) {
+      scopes[scope] = { author: { name: "Signer " + scope, email: "signer@example.com", url: "" } };
+    }
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(configDir, "prefix"), scopes }, null, 2));
+    const signing = new Signing(configDir);
+    if (withCerts) {
+      await signing.createCert({ validityDays: 365, scope: "@a" });
+      await signing.createCert({ validityDays: 365, scope: "@b" });
+    }
+    return { configDir, signing, cwd: tempDir("cli-scope-cwd-") };
+  }
+
+  function sampleCopy(): string {
+    const file = path.join(tempDir("cli-scope-file-"), "tiny-macho-arm64");
+    fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "genuine", "tiny-macho-arm64"), file);
+    return file;
+  }
+
+  // A certificate and key made for a scope of another configuration, for import-cert.
+  async function externalPair(): Promise<{ cert: string; key: string }> {
+    const configDir = tempDir("cli-scope-external-");
+    fs.writeFileSync(
+      path.join(configDir, "config.json"),
+      JSON.stringify({ prefix: configDir, scopes: { "@ext": { author: { name: "External", email: "e@example.com", url: "" } } } }),
+    );
+    await new Signing(configDir).createCert({ validityDays: 365, scope: "@ext" });
+    return {
+      cert: path.join(configDir, "signing", "@ext", "cert.pem"),
+      key: path.join(configDir, "signing", "@ext", "key.pem"),
+    };
+  }
+
+  const certFor = (configDir: string, scope: string) => path.join(configDir, "signing", scope, "cert.pem");
+
+  describe("a configured scope is used without a prompt", () => {
+    it("create-cert --scope @a creates the certificate for @a only", async () => {
+      const t = await twoScopes(false);
+      const run = await runTheSeed(["signing", "create-cert", "--scope", "@a"], { home, configDir: t.configDir, cwd: t.cwd });
+      expect(run.status).toBe(0);
+      expect(run.prompts).toEqual([]);
+      expect(fs.existsSync(certFor(t.configDir, "@a"))).toBe(true);
+      expect(fs.existsSync(certFor(t.configDir, "@b"))).toBe(false);
+    });
+
+    it("import-cert --scope @a imports into @a only", async () => {
+      const t = await twoScopes(false);
+      const pair = await externalPair();
+      const run = await runTheSeed(["signing", "import-cert", "--cert", pair.cert, "--key", pair.key, "--scope", "@a"], {
+        home,
+        configDir: t.configDir,
+        cwd: t.cwd,
+      });
+      expect(run.status).toBe(0);
+      expect(run.prompts).toEqual([]);
+      expect(fs.readFileSync(certFor(t.configDir, "@a"), "utf-8")).toBe(fs.readFileSync(pair.cert, "utf-8"));
+      expect(fs.existsSync(certFor(t.configDir, "@b"))).toBe(false);
+    });
+
+    it("sign <file> --scope a (without the @) signs with @a's certificate", async () => {
+      const t = await twoScopes(false);
+      await t.signing.createCert({ validityDays: 365, scope: "@a" });
+      const file = sampleCopy();
+      const before = fileDigest(file);
+      const run = await runTheSeed(["signing", "sign", file, "--scope", "a"], { home, configDir: t.configDir, cwd: t.cwd });
+      expect(run.status).toBe(0);
+      expect(run.prompts).toEqual([]);
+      expect(run.stdout).toContain("Signed: " + file);
+      expect(fileDigest(file)).not.toBe(before);
+    });
+
+    it("cert-info --scope @a shows @a's certificate and not @b's", async () => {
+      const t = await twoScopes(true);
+      const run = await runTheSeed(["signing", "cert-info", "--scope", "@a"], { home, configDir: t.configDir, cwd: t.cwd });
+      expect(run.status).toBe(0);
+      expect(run.prompts).toEqual([]);
+      expect(run.stdout).toContain("Signer @a");
+      expect(run.stdout).not.toContain("Signer @b");
+    });
+
+    it("export-cert --output <file> --scope @a writes @a's certificate", async () => {
+      const t = await twoScopes(true);
+      const output = path.join(t.cwd, "out.pem");
+      const run = await runTheSeed(["signing", "export-cert", "--output", output, "--scope", "@a"], {
+        home,
+        configDir: t.configDir,
+        cwd: t.cwd,
+      });
+      expect(run.status).toBe(0);
+      expect(run.prompts).toEqual([]);
+      expect(fs.readFileSync(output, "utf-8")).toBe(fs.readFileSync(certFor(t.configDir, "@a"), "utf-8"));
+    });
+  });
+
+  // Each row builds the arguments from the working directory, a sample file and an external pair.
+  type Row = [string, (cwd: string, file: string, pair: { cert: string; key: string }) => string[]];
+  const rows: Row[] = [
+    ["create-cert", () => ["create-cert"]],
+    ["import-cert", (_cwd, _file, pair) => ["import-cert", "--cert", pair.cert, "--key", pair.key]],
+    ["sign", (_cwd, file) => ["sign", file]],
+    ["cert-info", () => ["cert-info"]],
+    ["export-cert", (cwd) => ["export-cert", "--output", path.join(cwd, "out.pem")]],
+  ];
+
+  describe.each(rows)("%s", (name, build) => {
+    it("--scope @nope is refused with status 2 before any work, naming it and listing the configured scopes", async () => {
+      const t = await twoScopes(true);
+      const file = sampleCopy();
+      const pair = await externalPair();
+      const dirs = [t.configDir, t.cwd, path.dirname(file)];
+      const before = dirs.map((dir) => snapshotTree(dir));
+      const run = await runTheSeed(["signing", ...build(t.cwd, file, pair), "--scope", "@nope"], {
+        home,
+        configDir: t.configDir,
+        cwd: t.cwd,
+      });
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("@nope");
+      expect(run.stderr).toContain("@a, @b");
+      expect(run.stdout).toBe("");
+      expect(run.prompts).toEqual([]);
+      expect(dirs.map((dir) => snapshotTree(dir))).toEqual(before);
+    });
+
+    it("two scopes, not interactive and no --scope is a usage error naming --scope, with no prompt", async () => {
+      const t = await twoScopes(true);
+      const file = sampleCopy();
+      const pair = await externalPair();
+      const dirs = [t.configDir, t.cwd, path.dirname(file)];
+      const before = dirs.map((dir) => snapshotTree(dir));
+      const run = await runTheSeed(["signing", ...build(t.cwd, file, pair)], {
+        home,
+        configDir: t.configDir,
+        cwd: t.cwd,
+        interactive: false,
+      });
+      expect(run.status).toBe(3);
+      expect(run.stderr).toContain("--scope");
+      expect(run.prompts).toEqual([]);
+      expect(dirs.map((dir) => snapshotTree(dir))).toEqual(before);
+      expect(name.length).toBeGreaterThan(0);
+    });
+  });
+
+  it("create-cert --scope @a with a certificate present, not interactive and no --force is a usage error naming --force", async () => {
+    const t = await twoScopes(true);
+    const before = [snapshotTree(t.configDir), snapshotTree(t.cwd)];
+    const run = await runTheSeed(["signing", "create-cert", "--scope", "@a"], {
+      home,
+      configDir: t.configDir,
+      cwd: t.cwd,
+      interactive: false,
+    });
+    expect(run.status).toBe(3);
+    expect(run.stderr).toContain("--force");
+    expect(run.prompts).toEqual([]);
+    expect([snapshotTree(t.configDir), snapshotTree(t.cwd)]).toEqual(before);
+  });
+
+  it("import-cert --scope @a with a certificate present, not interactive and no --force is a usage error naming --force", async () => {
+    const t = await twoScopes(true);
+    const pair = await externalPair();
+    const before = [snapshotTree(t.configDir), snapshotTree(t.cwd)];
+    const run = await runTheSeed(["signing", "import-cert", "--cert", pair.cert, "--key", pair.key, "--scope", "@a"], {
+      home,
+      configDir: t.configDir,
+      cwd: t.cwd,
+      interactive: false,
+    });
+    expect(run.status).toBe(3);
+    expect(run.stderr).toContain("--force");
+    expect([snapshotTree(t.configDir), snapshotTree(t.cwd)]).toEqual(before);
+  });
+
+  it("sign with no path is a usage error saying the path is required", async () => {
+    const t = await twoScopes(true);
+    const run = await runTheSeed(["signing", "sign"], { home, configDir: t.configDir, cwd: t.cwd, interactive: false });
+    expect(run.status).toBe(3);
+    expect(run.stderr).toContain("<path> is required.");
+    expect(run.prompts).toEqual([]);
+  });
+
+  it("sign --forse <file> is a usage error naming the option and leaves the file unchanged", async () => {
+    const t = await twoScopes(true);
+    const file = sampleCopy();
+    const before = fileDigest(file);
+    const run = await runTheSeed(["signing", "sign", "--forse", file, "--scope", "@a"], { home, configDir: t.configDir, cwd: t.cwd });
+    expect(run.status).toBe(3);
+    expect(run.stderr).toContain("--forse");
+    expect(fileDigest(file)).toBe(before);
+  });
+});
+
+// The exit status of a failure comes from the kind of error, never from its text. Choices: the error
+// class is built as `new SigningError(code, message, hint?)`; a library method is replaced for one case
+// by a spy on the prototype and restored afterwards; the expected statuses below are written out here
+// from the table of statuses and do not use the code under test.
+describe("signing statuses come from the error kind", () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function signingError(code: string, message: string, hint?: string): Error {
+    const ErrorClass = signingErrorClass() as unknown as new (code: string, message: string, hint?: string) => Error;
+    if (ErrorClass === undefined) {
+      throw new Error("SigningError is not exported from src/Signing.ts");
+    }
+    return new ErrorClass(code, message, hint);
+  }
+
+  const statusOfCode: Array<[string, number]> = [
+    ["scope-required", 1],
+    ["unknown-scope", 2],
+    ["author-name-missing", 2],
+    ["certificate-missing", 2],
+    ["certificate-expired", 2],
+    ["certificate-unreadable", 2],
+    ["key-mismatch", 2],
+    ["unsupported-key", 2],
+    ["invalid-validity", 1],
+    ["path-not-found", 2],
+    ["not-binary", 1],
+    ["read-only", 1],
+    ["no-binaries", 1],
+    ["manifest-missing", 2],
+    ["manifest-malformed", 3],
+    ["wrong-target", 3],
+    ["signing-failed", 1],
+  ];
+
+  it.each(statusOfCode)("sign: a SigningError with code %s ends with status %i, the message and the hint on standard error", async (code, status) => {
+    jest.spyOn(Signing.prototype, "signFile").mockRejectedValue(signingError(code, `Failure of kind ${code}.`, `Hint for ${code}.`));
+    const run = await runSigning("sign", [signedInB, "--scope", "@ta"], A.configDir, home);
+    expect(run.status).toBe(status);
+    expect(run.err).toBe(`Error: Failure of kind ${code}.\nHint for ${code}.`);
+    expect(run.out).toBe("");
+  });
+
+  it.each(statusOfCode)("import-cert: a SigningError with code %s ends with status %i", async (code, status) => {
+    jest.spyOn(Signing.prototype, "importCert").mockRejectedValue(signingError(code, `Failure of kind ${code}.`));
+    const run = await runSigning("import-cert", ["--cert", A.certFile, "--key", A.certFile, "--scope", "@ta", "--force"], A.configDir, home);
+    expect(run.status).toBe(status);
+    expect(run.err).toBe(`Error: Failure of kind ${code}.`);
+  });
+
+  it("sign: a message that used to select a status does not (a SigningError with code signing-failed saying no scopes are configured gives 1)", async () => {
+    jest.spyOn(Signing.prototype, "signFile").mockRejectedValue(signingError("signing-failed", "No scopes configured, No signing certificate, expired, No binary files."));
+    const run = await runSigning("sign", [signedInB, "--scope", "@ta"], A.configDir, home);
+    expect(run.status).toBe(1);
+  });
+
+  it("import-cert: a plain Error whose text says mismatch is an unexpected error with status 1, not 2 or 3", async () => {
+    jest.spyOn(Signing.prototype, "importCert").mockRejectedValue(new Error("Certificate and key do not match (mismatch)"));
+    const run = await runSigning("import-cert", ["--cert", A.certFile, "--key", A.certFile, "--scope", "@ta", "--force"], A.configDir, home);
+    expect(run.status).toBe(1);
+    expect(run.err).toBe("Error: Unexpected error in \"the-seed signing import-cert\": Certificate and key do not match (mismatch)");
+  });
+
+  it("sign: a plain Error whose text names an expired certificate is an unexpected error with status 1", async () => {
+    jest.spyOn(Signing.prototype, "signFile").mockRejectedValue(new Error("Signing certificate is expired."));
+    const run = await runSigning("sign", [signedInB, "--scope", "@ta"], A.configDir, home);
+    expect(run.status).toBe(1);
+    expect(run.err).toBe("Error: Unexpected error in \"the-seed signing sign\": Signing certificate is expired.");
+  });
+
+  it.each([
+    ["verifyFile", "manifest-missing", 2],
+    ["verifyFile", "manifest-malformed", 3],
+    ["verifyFile", "wrong-target", 3],
+    ["verifyFile", "path-not-found", 2],
+  ])("verify: %s throwing a SigningError with code %s ends with status %i", async (method, code, status) => {
+    jest.spyOn(Signing.prototype, method as "verifyFile").mockRejectedValue(signingError(code, `Failure of kind ${code}.`));
+    const run = await runVerify([signedInB], A.configDir, home);
+    expect(run.status).toBe(status);
+    expect(run.err).toBe(`Error: Failure of kind ${code}.`);
+  });
+
+  it.each([
+    ["manifest-missing", 2],
+    ["manifest-malformed", 3],
+  ])("verify of a directory: verifyDirectory throwing a SigningError with code %s ends with status %i", async (code, status) => {
+    jest.spyOn(Signing.prototype, "verifyDirectory").mockRejectedValue(signingError(code, `Failure of kind ${code}.`));
+    const run = await runVerify([tempDir("cli-dir-")], A.configDir, home);
+    expect(run.status).toBe(status);
+    expect(run.err).toBe(`Error: Failure of kind ${code}.`);
+  });
+
+  describe("cert-info", () => {
+    it("with no certificate prints the error and the hint on standard error, nothing on standard output, and ends with 2", async () => {
+      const config = await makeConfiguration("@tn");
+      fs.rmSync(path.join(config.configDir, "signing"), { recursive: true, force: true });
+      const run = await runSigning("cert-info", [], config.configDir, home);
+      expect(run.status).toBe(2);
+      expect(run.out).toBe("");
+      expect(run.err).toContain("Error: No signing certificate found for scope '@tn'.");
+      expect(run.err).toContain(createCertHint("@tn"));
+      expect(run.err).toContain("\"the-seed signing import-cert --cert <file> --key <file> --scope @tn\"");
+      expect(run.err).not.toContain("'the-seed");
+    });
+
+    it("with no scopes prints the error on standard error, nothing on standard output, and ends with 2", async () => {
+      const configDir = tempDir("cli-noscopes-");
+      fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(configDir, "prefix"), scopes: {} }));
+      const run = await runSigning("cert-info", [], configDir, home);
+      expect(run.status).toBe(2);
+      expect(run.out).toBe("");
+      expect(run.err).toContain("Error:");
+    });
+
+    it("with an unknown --scope prints the error on standard error and nothing on standard output", async () => {
+      const run = await runSigning("cert-info", ["--scope", "@nope"], A.configDir, home);
+      expect(run.status).toBe(2);
+      expect(run.out).toBe("");
+      expect(run.err).toContain("@nope");
+    });
+
+    it("prints a certificate on standard output with standard error empty", async () => {
+      const run = await runSigning("cert-info", [], A.configDir, home);
+      expect(run.status).toBe(0);
+      expect(run.err).toBe("");
+      expect(run.out).toContain("Signing Certificate:");
+    });
+  });
+
+  describe("real failures of sign", () => {
+    it("a path that does not exist ends with 2", async () => {
+      const run = await runSign([path.join(tempDir("cli-none-"), "absent.bin"), "--scope", "@ta"], A.configDir, home);
+      expect(run.status).toBe(2);
+      expect(run.err).toMatch(/^Error: File not found: /);
+    });
+
+    it("a file that is not binary ends with 1", async () => {
+      const text = path.join(tempDir("cli-text-"), "notes.txt");
+      fs.writeFileSync(text, "plain text\n");
+      const run = await runSign([text, "--scope", "@ta"], A.configDir, home);
+      expect(run.status).toBe(1);
+      expect(run.err).toBe(`Error: File is not binary: ${text}`);
+    });
+
+    it("a directory with no binary files ends with 1", async () => {
+      const dir = tempDir("cli-texts-");
+      fs.writeFileSync(path.join(dir, "a.txt"), "plain text\n");
+      const run = await runSign([dir, "--scope", "@ta"], A.configDir, home);
+      expect(run.status).toBe(1);
+      expect(run.err).toBe("Error: No binary files found in directory.");
+    });
   });
 });

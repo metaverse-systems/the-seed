@@ -1,63 +1,56 @@
-import fs from "fs";
 import inquirer from "inquirer";
 import Config from "../Config";
 import Scopes from "../Scopes";
-import { ScriptArgsType } from "../types";
+import { CliContext, ParsedCommand } from "../cli/CommandSpec";
+import { addScopeHint } from "../cli/Hints";
 
-const ScopesCLI = (scriptConfig: ScriptArgsType): Promise<void> | void => {
-  const config = new Config(scriptConfig.configDir);
+const ScopesCLI = async (parsed: ParsedCommand, context: CliContext): Promise<void> => {
+  const config = new Config(context.configDir);
   const scopes = new Scopes(config);
 
-  const command = scriptConfig.args[3] || "help";
-
-  switch(command)
-  {
-    case "help":
-      console.log("Scopes commands:");
-      console.log("  " + scriptConfig.binName + " scopes help");
-      console.log("     -- This screen");
-      console.log("  " + scriptConfig.binName + " scopes list");
-      console.log("     -- List existing scopes");
-      console.log("  " + scriptConfig.binName + " scopes edit");
-      console.log("     -- Edit an existing scope");
-      console.log("  " + scriptConfig.binName + " scopes add");
-      console.log("     -- Create a new scope");
-      console.log("  " + scriptConfig.binName + " scopes delete");
-      console.log("     -- Delete a scope");
-      break;
+  switch (parsed.subcommand) {
     case "list":
-      console.log(Object.keys(config.config.scopes));
+    {
+      const names = Object.keys(config.config.scopes);
+      if (names.length === 0) {
+        console.error(`No scopes are configured. ${addScopeHint()}`);
+        break;
+      }
+      for (const name of names) {
+        console.log(name);
+      }
       break;
-    case "edit":
-      if(Object.keys(config.config.scopes).length === 0) {
-        console.log("There are no scopes to edit.");
+    }
+    case "edit": {
+      if (Object.keys(config.config.scopes).length === 0) {
+        console.error("There are no scopes to edit.");
+        console.error(addScopeHint());
         break;
       }
-      return inquirer.prompt(scopes.askWhichScope())
-        .then((answers) => {
-          const { scopeName } = answers;
-          return inquirer.prompt(scopes.askEditScope(config.config.scopes[scopeName].author))
-            .then((editAnswers) => {
-              editAnswers.scopeName = scopeName;
-              scopes.createOrEditScope(editAnswers);
-            })
-            .then(() => config.saveConfig());
-        });
-    case "add":
-      return inquirer.prompt(scopes.askNewScope())
-        .then((answers) => scopes.createOrEditScope(answers))
-        .then(() => config.saveConfig());
-    case "delete":
-      if(Object.keys(config.config.scopes).length === 0) {
-        console.log("There are no scopes to edit.");
+      const { scopeName } = await inquirer.prompt(scopes.askWhichScope());
+      const editAnswers = await inquirer.prompt(scopes.askEditScope(config.config.scopes[scopeName].author));
+      editAnswers.scopeName = scopeName;
+      scopes.createOrEditScope(editAnswers);
+      await config.saveConfig();
+      break;
+    }
+    case "add": {
+      const answers = await inquirer.prompt(scopes.askNewScope());
+      scopes.createOrEditScope(answers);
+      await config.saveConfig();
+      break;
+    }
+    case "delete": {
+      if (Object.keys(config.config.scopes).length === 0) {
+        console.error("There are no scopes to delete.");
+        console.error(addScopeHint());
         break;
       }
-      return inquirer.prompt(scopes.askWhichScope())
-        .then((answers) => {
-          const { scopeName } = answers;
-          scopes.deleteScope(scopeName);
-        })
-        .then(() => config.saveConfig());
+      const { scopeName } = await inquirer.prompt(scopes.askWhichScope());
+      scopes.deleteScope(scopeName);
+      await config.saveConfig();
+      break;
+    }
   }
 };
 

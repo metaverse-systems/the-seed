@@ -1,36 +1,44 @@
-import Config from "../Config";
-import { ScriptArgsType } from "../types";
-import ResourcePak from "../ResourcePak";
+import fs from "fs";
+import path from "path";
 import inquirer from "inquirer";
+import Config from "../Config";
+import ResourcePak from "../ResourcePak";
+import { CliContext, ParsedCommand } from "../cli/CommandSpec";
+import { MissingError } from "../cli/ExitStatus";
 
-const ResourcePakCLI = (scriptConfig: ScriptArgsType) => {
-  const config = new Config(scriptConfig.configDir);
-  const command = scriptConfig.args[3];
-  const name = scriptConfig.args[4];
-  
-  let rp: ResourcePak;
+/** Stops with a missing-input error unless the directory holds a readable project description. */
+function requirePakProject(directory: string): void {
+  const description = path.join(directory, "package.json");
+  try {
+    JSON.parse(fs.readFileSync(description, "utf-8"));
+  } catch (error) {
+    const reason = (error as NodeJS.ErrnoException).code === "ENOENT" ? "" : ` (${(error as Error).message})`;
+    throw new MissingError(`No readable package.json in ${directory}${reason}; run this in a resource pak project.`);
+  }
+}
 
-  switch(command) {
-    case "help":
-      console.log("Available resource-pak commands:");
-      console.log("  create <name>");
-      console.log("  add <resource-name> <filename>");
-      console.log("  build");
+const ResourcePakCLI = async (parsed: ParsedCommand, context: CliContext): Promise<void> => {
+  const config = new Config(context.configDir);
+  const rp = new ResourcePak(config);
+
+  switch (parsed.subcommand) {
+    case "create": {
+      const answers = await inquirer.prompt(rp.askName());
+      rp.createPackage(answers.scopeName, answers.pakName);
       break;
-    case "create":
-      rp = new ResourcePak(config);
-      inquirer.prompt(rp.askName())
-        .then((answers) => {
-          rp.createPackage(answers.scopeName, answers.pakName);
-        });
+    }
+    case "add": {
+      requirePakProject(context.cwd);
+      const filename = parsed.positionals.filename as string;
+      if (!fs.existsSync(path.join(context.cwd, filename))) {
+        throw new MissingError(`File not found: ${path.resolve(context.cwd, filename)}`);
+      }
+      rp.addResource(parsed.positionals["resource-name"] as string, filename, context.cwd);
       break;
-    case "add":
-      rp = new ResourcePak(config);
-      rp.addResource(name, scriptConfig.args[5]);
-      break;
+    }
     case "build":
-      rp = new ResourcePak(config);
-      rp.build();
+      requirePakProject(context.cwd);
+      rp.build(context.cwd);
       break;
   }
 };
