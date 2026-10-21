@@ -10,6 +10,9 @@
 #include <vector>
 #include <map>
 #include <fstream>
+#include <istream>
+#include <filesystem>
+#include <cstdint>
 
 Napi::Value ListDependencies(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -75,6 +78,127 @@ Napi::Value ListDependencies(const Napi::CallbackInfo& info) {
 
 // ── Format Detection ────────────────────────────────────────
 
+namespace {
+
+struct PeHeaders {
+  bool valid;
+  bool is_pe32_plus;
+};
+
+// True when length bytes at offset lie within a file of the given size.
+bool InFile(std::uint64_t offset, std::uint64_t length, std::uint64_t size) {
+  return offset <= size && length <= size - offset;
+}
+
+// Reads length bytes at offset into buffer; false when the stream cannot supply them.
+bool ReadAt(std::istream& file, std::uint64_t offset, std::uint8_t* buffer, std::size_t length) {
+  file.clear();
+  file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+  if (!file) {
+    return false;
+  }
+  file.read(reinterpret_cast<char*>(buffer), static_cast<std::streamsize>(length));
+  return file.gcount() == static_cast<std::streamsize>(length);
+}
+
+std::uint16_t Le16(const std::uint8_t* bytes) {
+  return static_cast<std::uint16_t>(bytes[0] | (bytes[1] << 8));
+}
+
+std::uint32_t Le32(const std::uint8_t* bytes) {
+  return static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
+         (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
+}
+
+// Reads at most the DOS header, the PE header, two directory fields and the first WIN_CERTIFICATE
+// header: the checks of ParsePeLayout and ValidateCertificateTable in libthe-seed, in the same order.
+PeHeaders ReadPeHeaders(std::istream& file, std::uint64_t size) {
+  const PeHeaders invalid{false, false};
+
+  // Checks 1 and 2: the DOS header, and a non-negative e_lfanew.
+  std::uint8_t dos[64] = {0};
+  if (!InFile(0, sizeof(dos), size) || !ReadAt(file, 0, dos, sizeof(dos))) {
+    return invalid;
+  }
+  if (Le16(dos) != 0x5A4D) {
+    return invalid;
+  }
+  const std::int32_t lfanew = static_cast<std::int32_t>(Le32(dos + 60));
+  if (lfanew < 0) {
+    return invalid;
+  }
+
+  // Check 3: signature, file header and the optional header's magic.
+  const std::uint64_t peOffset = static_cast<std::uint64_t>(lfanew);
+  std::uint8_t pe[26] = {0};
+  if (!InFile(peOffset, sizeof(pe), size) || !ReadAt(file, peOffset, pe, sizeof(pe))) {
+    return invalid;
+  }
+  if (Le32(pe) != 0x00004550u) {
+    return invalid;
+  }
+  const std::uint16_t magic = Le16(pe + 24);
+  if (magic != 0x10b && magic != 0x20b) {
+    return invalid;
+  }
+  const bool plus = magic == 0x20b;
+  const std::uint64_t optional = peOffset + 24;
+
+  // Check 4: enough data directory entries.
+  std::uint8_t count[4] = {0};
+  const std::uint64_t countOffset = optional + (plus ? 108 : 92);
+  if (!InFile(countOffset, sizeof(count), size) || !ReadAt(file, countOffset, count, sizeof(count))) {
+    return invalid;
+  }
+  if (Le32(count) < 5) {
+    return invalid;
+  }
+
+  // Checks 5 and 6: the checksum field and the certificate directory entry lie in the file.
+  if (!InFile(optional + 64, 4, size)) {
+    return invalid;
+  }
+  const std::uint64_t directory = optional + (plus ? 144 : 128);
+  std::uint8_t entry[8] = {0};
+  if (!InFile(directory, sizeof(entry), size) || !ReadAt(file, directory, entry, sizeof(entry))) {
+    return invalid;
+  }
+
+  // Check 7: an empty entry means unsigned.
+  const std::uint64_t address = Le32(entry);
+  const std::uint64_t tableSize = Le32(entry + 4);
+  if (address == 0 || tableSize == 0) {
+    return PeHeaders{true, plus};
+  }
+
+  // Checks 8 to 10: the table lies in the file, clear of the headers, and holds a header.
+  if (!InFile(address, tableSize, size)) {
+    return invalid;
+  }
+  if (address < directory + 8) {
+    return invalid;
+  }
+  if (tableSize < 8) {
+    return invalid;
+  }
+
+  // Check 11: the first WIN_CERTIFICATE.
+  std::uint8_t certificate[8] = {0};
+  if (!ReadAt(file, address, certificate, sizeof(certificate))) {
+    return invalid;
+  }
+  const std::uint64_t length = Le32(certificate);
+  if (length < 8 || length > tableSize) {
+    return invalid;
+  }
+  if (Le16(certificate + 4) != 0x0200 || Le16(certificate + 6) != 0x0002) {
+    return invalid;
+  }
+  return PeHeaders{true, plus};
+}
+
+}  // namespace
+
 Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
@@ -87,9 +211,11 @@ Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
   std::string filePath = info[0].As<Napi::String>().Utf8Value();
   Napi::Object result = Napi::Object::New(env);
 
-  // Check PE first: read first 2 bytes for MZ magic, then validate PE header
+  // Check PE first: read the magic, then validate the PE headers
   try {
-    std::ifstream file(filePath, std::ios::binary);
+    std::ifstream file;
+    file.rdbuf()->pubsetbuf(nullptr, 0);
+    file.open(filePath, std::ios::binary);
     if (!file) {
       result.Set("format", Napi::String::New(env, "other"));
       result.Set("subFormat", env.Null());
@@ -108,15 +234,16 @@ Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
 
     // Check PE: starts with MZ (0x4D5A)
     if (magic[0] == 0x4D && magic[1] == 0x5A) {
-      // Validate PE header by trying to compute digest
-      try {
-        auto digestResult = the_seed::PeSigner::ComputeAuthenticodeDigest(filePath);
+      // An MZ file matches no other magic: the header checks decide.
+      const PeHeaders headers = ReadPeHeaders(file, std::filesystem::file_size(filePath));
+      if (headers.valid) {
         result.Set("format", Napi::String::New(env, "pe"));
-        result.Set("subFormat", Napi::String::New(env, digestResult.is_pe32_plus ? "pe32+" : "pe32"));
-        return result;
-      } catch (...) {
-        // MZ magic but invalid PE structure — fall through to other
+        result.Set("subFormat", Napi::String::New(env, headers.is_pe32_plus ? "pe32+" : "pe32"));
+      } else {
+        result.Set("format", Napi::String::New(env, "other"));
+        result.Set("subFormat", env.Null());
       }
+      return result;
     }
 
     // Check Mach-O: the library decides, from the same rules it signs by

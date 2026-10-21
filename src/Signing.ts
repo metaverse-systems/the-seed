@@ -267,10 +267,16 @@ class Signing {
    * @returns "embedded" if PE/Mach-O/MSI and not --detached, otherwise "detached"
    */
   getSigningStrategy(filePath: string, options?: SignOptions): SignatureType {
+    return options?.detached ? "detached" : this.strategyFor(this.detectBinaryFormat(filePath), options);
+  }
+
+  /**
+   * The signing strategy for a file whose format has already been detected.
+   */
+  private strategyFor(detection: FormatDetectionResult, options?: SignOptions): SignatureType {
     if (options?.detached) {
       return "detached";
     }
-    const detection = this.detectBinaryFormat(filePath);
     if (detection.format === "pe" || detection.format === "macho" || detection.format === "msi") {
       return "embedded";
     }
@@ -806,10 +812,10 @@ class Signing {
     }
 
     // Detect format and determine signing strategy
-    const strategy = this.getSigningStrategy(resolvedPath, options);
+    const detection = options?.detached ? undefined : this.detectBinaryFormat(resolvedPath);
+    const strategy = detection ? this.strategyFor(detection, options) : "detached";
 
-    if (strategy === "embedded") {
-      const detection = this.detectBinaryFormat(resolvedPath);
+    if (detection && strategy === "embedded") {
       if (detection.format === "pe") {
         return this.signFileAuthenticode(resolvedPath, scope, privateKey);
       } else if (detection.format === "macho") {
