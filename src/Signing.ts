@@ -459,7 +459,7 @@ class Signing {
 
     // Export private key to PEM
     const exportedKey = await webcrypto.subtle.exportKey("pkcs8", keys.privateKey);
-    const keyPem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(exportedKey).toString("base64").match(/.{1,64}/g)!.join("\n")}\n-----END PRIVATE KEY-----\n`;
+    const keyPem = `-----BEGIN PRIVATE KEY-----\n${(Buffer.from(exportedKey).toString("base64").match(/.{1,64}/g) ?? []).join("\n")}\n-----END PRIVATE KEY-----\n`;
 
     // Ensure scope signing directory exists
     const scopeDir = path.join(this.signingDir, scope);
@@ -474,7 +474,11 @@ class Signing {
     fs.writeFileSync(keyPath, keyPem, { mode: 0o600 });
     this._setOwnerOnly(keyPath);
 
-    return this.getCertInfo(scope)!;
+    const info = this.getCertInfo(scope);
+    if (info === null) {
+      throw new Error(`internal: certificate for ${scope} not found after writing it`);
+    }
+    return info;
   }
 
   /**
@@ -924,10 +928,12 @@ class Signing {
         };
       } else {
         // Detached: read from .sig file
-        const sigData: SigFileFormat = JSON.parse(fs.readFileSync(s.signaturePath!, "utf-8"));
+        const sigPath = s.signaturePath;
+        if (sigPath === null) throw new Error("internal: detached signature without a path");
+        const sigData: SigFileFormat = JSON.parse(fs.readFileSync(sigPath, "utf-8"));
         return {
           path: path.relative(resolvedDir, s.filePath),
-          signatureFile: path.relative(resolvedDir, s.signaturePath!),
+          signatureFile: path.relative(resolvedDir, sigPath),
           algorithm: "SHA256" as const,
           signature: sigData.signature,
           signatureType: "detached" as const,
@@ -1035,7 +1041,11 @@ class Signing {
     fs.writeFileSync(keyPath, keyPem, { mode: 0o600 });
     this._setOwnerOnly(keyPath);
 
-    return this.getCertInfo(scope)!;
+    const info = this.getCertInfo(scope);
+    if (info === null) {
+      throw new Error(`internal: certificate for ${scope} not found after writing it`);
+    }
+    return info;
   }
 
   /**

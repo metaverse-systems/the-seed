@@ -117,7 +117,7 @@ class Installer {
 
     // Strip npm scope prefix (e.g. "@metaverse-systems/client" → "client")
     const name = rawName.startsWith("@") && rawName.includes("/")
-      ? rawName.split("/").pop()!
+      ? rawName.slice(rawName.lastIndexOf("/") + 1)
       : rawName;
 
     const rawVersion = pkgData.version;

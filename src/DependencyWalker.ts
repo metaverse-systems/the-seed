@@ -348,7 +348,12 @@ async function walkProject(projectDir: string, walk: WalkState): Promise<void> {
     }
     if (!edgePaths.includes(depDir)) {
       edgePaths.push(depDir);
-      project.dependencies.push(walk.graph.projects.get(depDir)!.name);
+      const dep = walk.graph.projects.get(depDir);
+      if (dep === undefined) {
+        // Unreachable: the walk above stored this project.
+        throw new Error(`internal: project ${depDir} not in graph`);
+      }
+      project.dependencies.push(dep.name);
     }
   }
 
@@ -400,10 +405,19 @@ export function resolveBuildOrder(
   }
 
   // Sort ready queue by tier priority (lowest ProjectType first), then by name for stability
+  const projectOf = (key: string): BuildableProject => {
+    const found = graph.projects.get(key);
+    if (found === undefined) {
+      // Unreachable: the queue holds only keys of the graph.
+      throw new Error(`internal: project ${key} not in graph`);
+    }
+    return found;
+  };
+
   const sortReady = (queue: string[]): string[] => {
     return queue.sort((a, b) => {
-      const projA = graph.projects.get(a)!;
-      const projB = graph.projects.get(b)!;
+      const projA = projectOf(a);
+      const projB = projectOf(b);
       if (projA.type !== projB.type) {
         return projA.type - projB.type;
       }
@@ -418,10 +432,11 @@ export function resolveBuildOrder(
 
   while (readyQueue.length > 0) {
     // Dequeue the highest priority (first in sorted queue)
-    const current = readyQueue.shift()!;
+    const current = readyQueue.shift();
+    if (current === undefined) break;
     processed.add(current);
 
-    const project = graph.projects.get(current)!;
+    const project = projectOf(current);
 
     // Don't add root to result yet — it goes last
     if (current !== resolvedRoot) {
