@@ -1278,3 +1278,77 @@ describe("cli test helpers", () => {
     expect(snapshotTree(scratch)).not.toEqual(before);
   });
 });
+
+// The ASCII pak fixture: a pak built by the tool before the header-size change, together with the
+// project it was built from. Interface choices the contracts leave open:
+//   - the project's resource entries are { name, filename, size, attributes? }, with filename
+//     relative to the project directory;
+//   - the pak's header line has the keys name, headerSize, resources in that order, and
+//     headerSize is a ten-digit decimal string.
+describe("pak fixture", () => {
+  const fixtureDir = rel("test", "fixtures", "paks");
+  const pakPath = path.join(fixtureDir, "ascii.pak");
+  const projectDir = path.join(fixtureDir, "ascii");
+  const projectJson = path.join(projectDir, "package.json");
+
+  interface FixtureResource {
+    name: string;
+    filename: string;
+    size: number;
+    attributes?: Record<string, string>;
+  }
+
+  function firstLine(pak: Buffer): Buffer {
+    const end = pak.indexOf(0x0a);
+    expect(end).toBeGreaterThanOrEqual(0);
+    return pak.subarray(0, end + 1);
+  }
+
+  function readResources(): FixtureResource[] {
+    const project = JSON.parse(fs.readFileSync(projectJson, "utf8")) as { resources: FixtureResource[] };
+    return project.resources;
+  }
+
+  it("has the pak, the project and the README", () => {
+    expect(fs.statSync(pakPath).isFile()).toBe(true);
+    expect(fs.statSync(projectJson).isFile()).toBe(true);
+    expect(fs.statSync(path.join(fixtureDir, "README.md")).isFile()).toBe(true);
+  });
+
+  it("has an ASCII header line with name, headerSize and resources in order and a matching headerSize", () => {
+    const line = firstLine(fs.readFileSync(pakPath));
+    for (const byte of line) {
+      expect(byte).toBeLessThan(0x80);
+    }
+    const header = JSON.parse(line.toString("ascii")) as { headerSize: string };
+    expect(Object.keys(header)).toEqual(["name", "headerSize", "resources"]);
+    expect(header.headerSize).toMatch(/^[0-9]{10}$/);
+    expect(parseInt(header.headerSize, 10)).toBe(line.length);
+  });
+
+  it("has a project named @scope/name whose resource files all exist", () => {
+    const project = JSON.parse(fs.readFileSync(projectJson, "utf8")) as { name: string };
+    expect(project.name).toMatch(/^@[^/]+\/[^/]+$/);
+    const resources = readResources();
+    expect(resources.length).toBeGreaterThan(0);
+    for (const resource of resources) {
+      const file = path.join(projectDir, resource.filename);
+      expect(fs.statSync(file).isFile()).toBe(true);
+    }
+  });
+
+  it("has a pak whose length is the header line plus the resource files", () => {
+    const pak = fs.readFileSync(pakPath);
+    const total = readResources().reduce(
+      (sum, resource) => sum + fs.statSync(path.join(projectDir, resource.filename)).size,
+      0
+    );
+    expect(pak.length).toBe(firstLine(pak).length + total);
+  });
+
+  it("covers an entry with attributes and an empty file", () => {
+    const resources = readResources();
+    expect(resources.some((r) => r.attributes !== undefined && Object.keys(r.attributes).length > 0)).toBe(true);
+    expect(resources.some((r) => fs.statSync(path.join(projectDir, r.filename)).size === 0)).toBe(true);
+  });
+});

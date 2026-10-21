@@ -1,0 +1,32 @@
+{
+  "name": "@t/ascii",
+  "version": "0.0.1",
+  "description": "",
+  "author": "Ada Lovelace <ada@example.com>",
+  "license": "UNLICENSED",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "the-seed resource-pak build"
+  },
+  "resources": [
+    {
+      "name": "notes",
+      "filename": "notes.txt",
+      "size": 38
+    },
+    {
+      "name": "blob",
+      "filename": "data/blob.bin",
+      "size": 256,
+      "attributes": {
+        "type": "binary",
+        "order": "ascending"
+      }
+    },
+    {
+      "name": "empty",
+      "filename": "empty.dat",
+      "size": 0
+    }
+  ]
+}
