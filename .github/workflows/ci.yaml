@@ -118,7 +118,7 @@ jobs:
 
       - name: Check native addon loads
         id: addon-load
-        run: node -e "require('./native/build/Release/dependency_lister.node')"
+        run: node -e "require('./native/build/Release/the_seed_native.node')"
 
       - name: Type check
         if: ${{ !cancelled() && steps.addon-load.outcome == 'success' }}

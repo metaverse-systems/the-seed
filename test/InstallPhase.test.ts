@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { buildTreeCopies, groupOutputs, notice, outputKind, placeStaged, readStage, runInstallPhase, signingOutcome, signOutputs, stripOutputs } from "../src/InstallPhase";
 import Signing from "../src/Signing";
 import { findOnPath } from "../src/ProcessRunner";
@@ -2373,7 +2374,7 @@ describe("runInstallPhase", () => {
   // ── The stage as stripping and signing left it ───────────
 
   function loadAddon(): { peHasEmbeddedSignature(file: string): boolean } {
-    return require("../native/build/Release/dependency_lister.node");
+    return require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH));
   }
 
   it("installs a windows stage that holds a stray <name>.exe.sig, which embedded signing removes", async () => {

@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 
 /** Absolute path of the native component, as the source modules resolve it. */
-export const nativeComponentPath = path.resolve(__dirname, "..", "..", "native", "build", "Release", "dependency_lister.node");
+export const nativeComponentPath = path.resolve(__dirname, "..", "..", "native", "build", "Release", "the_seed_native.node");
 
 const sharedLibraryError = "libthe-seed.so.1: cannot open shared object file: No such file or directory";
 

@@ -112,11 +112,9 @@ interface NativeAddon {
   machoPrepareSignature(filePath: string, identity: string, cmsCapacity: number): MachOPreparedSignature;
   machoCompleteSignature(filePath: string, prepared: MachOPreparedSignature, cmsSignatures: Buffer[]): void;
   machoStripSignature(filePath: string): void;
-  machoBuildSuperBlob(codeDirectory: Buffer, cmsSignature: Buffer): Buffer;
   machoExtractSignature(filePath: string): Buffer | null;
   machoHasEmbeddedSignature(filePath: string): boolean;
   machoListSlices(filePath: string): MachOSliceInfo[];
-  msiIsMsi(filePath: string): boolean;
   msiComputeDigest(filePath: string): { digest: Buffer };
   msiEmbedSignature(filePath: string, pkcs7Der: Buffer, requireMatchingDigest?: boolean): void;
   msiCheckSignature(filePath: string): MsiSignatureCheck;

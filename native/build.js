@@ -8,7 +8,7 @@ const { resolvePrefix, searchEnv, requiredVersion } = require("./pkg-config.js")
 
 const NATIVE_DIR = __dirname;
 const KEPT_OUTPUT_LINES = 20;
-const COMPONENT_FILE = path.join("build", "Release", "dependency_lister.node");
+const COMPONENT_FILE = path.join("build", "Release", "the_seed_native.node");
 
 /** Probes that look at the real machine; tests replace them. */
 function realProbes(env, nativeDir, required) {

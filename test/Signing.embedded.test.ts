@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { spawnSync } from "child_process";
 import Signing, { UnsupportedSigningKey } from "../src/Signing";
 import * as x509 from "@peculiar/x509";
@@ -104,7 +105,7 @@ function copyMsi(name: string, destDir: string, as?: string): string {
  * Load the compiled addon directly, for the calls that have no wrapper.
  */
 function loadAddon(): Record<string, (...args: unknown[]) => unknown> {
-  return require("../native/build/Release/dependency_lister.node");
+  return require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH));
 }
 
 function sha256File(file: string): string {
@@ -469,22 +470,10 @@ describe("signFileMachO on genuine samples", () => {
   describe("removed addon exports", () => {
     // The real addon is loaded directly; there is no mock.
     // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-    const addon = require("../native/build/Release/dependency_lister.node") as Record<
+    const addon = require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH)) as Record<
       string,
       (...args: unknown[]) => unknown
     >;
-
-    it("machoComputeCodeDirectory throws and names the replacement", () => {
-      expect(() => addon.machoComputeCodeDirectory(copyGenuine("tiny-macho-arm64", tempDir), "id")).toThrow(
-        "machoComputeCodeDirectory was removed in libthe-seed 0.6.0: use machoPrepareSignature and machoCompleteSignature"
-      );
-    });
-
-    it("machoEmbedSignature throws and names the replacement", () => {
-      expect(() => addon.machoEmbedSignature(copyGenuine("tiny-macho-arm64", tempDir), Buffer.alloc(8))).toThrow(
-        "machoEmbedSignature was removed in libthe-seed 0.6.0: use machoPrepareSignature and machoCompleteSignature"
-      );
-    });
 
     it("exposes the three new calls", () => {
       expect(typeof addon.machoPrepareSignature).toBe("function");

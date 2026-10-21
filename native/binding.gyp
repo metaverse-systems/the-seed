@@ -1,7 +1,7 @@
 {
   "targets": [
     {
-      "target_name": "dependency_lister",
+      "target_name": "the_seed_native",
       "sources": ["src/addon.cpp"],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",

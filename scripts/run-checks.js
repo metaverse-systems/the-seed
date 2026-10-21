@@ -12,7 +12,7 @@ const { spawnSync } = require("child_process");
 const packageRoot = path.resolve(__dirname, "..");
 const STAGES = ["typecheck", "lint", "unit", "install"];
 const DEFAULT_STAGES = ["typecheck", "lint", "unit"];
-const ADDON_PATH = path.join("native", "build", "Release", "dependency_lister.node");
+const ADDON_PATH = path.join("native", "build", "Release", "the_seed_native.node");
 const RESULTS_PATH = path.join("test-results", "jest.json");
 
 function localBin(...parts) {

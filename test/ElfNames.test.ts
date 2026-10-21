@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { readElfNames } from "../src/ElfNames";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
 import { elfImage, ElfImageOptions } from "./helpers/ElfImage";
@@ -116,7 +117,7 @@ describe("readElfNames", () => {
       expect(names?.soname).toBeNull();
       // With an empty search path the addon reports each needed name as a bare key.
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const addon = require("../native/build/Release/dependency_lister.node") as {
+      const addon = require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH)) as {
         listDependencies(binaryPaths: string[], searchPaths: string[]): { dependencies: Record<string, string[]> };
       };
       const keys = Object.keys(addon.listDependencies([program], []).dependencies).sort();

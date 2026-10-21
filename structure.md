@@ -23,6 +23,8 @@ The README describes the tool for its users, including the configuration file an
 
 ## Native addon (`native/src/addon.cpp`)
 
+The addon is built to `native/build/Release/the_seed_native.node`.
+
 Resource pak reading export:
 
 | Export | Purpose |
@@ -36,16 +38,14 @@ Mach-O code signing exports:
 | `machoPrepareSignature(filePath, identity, cmsCapacity)` | Build the finished layout in memory and return the CodeDirectory and its hash per slice; the file is not written |
 | `machoCompleteSignature(filePath, prepared, cmsSignatures)` | Write the signature, one CMS buffer per slice, and replace the file once |
 | `machoStripSignature(filePath)` | Remove the code signature of every slice |
-| `machoBuildSuperBlob` | Format a SuperBlob only (not a signing step) |
 | `machoExtractSignature`, `machoHasEmbeddedSignature` | Read; `machoHasEmbeddedSignature` is true for a universal file only when every slice is signed |
 | `machoListSlices(filePath)` | The slice table, one entry per slice (one for a thin file): `cpuType`, `cpuSubtype`, `offset`, `size`, `isSigned`, `signatureOffset` (relative to the slice), `signatureSize`, `supported` and `unsupportedReason`; `verify` uses it, and throws the library's text for a file that is not a readable Mach-O program |
-| `machoComputeCodeDirectory`, `machoEmbedSignature` | Removed in libthe-seed 0.6.0; always throw an error that names the replacement |
 
 Windows installer exports:
 
 | Export | Purpose |
 |---|---|
-| `msiIsMsi`, `msiComputeDigest`, `msiExtractSignature`, `msiHasEmbeddedSignature` | Detect, fingerprint and read |
+| `msiComputeDigest`, `msiExtractSignature`, `msiHasEmbeddedSignature` | Fingerprint and read |
 | `msiEmbedSignature(filePath, pkcs7Der, requireMatchingDigest?)` | Write the signature; with the flag set (default false) a blob whose fingerprint differs from the package's is refused and the file is unchanged. A non-boolean flag is a `TypeError` |
 | `msiCheckSignature(filePath)` | Read back: `{ state: "none" \| "matches" \| "mismatch" \| "unreadable", storedDigest, computedDigest, detail }` |
 | `msiStripSignature(filePath)` | Remove the signature; true when something was removed |
@@ -76,7 +76,7 @@ Windows installer exports:
 
 * `native/build.js` builds the native component (`npm run build-addon`, and the package's `install` script with `--install`): it reads the configured prefix, checks the prerequisites, runs node-gyp and prints a report; a failed build does not fail an installation.
 * `native/pkg-config.js` holds what `native/build.js` and the install check share: finding the prefix the way the tool does, the pkg-config search setting (prefix first, then the caller's `PKG_CONFIG_PATH`) and the libthe-seed version `native/binding.gyp` requires.
-* `src/NativeComponent.ts` is the one place the native component is loaded: `loadNativeComponent`, `requireNativeComponent`, `NativeComponentMissingError` and the message that names the step.
+* `src/NativeComponent.ts` is the one place the native component (`native/build/Release/the_seed_native.node`, exported as `NATIVE_COMPONENT_PATH`) is loaded: `loadNativeComponent`, `requireNativeComponent`, `NativeComponentMissingError` and the message that names the step.
 * `test/helpers/NativeAbsent.ts` makes the component absent, or present but not loading, inside one test, without touching the built files.
 * `test/NativeComponent.test.ts`, `test/NativeBuild.test.ts` and `test/PackageContents.test.ts` check the loader and its message, the build script (with injected probes and runner, never a real node-gyp build) and the files the published package contains.
 * `test/InstallPhase.test.ts` checks the install phase when signing is not possible.

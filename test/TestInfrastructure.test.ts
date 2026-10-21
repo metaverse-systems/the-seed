@@ -2,6 +2,7 @@ import fs from "fs";
 import crypto from "crypto";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { spawnSync } from "child_process";
 import * as runChecks from "../scripts/run-checks";
 import { KnownGapEntry, runKnownGap, itKnownGap, staleMessage } from "./helpers/KnownGap";
@@ -1123,7 +1124,7 @@ describe("native absence helper", () => {
   });
 
   function loadComponent(): unknown {
-    return require("../native/build/Release/dependency_lister.node");
+    return require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH));
   }
 
   function thrownBy(action: () => unknown): NodeJS.ErrnoException {
@@ -1147,7 +1148,7 @@ describe("native absence helper", () => {
   });
 
   it("names the component path the source modules resolve", () => {
-    expect(nativeComponentPath).toBe(rel("native", "build", "Release", "dependency_lister.node"));
+    expect(nativeComponentPath).toBe(rel(NATIVE_COMPONENT_PATH));
   });
 
   it("throws MODULE_NOT_FOUND for the component in absent mode", () => {
@@ -1187,7 +1188,7 @@ describe("native absence helper", () => {
       expect(real).toBeTruthy();
     } else {
       expect(failure.message).not.toBe("libthe-seed.so.1: cannot open shared object file: No such file or directory");
-      expect(failure.message).toContain("dependency_lister.node");
+      expect(failure.message).toContain(path.basename(NATIVE_COMPONENT_PATH));
     }
   });
 

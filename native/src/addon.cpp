@@ -166,7 +166,7 @@ Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
     result.Set("subFormat", env.Null());
     return result;
 
-  } catch (const std::exception& e) {
+  } catch (const std::exception&) {
     result.Set("format", Napi::String::New(env, "other"));
     result.Set("subFormat", env.Null());
     return result;
@@ -451,48 +451,6 @@ Napi::Value MachOStripSignature(const Napi::CallbackInfo& info) {
   }
 }
 
-// Removed in libthe-seed 0.6.0: the CodeDirectory must be computed after the
-// file reaches its final layout, so these two calls never run.
-static Napi::Value ThrowRemoved(const Napi::CallbackInfo& info, const char* name) {
-  Napi::Env env = info.Env();
-  Napi::Error::New(env, std::string(name) +
-                            " was removed in libthe-seed 0.6.0: use machoPrepareSignature and machoCompleteSignature")
-      .ThrowAsJavaScriptException();
-  return env.Null();
-}
-
-Napi::Value MachOComputeCodeDirectory(const Napi::CallbackInfo& info) {
-  return ThrowRemoved(info, "machoComputeCodeDirectory");
-}
-
-Napi::Value MachOBuildSuperBlob(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 2 || !info[0].IsBuffer() || !info[1].IsBuffer()) {
-    Napi::TypeError::New(env, "Expected (codeDirectory: Buffer, cmsSignature: Buffer)")
-        .ThrowAsJavaScriptException();
-    return env.Null();
-  }
-
-  Napi::Buffer<uint8_t> cdBuf = info[0].As<Napi::Buffer<uint8_t>>();
-  Napi::Buffer<uint8_t> cmsBuf = info[1].As<Napi::Buffer<uint8_t>>();
-
-  std::vector<uint8_t> codeDirectory(cdBuf.Data(), cdBuf.Data() + cdBuf.Length());
-  std::vector<uint8_t> cmsSignature(cmsBuf.Data(), cmsBuf.Data() + cmsBuf.Length());
-
-  try {
-    auto result = the_seed::MachOSigner::BuildSuperBlob(codeDirectory, cmsSignature);
-    return Napi::Buffer<uint8_t>::Copy(env, result.data(), result.size());
-  } catch (const std::exception& e) {
-    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
-    return env.Null();
-  }
-}
-
-Napi::Value MachOEmbedSignature(const Napi::CallbackInfo& info) {
-  return ThrowRemoved(info, "machoEmbedSignature");
-}
-
 Napi::Value MachOExtractSignature(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 
@@ -571,25 +529,6 @@ Napi::Value MachOListSlices(const Napi::CallbackInfo& info) {
 }
 
 // ── MSI Signing Operations ──────────────────────────────────
-
-Napi::Value MsiIsMsi(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-
-  if (info.Length() < 1 || !info[0].IsString()) {
-    Napi::TypeError::New(env, "Expected one string argument: filePath")
-        .ThrowAsJavaScriptException();
-    return env.Null();
-  }
-
-  std::string filePath = info[0].As<Napi::String>().Utf8Value();
-
-  try {
-    return Napi::Boolean::New(env, the_seed::MsiSigner::IsMsi(filePath));
-  } catch (const std::exception& e) {
-    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
-    return env.Null();
-  }
-}
 
 Napi::Value MsiComputeDigest(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -793,15 +732,11 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("machoPrepareSignature", Napi::Function::New(env, MachOPrepareSignature));
   exports.Set("machoCompleteSignature", Napi::Function::New(env, MachOCompleteSignature));
   exports.Set("machoStripSignature", Napi::Function::New(env, MachOStripSignature));
-  exports.Set("machoComputeCodeDirectory", Napi::Function::New(env, MachOComputeCodeDirectory));
-  exports.Set("machoBuildSuperBlob", Napi::Function::New(env, MachOBuildSuperBlob));
-  exports.Set("machoEmbedSignature", Napi::Function::New(env, MachOEmbedSignature));
   exports.Set("machoExtractSignature", Napi::Function::New(env, MachOExtractSignature));
   exports.Set("machoHasEmbeddedSignature", Napi::Function::New(env, MachOHasEmbeddedSignature));
   exports.Set("machoListSlices", Napi::Function::New(env, MachOListSlices));
 
   // MSI signing operations
-  exports.Set("msiIsMsi", Napi::Function::New(env, MsiIsMsi));
   exports.Set("msiComputeDigest", Napi::Function::New(env, MsiComputeDigest));
   exports.Set("msiEmbedSignature", Napi::Function::New(env, MsiEmbedSignature));
   exports.Set("msiCheckSignature", Napi::Function::New(env, MsiCheckSignature));
@@ -812,4 +747,4 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   return exports;
 }
 
-NODE_API_MODULE(dependency_lister, Init)
+NODE_API_MODULE(the_seed_native, Init)

@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import crypto from "crypto";
 import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
@@ -57,7 +58,7 @@ function haveOpensslTool(): boolean {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-const addon = require("../native/build/Release/dependency_lister.node") as Record<string, (...args: unknown[]) => unknown>;
+const addon = require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH)) as Record<string, (...args: unknown[]) => unknown>;
 
 function haveTool(): boolean {
   return optionalExternalCheck("signature-interop-osslsigncode", haveOsslsigncode(), "osslsigncode not found");

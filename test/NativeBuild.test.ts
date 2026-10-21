@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { spawnSync } from "child_process";
 import { requiredLibTheSeedVersion } from "../src/Dependencies";
 import { librarySearchEnv } from "../src/LibrarySearch";
@@ -632,7 +633,7 @@ describe("native/build.js run", () => {
       openTerminal: () => null,
       runner: () => {
         fs.mkdirSync(path.join(nativeDirCopy, "build", "Release"), { recursive: true });
-        fs.writeFileSync(path.join(nativeDirCopy, "build", "Release", "dependency_lister.node"), "built");
+        fs.writeFileSync(path.join(nativeDirCopy, "build", "Release", path.basename(NATIVE_COMPONENT_PATH)), "built");
         return { status: 0, output: "ok" };
       }
     });

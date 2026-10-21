@@ -48,13 +48,13 @@ jest.mock("child_process", () => ({
 }));
 
 // Mock the native addon used by Package
-jest.mock("../native/build/Release/dependency_lister.node", () => ({
+jest.mock("../native/build/Release/the_seed_native.node", () => ({
   listDependencies: jest.fn()
 }), { virtual: true });
 
 const mockedExecFileSync = execFileSync as jest.MockedFunction<typeof execFileSync>;
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-const mockedListDependencies = require("../native/build/Release/dependency_lister.node").listDependencies as jest.Mock;
+const mockedListDependencies = require("../native/build/Release/the_seed_native.node").listDependencies as jest.Mock;
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "installer-test-"));

@@ -3,6 +3,9 @@ import path from "path";
 /** The command that builds the native component. */
 export const NATIVE_COMPONENT_STEP = "npm run build-addon";
 
+/** The native component's file, relative to the package directory. */
+export const NATIVE_COMPONENT_PATH = path.join("native", "build", "Release", "the_seed_native.node");
+
 /** Absolute path of the package directory (the directory holding package.json and native/). */
 export function packageRoot(): string {
   return path.resolve(__dirname, "..");
@@ -57,7 +60,7 @@ export function loadNativeComponent<T = unknown>(): T {
   }
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native component has no type declarations and is loaded on first use
-    cachedComponent = require("../native/build/Release/dependency_lister.node");
+    cachedComponent = require(path.join(packageRoot(), NATIVE_COMPONENT_PATH));
     return cachedComponent as T;
   } catch (error) {
     const failure = error as NodeJS.ErrnoException;
