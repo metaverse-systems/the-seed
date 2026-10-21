@@ -112,11 +112,12 @@ class ResourcePak {
    * @param name Name the resource is stored under (non-empty, well-formed text)
    * @param filename The file, relative to the project or absolute; it must be a regular file inside the project
    * @param packageDir The project directory
-   * @param options `force` replaces an existing resource of the same name where it stands
+   * @param options `force` replaces an existing resource of the same name where it stands; `attributes` are
+   * recorded in the order given (none gives no `attributes` key)
    * @returns The entry that was recorded
    * @throws ProjectError when the project, the name or the file is unusable, or the name exists without `force`
    */
-  addResource = (name: string, filename: string, packageDir: string, options: { force?: boolean } = {}): ResourceType => {
+  addResource = (name: string, filename: string, packageDir: string, options: { force?: boolean; attributes?: Array<[string, string]> } = {}): ResourceType => {
     const dir = path.resolve(packageDir);
     const project = this.readProject(dir);
 
@@ -157,6 +158,9 @@ class ResourcePak {
       filename: path.relative(dir, file).split(path.sep).join("/"),
       size: stats.size
     };
+    if (options.attributes && options.attributes.length > 0) {
+      entry.attributes = Object.fromEntries(options.attributes);
+    }
     if (index >= 0) {
       resources[index] = entry;
     } else {

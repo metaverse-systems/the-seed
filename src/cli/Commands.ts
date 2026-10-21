@@ -38,6 +38,18 @@ const scopeOption = (help: string): OptionSpec => ({
   help,
 });
 
+/** `<key>=<value>`: split at the first "=", so the value may hold more of them or be empty. */
+const attribute: ValueParser = (raw, label) => {
+  const equals = raw.indexOf("=");
+  if (equals === -1) {
+    return { ok: false, message: `Invalid value "${raw}" for ${label}; expected <key>=<value>, such as type=audio.`, argument: label };
+  }
+  if (equals === 0) {
+    return { ok: false, message: `Invalid value "${raw}" for ${label}; the key before "=" cannot be empty.`, argument: label };
+  }
+  return { ok: true, value: [raw.slice(0, equals), raw.slice(equals + 1)] };
+};
+
 const forceOption = (help: string): OptionSpec => ({ name: "--force", help });
 
 const pathArgument = (name: string, help: string, required = true): PositionalSpec => ({
@@ -286,10 +298,30 @@ export const COMMANDS: CommandSpec[] = [
           { name: "resource-name", help: "Name the resource is stored under", required: true, parse: nonEmpty },
           pathArgument("filename", "The file to add"),
         ],
-        options: [forceOption("Replace a resource of the same name")],
+        options: [
+          {
+            name: "--attribute",
+            // The help wraps the placeholder in angle brackets, giving "<key>=<value>".
+            value: { placeholder: "key>=<value", parse: attribute },
+            repeatable: true,
+            help: "Record an attribute on the resource; give it once per attribute",
+          },
+          forceOption("Replace a resource of the same name"),
+        ],
       }),
       sub({ name: "build", summary: "Build the resource pak", handler: "resource-pak.build" }),
     ],
+    validate: (parsed) => {
+      const given = (parsed.options.attribute as Array<[string, string]> | undefined) ?? [];
+      const seen = new Set<string>();
+      for (const [key] of given) {
+        if (seen.has(key)) {
+          return { argument: "--attribute", message: `--attribute "${key}" is given twice; give each key once.` };
+        }
+        seen.add(key);
+      }
+      return null;
+    },
   },
   {
     name: "signing",

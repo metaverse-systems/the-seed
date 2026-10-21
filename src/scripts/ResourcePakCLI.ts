@@ -33,7 +33,10 @@ const ResourcePakCLI = async (parsed: ParsedCommand, context: CliContext): Promi
         parsed.positionals["resource-name"] as string,
         parsed.positionals.filename as string,
         context.cwd,
-        { force: parsed.options.force === true }
+        {
+          force: parsed.options.force === true,
+          attributes: parsed.options.attribute as Array<[string, string]> | undefined
+        }
       );
       const pak = rp.readProject(context.cwd).name;
       console.log(`Added ${entry.name} (${entry.filename}, ${entry.size} bytes) to ${pak}`);

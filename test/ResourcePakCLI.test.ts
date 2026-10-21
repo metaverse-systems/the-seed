@@ -17,6 +17,11 @@
  *   path as recorded in the description and `<n>` the file's size, and nothing on standard error. A refusal is
  *   one `Error:` line followed by the hint line when there is one, and nothing on standard output. `add` acts
  *   on the working directory; a file is named relative to it.
+ * - `add --attribute <key>=<value>` (repeatable) records the attributes as an object in the order given, on the
+ *   entry in `package.json`; the success line is the same as without them. A malformed or repeated attribute is a
+ *   usage error: status 3, nothing on standard output and exactly three lines on standard error (`Error: <message>`,
+ *   the usage line of `add`, the help hint), given before the project or the file is read, so the working
+ *   directory is unchanged. The messages are those of contracts/resource-pak.md.
  * - The three cases of an invalid project directory that used to be in the exit status tests are
  *   kept here with their assertions unchanged.
  */
@@ -427,6 +432,81 @@ describe("resource-pak add", () => {
       { name: "theme", filename: "other.ogg", size: 10 },
       { name: "last", filename: "a.txt", size: 1 },
     ]);
+  });
+
+  it("--attribute records the attributes in the order given, an = in a value and an empty value included", async () => {
+    const env = await projectWith({ "music/theme.ogg": "ogg data" });
+
+    const run = await add(env, "theme", "music/theme.ogg",
+      "--attribute", "type=audio", "--attribute", "expr=a=b", "--attribute", "note=");
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(run.stdout).toBe("Added theme (music/theme.ogg, 8 bytes) to @t/sounds\n");
+    const recorded = JSON.parse(description(env)).resources;
+    expect(recorded).toEqual([
+      { name: "theme", filename: "music/theme.ogg", size: 8, attributes: { type: "audio", expr: "a=b", note: "" } },
+    ]);
+    expect(Object.keys(recorded[0].attributes)).toEqual(["type", "expr", "note"]);
+  });
+
+  it("--attribute=key=value is accepted and an entry without attributes has none", async () => {
+    const env = await projectWith({ "a.ogg": "a", "b.ogg": "b" });
+
+    expect((await add(env, "one", "a.ogg", "--attribute=type=audio")).status).toBe(0);
+    expect((await add(env, "two", "b.ogg")).status).toBe(0);
+
+    const recorded = JSON.parse(description(env)).resources;
+    expect(recorded[0].attributes).toEqual({ type: "audio" });
+    expect(recorded[1]).not.toHaveProperty("attributes");
+  });
+
+  it("--force with --attribute replaces the entry and its attributes", async () => {
+    const env = await projectWith({ "a.ogg": "a", "b.ogg": "bb" });
+    await add(env, "theme", "a.ogg", "--attribute", "type=audio", "--attribute", "loop=true");
+
+    const run = await add(env, "theme", "b.ogg", "--force", "--attribute", "volume=3");
+
+    expect(run.status).toBe(0);
+    expect(JSON.parse(description(env)).resources).toEqual([
+      { name: "theme", filename: "b.ogg", size: 2, attributes: { volume: "3" } },
+    ]);
+  });
+
+  describe("a refused --attribute is a usage error before anything is read", () => {
+    const usageLine =
+      "Usage: the-seed resource-pak add <resource-name> <filename> [--attribute <key>=<value>]... [--force]";
+    const hintLine = "Run \"the-seed help resource-pak add\" for details.";
+
+    it.each([
+      [["--attribute", "loop"], "Invalid value \"loop\" for --attribute; expected <key>=<value>, such as type=audio."],
+      [["--attribute", "=x"], "Invalid value \"=x\" for --attribute; the key before \"=\" cannot be empty."],
+      [["--attribute", "loop=1", "--attribute", "loop=2"], "--attribute \"loop\" is given twice; give each key once."],
+      [["--attribute", "a=1", "--attribute", "b=2", "--attribute=a="], "--attribute \"a\" is given twice; give each key once."],
+    ])("%j", async (words, message) => {
+      const env = await projectWith({ "music/theme.ogg": "ogg data" });
+      const before = description(env);
+      const tree = snapshotTree(env.cwd);
+
+      const run = await add(env, "theme", "music/theme.ogg", ...words);
+
+      expect(run.status).toBe(3);
+      expect(run.stdout).toBe("");
+      expect(run.stderr).toBe(`Error: ${message}\n${usageLine}\n${hintLine}\n`);
+      expect(description(env)).toBe(before);
+      expect(snapshotTree(env.cwd)).toEqual(tree);
+    });
+
+    it("is given before the project is looked at: outside a pak project it is still 3", async () => {
+      const env = makeEnv({ "@t": author });
+      const tree = snapshotTree(env.cwd);
+
+      const run = await exec(["resource-pak", "add", "theme", "missing.ogg", "--attribute", "loop"], env);
+
+      expect(run.status).toBe(3);
+      expect(run.stderr.split("\n").filter((line) => line !== "")).toHaveLength(3);
+      expect(snapshotTree(env.cwd)).toEqual(tree);
+    });
   });
 
   it("a missing file is 2 naming the file, package.json unchanged", async () => {

@@ -748,7 +748,7 @@ Create a resource pak project, add resources to it and build it.
 Subcommands:
   create [<scope>/<name>]
       Create a resource pak project in the current directory
-  add <resource-name> <filename> [--force]
+  add <resource-name> <filename> [--attribute <key>=<value>]... [--force]
       Add a file to the resource pak project
   build
       Build the resource pak
@@ -767,7 +767,7 @@ Run "the-seed help resource-pak <subcommand>" for one subcommand's details.
 
 This creates a project directory at `<prefix>/projects/<scope>/<name>/` (not in the current directory) with a `package.json` containing a `resources` array.
 
-`the-seed resource-pak add <resource-name> <filename>` reads `package.json` from the current directory and adds a resource entry with `name`, `filename`, and `size`. If a resource with the same name already exists, it is skipped.
+`the-seed resource-pak add <resource-name> <filename>` reads `package.json` from the current directory and adds a resource entry with `name`, `filename`, and `size`. If a resource with the same name already exists, it is skipped. Give `--attribute <key>=<value>` once per attribute to record it on the resource, in the order given.
 
 `the-seed resource-pak build` reads `package.json` from the current directory and produces a `.pak` file. The file format consists of a JSON header (containing the name, a zero-padded 10-digit header size, and resource metadata) followed by a newline and the concatenated raw resource bytes. `add` and `build` outside a resource pak project (no readable `package.json`) stop with status 2.
 

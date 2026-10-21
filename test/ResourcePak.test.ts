@@ -26,6 +26,10 @@
  *   (status 1); an empty name or one with an unpaired surrogate is refused with a ProjectError of status 2
  *   (the contracts name no code or message for it). The removed members `packageDir`, `package` and `save`
  *   are checked as absent from the object's own keys, so the check holds for fields and for arrow members.
+ * - `addResource`'s options also take `attributes: Array<[string, string]>` (key and value pairs in the order
+ *   given); the entry it returns and the description then hold `attributes` as an object whose keys are in that
+ *   order, and without attributes there is no `attributes` key at all. The tests pass the option through the same
+ *   cast, so this file compiles while the option does not exist yet.
  * - The message for a resource name that is not valid Unicode is matched with any index, `Resource <n> has ...`.
  * - Cases that create a project run with `HOME` set to a scratch directory, so that a program
  *   started on the way (the package manager) would leave its traces there, where they are looked for.
@@ -91,7 +95,7 @@ describe("ResourcePak", () => {
     return caught as ProjectErrorShape;
   };
 
-  const readDescription = (dir: string): { resources?: Array<{ name: string; filename: string; size: number }> } & Record<string, unknown> =>
+  const readDescription = (dir: string): { resources?: Array<{ name: string; filename: string; size: number; attributes?: Record<string, string> }> } & Record<string, unknown> =>
     JSON.parse(fs.readFileSync(path.join(dir, "package.json")).toString());
 
   beforeEach(() => {
@@ -250,8 +254,9 @@ describe("ResourcePak", () => {
 
   describe("addResource", () => {
     type Entry = { name: string; filename: string; size: number; attributes?: Record<string, string> };
-    type AddResource = (name: string, filename: string, packageDir: string, options?: { force?: boolean }) => Entry;
-    const add = (name: string, filename: string, dir: string, options?: { force?: boolean }): Entry =>
+    type AddOptions = { force?: boolean; attributes?: Array<[string, string]> };
+    type AddResource = (name: string, filename: string, packageDir: string, options?: AddOptions) => Entry;
+    const add = (name: string, filename: string, dir: string, options?: AddOptions): Entry =>
       (rp.addResource as unknown as AddResource)(name, filename, dir, options);
     const descriptionText = (dir: string): string => fs.readFileSync(path.join(dir, "package.json"), "utf-8");
     const tmpFiles = (dir: string): string[] => fs.readdirSync(dir).filter((entry) => entry.endsWith(".tmp"));
@@ -345,6 +350,76 @@ describe("ResourcePak", () => {
       add("new", "b.txt", dir, { force: true });
 
       expect((readDescription(dir).resources ?? []).map((entry) => entry.name)).toEqual(["theme", "new"]);
+    });
+
+    it("records the attributes in the order given", () => {
+      const dir = createPak("my-pak");
+      fs.writeFileSync(path.join(dir, "a.ogg"), "ogg");
+
+      const entry = add("theme", "a.ogg", dir, { attributes: [["type", "audio"], ["loop", "true"]] });
+
+      expect(entry).toEqual({ name: "theme", filename: "a.ogg", size: 3, attributes: { type: "audio", loop: "true" } });
+      const recorded = readDescription(dir).resources ?? [];
+      expect(recorded).toEqual([entry]);
+      expect(Object.keys(recorded[0].attributes ?? {})).toEqual(["type", "loop"]);
+      expect(descriptionText(dir)).toContain("\"attributes\": {\n        \"type\": \"audio\",\n        \"loop\": \"true\"\n      }");
+    });
+
+    it("keeps an empty value and a value containing = as given", () => {
+      const dir = createPak("my-pak");
+      fs.writeFileSync(path.join(dir, "a.ogg"), "ogg");
+
+      const entry = add("theme", "a.ogg", dir, { attributes: [["expr", "a=b"], ["note", ""]] });
+
+      expect(entry.attributes).toEqual({ expr: "a=b", note: "" });
+      expect((readDescription(dir).resources ?? [])[0].attributes).toEqual({ expr: "a=b", note: "" });
+    });
+
+    it("records no attributes key when none are given", () => {
+      const dir = createPak("my-pak");
+      fs.writeFileSync(path.join(dir, "a.ogg"), "ogg");
+
+      const without = add("one", "a.ogg", dir);
+      const empty = add("two", "a.ogg", dir, { attributes: [] });
+
+      expect(Object.keys(without)).not.toContain("attributes");
+      expect(Object.keys(empty)).not.toContain("attributes");
+      for (const recorded of readDescription(dir).resources ?? []) {
+        expect(Object.keys(recorded)).toEqual(["name", "filename", "size"]);
+      }
+    });
+
+    it("with force replaces the attributes by the new ones", () => {
+      const dir = createPak("my-pak");
+      fs.writeFileSync(path.join(dir, "a.ogg"), "ogg");
+      add("theme", "a.ogg", dir, { attributes: [["type", "audio"], ["loop", "true"]] });
+
+      const entry = add("theme", "a.ogg", dir, { force: true, attributes: [["volume", "3"]] });
+
+      expect(entry.attributes).toEqual({ volume: "3" });
+      expect((readDescription(dir).resources ?? []).map((recorded) => recorded.attributes)).toEqual([{ volume: "3" }]);
+    });
+
+    it("a refused duplicate with attributes leaves the description byte-identical", () => {
+      const dir = withTheme();
+      fs.writeFileSync(path.join(dir, "other.ogg"), "other");
+
+      const error = expectRefused(dir, () => add("theme", "other.ogg", dir, { attributes: [["a", "1"]] }), 1);
+
+      expect(error.code).toBe("duplicate-resource");
+    });
+
+    it("a built pak's description carries the attributes after size (guard of the layout)", () => {
+      const dir = createPak("attr-pak");
+      fs.writeFileSync(path.join(dir, "a.ogg"), "ogg");
+      add("theme", "a.ogg", dir, { attributes: [["type", "audio"], ["loop", "true"]] });
+
+      const pak = (rp.build as unknown as (dir: string) => string)(dir);
+
+      const bytes = fs.readFileSync(pak);
+      const line = bytes.subarray(0, bytes.indexOf(0x0a)).toString("utf8");
+      expect(line).toContain("\"resources\":[{\"name\":\"theme\",\"size\":3,\"attributes\":{\"type\":\"audio\",\"loop\":\"true\"}}]");
+      expect(bytes.subarray(bytes.indexOf(0x0a) + 1).toString()).toBe("ogg");
     });
 
     it("accepts names that differ only in case or in Unicode composition (guard)", () => {

@@ -222,6 +222,24 @@ describe("resource-pak add help", () => {
     const entry = options.find((candidate) => candidate.head.startsWith("--force"));
     expect(entry?.text).toContain("Replace a resource of the same name");
   });
+
+  it("has the usage line with --attribute and --force", () => {
+    expect(renderSubcommandHelp(command, add).split("\n")[0]).toBe(
+      "Usage: the-seed resource-pak add <resource-name> <filename> [--attribute <key>=<value>]... [--force]");
+  });
+
+  it("lists --attribute <key>=<value> with its description", () => {
+    const options = section(renderSubcommandHelp(command, add), "Options") ?? [];
+    const entry = options.find((candidate) => candidate.head.startsWith("--attribute"));
+    expect(entry?.head).toContain("--attribute <key>=<value>");
+    expect(entry?.text).toContain("Record an attribute on the resource; give it once per attribute");
+  });
+
+  it("lists add with --attribute and --force in the help of the command", () => {
+    const entries = section(renderCommandHelp(command), "Subcommands") ?? [];
+    const entry = entries.find((candidate) => candidate.head.startsWith("add"));
+    expect(entry?.text).toContain("add <resource-name> <filename> [--attribute <key>=<value>]... [--force]");
+  });
 });
 
 describe("every help text", () => {

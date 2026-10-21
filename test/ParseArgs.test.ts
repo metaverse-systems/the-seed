@@ -26,6 +26,10 @@
  *   `name` holding `{ scope, name }` with the scope normalised to start with "@".
  * - `parsed.warnings` is always present: an array of one-line warnings about the command line
  *   (the deprecated bare word `recursive` gives exactly one, mentioning `"recursive"`).
+ * - `resource-pak add` has the repeatable value option `--attribute <key>=<value>`; its parsed value is an
+ *   array of `[key, value]` pairs in command-line order (`parsed.options.attribute`), and the option is absent
+ *   when not given. Its parser and the rule against a repeated key are part of the registry, so a refusal is a
+ *   usage error (status 3) from `parseCommandLine` itself, before any file or configuration is read.
  * - A value given as a separate word never starts with "-" (such a word is not taken as the value
  *   and the option "needs a value"), so negative numbers are written `--name=-5` here.
  * - While reading the incremental form of `build` (first word starts with "-"), any option other
@@ -124,6 +128,8 @@ function sampleValue(option: OptionSpec): string {
       return "2";
     case "--scope":
       return "@a";
+    case "--attribute":
+      return "type=audio";
     default:
       return "file.pem";
   }
@@ -382,10 +388,13 @@ describe("parseCommandLine", () => {
       expect(options(inline)[key(option)]).toBeDefined();
       expect(options(inline)[key(option)]).toEqual(options(expectRun(once))[key(option)]);
 
-      const twice = parseCommandLine([...form.words, ...base, option.name, value, option.name, value]);
+      // A repeated --attribute key is refused (see the --attribute cases), so the second value has another key.
+      const second = option.name === "--attribute" ? "other=audio" : value;
+      const twice = parseCommandLine([...form.words, ...base, option.name, value, option.name, second]);
       if (option.repeatable) {
         const single = options(expectRun(once))[key(option)] as unknown[];
-        expect(options(expectRun(twice))[key(option)]).toEqual([...single, ...single]);
+        const other = option.name === "--attribute" ? [["other", "audio"]] : single;
+        expect(options(expectRun(twice))[key(option)]).toEqual([...single, ...other]);
       } else {
         expect(expectUsage(twice).message).toBe(`${option.name} was given more than once.`);
         const mixed = parseCommandLine([...form.words, ...base, option.name, value, `${option.name}=${value}`]);
@@ -425,13 +434,13 @@ describe("parseCommandLine", () => {
       expect(positionals(parsed).path).toBe("x");
     });
 
-    it("has --cert of `signing verify` as the only repeatable value option", () => {
+    it("has --cert of `signing verify` and --attribute of `resource-pak add` as the only repeatable value options", () => {
       const repeatable = FORMS.flatMap((form) =>
         form.sub.options
           .filter((option) => option.value && option.repeatable)
           .map((option) => `${form.label} ${option.name}`)
       );
-      expect(repeatable).toEqual(["signing verify --cert"]);
+      expect(repeatable.sort()).toEqual(["resource-pak add --attribute", "signing verify --cert"]);
     });
   });
 
@@ -647,6 +656,109 @@ describe("parseCommandLine", () => {
     it.each([["resource-pak", "build"], ["resource-pak", "create"], ["template"]])("is not an option of %s", (...words) => {
       const error = expectUsage(parse(...words, "--force"));
       expect(error.message).toContain("--force");
+    });
+  });
+
+  describe("resource-pak add --attribute", () => {
+    const addWords = ["resource-pak", "add", "theme", "a.ogg"];
+    const attributes = (...words: string[]): unknown => options(expectRun(parse(...addWords, ...words))).attribute;
+    const usage = (...words: string[]): UsageError => expectUsage(parse(...addWords, ...words));
+
+    it("is a repeatable value option of resource-pak add only", () => {
+      const withAttribute = FORMS.filter((form) => form.sub.options.some((option) => option.name === "--attribute"));
+      expect(withAttribute.map((form) => form.label)).toEqual(["resource-pak add"]);
+      const option = withAttribute[0].sub.options.find((candidate) => candidate.name === "--attribute") as OptionSpec;
+      expect(option.value).toBeDefined();
+      expect(option.repeatable).toBe(true);
+      expect(option.required).toBeFalsy();
+    });
+
+    it("is absent when not given", () => {
+      expect(options(expectRun(parse(...addWords)))).not.toHaveProperty("attribute");
+    });
+
+    it("gives [key, value] for `--attribute type=audio` and for `--attribute=type=audio`", () => {
+      expect(attributes("--attribute", "type=audio")).toEqual([["type", "audio"]]);
+      expect(attributes("--attribute=type=audio")).toEqual([["type", "audio"]]);
+    });
+
+    it("splits at the first =", () => {
+      expect(attributes("--attribute", "expr=a=b")).toEqual([["expr", "a=b"]]);
+      expect(attributes("--attribute=expr==")).toEqual([["expr", "="]]);
+    });
+
+    it("accepts an empty value", () => {
+      expect(attributes("--attribute", "key=")).toEqual([["key", ""]]);
+      expect(attributes("--attribute=key=")).toEqual([["key", ""]]);
+    });
+
+    it("keeps several in the order given, wherever the option stands", () => {
+      expect(attributes("--attribute", "b=2", "--attribute", "a=1", "--attribute=c=3"))
+        .toEqual([["b", "2"], ["a", "1"], ["c", "3"]]);
+      const before = options(expectRun(parse("resource-pak", "add", "--attribute", "a=1", "theme", "--force", "a.ogg")));
+      expect(before.attribute).toEqual([["a", "1"]]);
+      expect(before).toHaveProperty("force", true);
+    });
+
+    it("accepts keys and values with spaces and non-ASCII characters", () => {
+      expect(attributes("--attribute", "the key=a value é")).toEqual([["the key", "a value é"]]);
+    });
+
+    it("refuses a value without = naming the form it expects", () => {
+      const error = usage("--attribute", "loop");
+      expect(error.message).toBe("Invalid value \"loop\" for --attribute; expected <key>=<value>, such as type=audio.");
+      expect(error.argument).toBe("--attribute");
+      expect(error.command).toBe("resource-pak");
+      expect(error.subcommand).toBe("add");
+    });
+
+    it("refuses an empty key", () => {
+      expect(usage("--attribute", "=x").message)
+        .toBe("Invalid value \"=x\" for --attribute; the key before \"=\" cannot be empty.");
+      expect(usage("--attribute==x").message)
+        .toBe("Invalid value \"=x\" for --attribute; the key before \"=\" cannot be empty.");
+    });
+
+    it("refuses a key given twice, with the same or another value", () => {
+      const message = "--attribute \"a\" is given twice; give each key once.";
+      expect(usage("--attribute", "a=1", "--attribute", "a=2").message).toBe(message);
+      expect(usage("--attribute", "a=1", "--attribute=a=1").message).toBe(message);
+      expect(usage("--attribute", "a=1", "--attribute", "b=2", "--attribute", "a=").message).toBe(message);
+    });
+
+    it("treats keys that differ only in case as different", () => {
+      expect(attributes("--attribute", "a=1", "--attribute", "A=2")).toEqual([["a", "1"], ["A", "2"]]);
+    });
+
+    it("refuses the option without a value", () => {
+      expect(usage("--attribute").message).toBe("--attribute needs a value.");
+      expect(usage("--attribute", "--force").message).toBe("--attribute needs a value.");
+    });
+
+    it.each([["resource-pak", "build"], ["resource-pak", "create"], ["template"]])("is not an option of %s", (...words) => {
+      expect(expectUsage(parse(...words, "--attribute", "a=1")).message).toContain("--attribute");
+    });
+
+    it("is refused as a usage error without reading any file or the configuration", () => {
+      const saved = process.env.HOME;
+      const missing = "/nonexistent-home-for-parse-tests";
+      process.env.HOME = missing;
+      const reads = jest.spyOn(fs, "readFileSync");
+      const opens = jest.spyOn(fs, "openSync");
+      const stats = jest.spyOn(fs, "statSync");
+      try {
+        usage("--attribute", "loop");
+        usage("--attribute", "=x");
+        usage("--attribute", "a=1", "--attribute", "a=2");
+        attributes("--attribute", "a=1");
+        expect(reads).not.toHaveBeenCalled();
+        expect(opens).not.toHaveBeenCalled();
+        expect(stats).not.toHaveBeenCalled();
+      } finally {
+        jest.restoreAllMocks();
+        if (saved === undefined) delete process.env.HOME; else process.env.HOME = saved;
+      }
+      expect(fs.existsSync(missing)).toBe(false);
     });
   });
 

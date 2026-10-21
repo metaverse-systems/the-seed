@@ -2,7 +2,14 @@ import { UsageError } from "./ExitStatus";
 import { validateScopeName } from "../Scopes";
 
 /** The result of reading one value from the command line. */
-export type ValueResult = { ok: true; value: unknown } | { ok: false; message: string };
+export type ValueResult =
+  | { ok: true; value: unknown }
+  | {
+      ok: false;
+      message: string;
+      /** The argument the usage error names, when it is not the value itself */
+      argument?: string;
+    };
 
 /**
  * Reads one value. `label` names what the value is for in a message: an option such as "--jobs",
