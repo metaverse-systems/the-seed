@@ -343,7 +343,7 @@ ${componentRefs}
 
     // Step 1: Validate wixl is installed
     if (!this.checkWixl()) {
-      return failure(2, "Error: wixl is not installed. Install it with: sudo apt install msitools");
+      return failure(2, "Error: wixl is not installed. Install it with: sudo apt install wixl");
     }
 
     // Step 2: Read project metadata

@@ -60,7 +60,7 @@ sudo apt install mingw-w64-x86-64-dev g++-mingw-w64-x86-64 binutils-mingw-w64-x8
 To generate `.msi` installer packages from cross-compiled Windows binaries:
 
 ```bash
-sudo apt install msitools
+sudo apt install wixl
 ```
 
 ## Installation
@@ -940,7 +940,7 @@ The project must have been built with "the-seed build windows" first.
 Run "the-seed help installer <subcommand>" for one subcommand's details.
 ```
 
-**Prerequisites**: `msitools` must be installed (`sudo apt install msitools`).
+**Prerequisites**: `wixl` must be installed (`sudo apt install wixl`).
 
 **Usage**:
 

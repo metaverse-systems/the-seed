@@ -1116,7 +1116,7 @@ describe("installer metadata", () => {
         expect(() => realChildProcess.execFileSync("xmllint", ["--noout", wxsPath], { stdio: "pipe" })).not.toThrow();
       });
 
-      // wixl 0.106 (msitools) segfaults inside libmsi on text that mixes Windows-1252 letters (such as "ë") with
+      // wixl 0.106 segfaults inside libmsi on text that mixes Windows-1252 letters (such as "ë") with
       // other scripts (such as "東"). The .wxs is valid XML (the xmllint and reader cases above check it), so that
       // is a wixl defect, not the tool's. Those inputs are decided by their text, never compiled, and the cases
       // above still check them.
