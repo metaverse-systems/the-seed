@@ -3,17 +3,15 @@ import fs from "fs-extra";
 import path from "path";
 import Config from "./Config";
 import Scopes from "./Scopes";
-import { PackageAuthorType, PackageType, PakProjectType } from "./types";
+import { PackageAuthorType, PackageType, PakProjectType, ResourceType } from "./types";
 import { ProjectError } from "./ProjectError";
 import { validateProjectName } from "./ProjectName";
-import { createPakHint, editScopeHint } from "./cli/Hints";
+import { createPakHint, editScopeHint, replaceResourceHint } from "./cli/Hints";
 
 class ResourcePak {
-  packageDir = "";
   config: Config;
   scopes: Scopes;
-  package?: PackageType;
-  
+
   constructor(config: Config) {
     this.config = config;
     this.scopes = new Scopes(config);
@@ -107,36 +105,75 @@ class ResourcePak {
     }
   };
 
-  save = () => {
-    fs.writeFileSync(
-      this.packageDir + "/package.json",
-      JSON.stringify(this.package, null, 2)
-    );
-  };
+  /**
+   * Adds a file to the resource pak project in a directory as a resource.
+   * Everything is checked before anything is changed; the description is then rewritten through a temporary
+   * file, so a failure leaves it as it was.
+   * @param name Name the resource is stored under (non-empty, well-formed text)
+   * @param filename The file, relative to the project or absolute; it must be a regular file inside the project
+   * @param packageDir The project directory
+   * @param options `force` replaces an existing resource of the same name where it stands
+   * @returns The entry that was recorded
+   * @throws ProjectError when the project, the name or the file is unusable, or the name exists without `force`
+   */
+  addResource = (name: string, filename: string, packageDir: string, options: { force?: boolean } = {}): ResourceType => {
+    const dir = path.resolve(packageDir);
+    const project = this.readProject(dir);
 
-  addResource = (name: string, filename: string, packageDir?: string) => {
-    this.packageDir = packageDir ?? process.cwd();
-    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json").toString());
-    if (!this.package) {
-      return;
+    if (name === "") {
+      throw new ProjectError("not-pak-project", "The resource name cannot be empty.");
     }
-    
-    if (this.package.resources) {
-      if(this.package.resources.find((r) => r.name === name)) {
-        return;
-      }
+    if (!ResourcePak.wellFormed(name)) {
+      throw new ProjectError("not-pak-project", "The resource name is not valid Unicode text.");
+    }
+
+    const file = path.resolve(dir, filename);
+    const outside = new ProjectError("resource-file-missing",
+      `${file} is outside the resource pak project ${dir}; copy the file into the project first.`);
+    if (!ResourcePak.inside(dir, file)) throw outside;
+    let stats: fs.Stats;
+    let real: string;
+    try {
+      stats = fs.statSync(file);
+      real = fs.realpathSync(file);
+    } catch {
+      throw new ProjectError("resource-file-missing", `File not found: ${file}`);
+    }
+    if (!ResourcePak.inside(fs.realpathSync(dir), real)) throw outside;
+    if (!stats.isFile()) {
+      throw new ProjectError("resource-file-missing", `${file} is not a file.`);
+    }
+
+    const resources = project.resources;
+    const index = resources.findIndex((resource) => resource.name === name);
+    if (index >= 0 && !options.force) {
+      throw new ProjectError("duplicate-resource",
+        `Resource "${name}" already exists in ${project.name}; it refers to ${resources[index].filename}.`,
+        replaceResourceHint());
+    }
+
+    const entry: ResourceType = {
+      name,
+      filename: path.relative(dir, file).split(path.sep).join("/"),
+      size: stats.size
+    };
+    if (index >= 0) {
+      resources[index] = entry;
     } else {
-      this.package.resources = [];
+      resources.push(entry);
     }
 
-    const fullPath = this.packageDir + "/" + filename;
-    const stats = fs.statSync(fullPath);
-    this.package.resources.push({
-      name: name,
-      filename: filename,
-      size: stats.size,
-    });
-    this.save();
+    const description = path.join(dir, "package.json");
+    const temporary = path.join(dir, `.package.json.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`);
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(project, null, 2) + "\n");
+      fs.renameSync(temporary, description);
+    } catch (error) {
+      fs.rmSync(temporary, { force: true });
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new ProjectError("write-failed", `Cannot write ${description}: ${reason}`);
+    }
+    return entry;
   };
 
   /**

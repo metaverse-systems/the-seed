@@ -625,6 +625,31 @@ describe("parseCommandLine", () => {
     });
   });
 
+  describe("resource-pak add --force", () => {
+    it("is a flag of resource-pak add only among the resource-pak subcommands", () => {
+      const withForce = FORMS.filter((form) => form.label.startsWith("resource-pak ")
+        && form.sub.options.some((option) => option.name === "--force"));
+      expect(withForce.map((form) => form.label)).toEqual(["resource-pak add"]);
+      expect(withForce[0].sub.options.find((option) => option.name === "--force")?.value).toBeUndefined();
+    });
+
+    it("is true when given and absent otherwise", () => {
+      expect(options(expectRun(parse("resource-pak", "add", "theme", "a.ogg", "--force")))).toHaveProperty("force", true);
+      expect(options(expectRun(parse("resource-pak", "add", "--force", "theme", "a.ogg")))).toHaveProperty("force", true);
+      expect(options(expectRun(parse("resource-pak", "add", "theme", "a.ogg")))).not.toHaveProperty("force");
+    });
+
+    it("refuses a value", () => {
+      const error = expectUsage(parse("resource-pak", "add", "theme", "a.ogg", "--force=x"));
+      expect(error.message).toBe("Option \"--force\" for \"the-seed resource-pak add\" does not take a value.");
+    });
+
+    it.each([["resource-pak", "build"], ["resource-pak", "create"], ["template"]])("is not an option of %s", (...words) => {
+      const error = expectUsage(parse(...words, "--force"));
+      expect(error.message).toContain("--force");
+    });
+  });
+
   describe("resource-pak create names", () => {
     // The positional is keyed `name` like the one of `template` and holds `{ scope, name }`; it is
     // optional, and the name follows the resource pak rule (form only, no identifier rules).

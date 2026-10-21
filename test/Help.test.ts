@@ -213,6 +213,17 @@ describe("resource-pak create help", () => {
   });
 });
 
+describe("resource-pak add help", () => {
+  const command = COMMANDS.find((candidate) => candidate.name === "resource-pak") as CommandSpec;
+  const add = command.subcommands.find((candidate) => candidate.name === "add") as SubcommandSpec;
+
+  it("lists --force with its description", () => {
+    const options = section(renderSubcommandHelp(command, add), "Options") ?? [];
+    const entry = options.find((candidate) => candidate.head.startsWith("--force"));
+    expect(entry?.text).toContain("Replace a resource of the same name");
+  });
+});
+
 describe("every help text", () => {
   it.each(allHelpTexts().map((help) => [help.label, help.text] as const))(
     "%s has no line over 100 characters and never names the script file",

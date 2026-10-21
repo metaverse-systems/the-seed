@@ -748,7 +748,7 @@ Create a resource pak project, add resources to it and build it.
 Subcommands:
   create [<scope>/<name>]
       Create a resource pak project in the current directory
-  add <resource-name> <filename>
+  add <resource-name> <filename> [--force]
       Add a file to the resource pak project
   build
       Build the resource pak

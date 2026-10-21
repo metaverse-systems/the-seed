@@ -286,6 +286,7 @@ export const COMMANDS: CommandSpec[] = [
           { name: "resource-name", help: "Name the resource is stored under", required: true, parse: nonEmpty },
           pathArgument("filename", "The file to add"),
         ],
+        options: [forceOption("Replace a resource of the same name")],
       }),
       sub({ name: "build", summary: "Build the resource pak", handler: "resource-pak.build" }),
     ],

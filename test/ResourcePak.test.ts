@@ -21,6 +21,11 @@
  *   when the tests run as root). A file that changes while it is copied is simulated by making the first
  *   `readSync` of the resource file return one byte fewer than it read (spies on both modules; only reads of the
  *   descriptor opened for that file count, because Node reads package.json through `fs.readSync` too).
+ * - `ResourcePak.addResource(name, filename, packageDir, options?: { force?: boolean })` returns the entry it
+ *   recorded (`{ name, filename, size }`) and is reached through a cast. A duplicate name is `duplicate-resource`
+ *   (status 1); an empty name or one with an unpaired surrogate is refused with a ProjectError of status 2
+ *   (the contracts name no code or message for it). The removed members `packageDir`, `package` and `save`
+ *   are checked as absent from the object's own keys, so the check holds for fields and for arrow members.
  * - The message for a resource name that is not valid Unicode is matched with any index, `Resource <n> has ...`.
  * - Cases that create a project run with `HOME` set to a scratch directory, so that a program
  *   started on the way (the package manager) would leave its traces there, where they are looked for.
@@ -31,7 +36,7 @@ import path from "path";
 import fsExtra from "fs-extra";
 import ResourcePak from "../src/ResourcePak";
 import Config from "../src/Config";
-import { createPakHint } from "../src/cli/Hints";
+import { createPakHint, replaceResourceHint } from "../src/cli/Hints";
 import { projectErrorStatus } from "../src/cli/ExitStatus";
 import { ProjectErrorCode } from "../src/ProjectError";
 import { snapshotTree } from "./helpers/RunCli";
@@ -176,8 +181,8 @@ describe("ResourcePak", () => {
     it("sets neither the project directory nor the description on the object", () => {
       createPak("my-pak");
 
-      expect(rp.packageDir).toBe("");
-      expect(rp.package).toBeUndefined();
+      expect(Object.keys(rp)).not.toContain("packageDir");
+      expect(Object.keys(rp)).not.toContain("package");
     });
 
     it("refuses an existing target with target-exists and leaves its contents unchanged", () => {
@@ -243,65 +248,218 @@ describe("ResourcePak", () => {
     });
   });
 
-  it("should add a resource using process.cwd() by default", () => {
-    const pakDir = createPak("my-pak");
+  describe("addResource", () => {
+    type Entry = { name: string; filename: string; size: number; attributes?: Record<string, string> };
+    type AddResource = (name: string, filename: string, packageDir: string, options?: { force?: boolean }) => Entry;
+    const add = (name: string, filename: string, dir: string, options?: { force?: boolean }): Entry =>
+      (rp.addResource as unknown as AddResource)(name, filename, dir, options);
+    const descriptionText = (dir: string): string => fs.readFileSync(path.join(dir, "package.json"), "utf-8");
+    const tmpFiles = (dir: string): string[] => fs.readdirSync(dir).filter((entry) => entry.endsWith(".tmp"));
 
-    // Create a dummy resource file in the pak directory
-    const fileName = "testFile.txt";
-    const filePath = path.join(pakDir, fileName);
-    fs.writeFileSync(filePath, "Dummy content");
+    /** A project holding the file music/theme.ogg, added as "theme". */
+    const withTheme = (): string => {
+      const dir = createPak("my-pak");
+      fs.mkdirSync(path.join(dir, "music"));
+      fs.writeFileSync(path.join(dir, "music", "theme.ogg"), "ogg data");
+      add("theme", "music/theme.ogg", dir);
+      return dir;
+    };
 
-    // Use the packageDir parameter (since process.cwd() won't match pakDir in tests)
-    rp.addResource("testResource", fileName, pakDir);
+    /** Rewrites the description by hand, for what `add` itself would not write. */
+    const rewrite = (dir: string, change: (description: Record<string, unknown>) => void): void => {
+      const description = readDescription(dir) as Record<string, unknown>;
+      change(description);
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(description, null, 2) + "\n");
+    };
 
-    expect(rp.package?.resources).toContainEqual(expect.objectContaining({
-      name: "testResource",
-      filename: fileName,
-    }));
-    expect(rp.package?.resources?.length).toBe(1);
-  });
+    /** Expects a refusal with the given status, the description unchanged and no temporary file left. */
+    const expectRefused = (dir: string, action: () => unknown, status: number): ProjectErrorShape => {
+      const before = descriptionText(dir);
+      const error = refusal(action);
+      expect(projectErrorStatus(error.code as ProjectErrorCode)).toBe(status);
+      expect(descriptionText(dir)).toBe(before);
+      expect(tmpFiles(dir)).toEqual([]);
+      return error;
+    };
 
-  it("should add a resource with explicit packageDir parameter", () => {
-    const pakDir = createPak("my-pak");
+    it("records the file, its size and the name, and returns the entry", () => {
+      const dir = createPak("my-pak");
+      fs.writeFileSync(path.join(dir, "asset.png"), "PNG data");
 
-    const fileName = "asset.png";
-    const filePath = path.join(pakDir, fileName);
-    fs.writeFileSync(filePath, "PNG data");
+      const entry = add("myAsset", "asset.png", dir);
 
-    rp.addResource("myAsset", fileName, pakDir);
+      expect(entry).toEqual({ name: "myAsset", filename: "asset.png", size: 8 });
+      expect(readDescription(dir).resources).toEqual([entry]);
+    });
 
-    const savedPkg = JSON.parse(fs.readFileSync(path.join(pakDir, "package.json")).toString());
-    expect(savedPkg.resources).toHaveLength(1);
-    expect(savedPkg.resources[0].name).toBe("myAsset");
-    expect(savedPkg.resources[0].filename).toBe(fileName);
-    expect(savedPkg.resources[0].size).toBeGreaterThan(0);
-  });
+    it("keeps the other fields with their values and key order, two-space indentation and a final newline", () => {
+      const dir = createPak("my-pak");
+      rewrite(dir, (description) => { description.custom = { z: 1, a: [1, 2] }; });
+      const keysBefore = Object.keys(readDescription(dir));
+      fs.writeFileSync(path.join(dir, "a.txt"), "a");
 
-  it("should not add a duplicate resource name", () => {
-    const pakDir = createPak("my-pak");
+      add("a", "a.txt", dir);
 
-    const file1 = path.join(pakDir, "file1.txt");
-    const file2 = path.join(pakDir, "file2.txt");
-    fs.writeFileSync(file1, "content1");
-    fs.writeFileSync(file2, "content2");
+      const description = readDescription(dir);
+      expect(Object.keys(description)).toEqual(keysBefore);
+      expect(description.name).toBe("@test/my-pak");
+      expect(description.custom).toEqual({ z: 1, a: [1, 2] });
+      expect(descriptionText(dir)).toBe(JSON.stringify(description, null, 2) + "\n");
+      expect(tmpFiles(dir)).toEqual([]);
+      expect(fs.readdirSync(dir).sort()).toEqual(["a.txt", "package.json"]);
+    });
 
-    rp.addResource("dup", "file1.txt", pakDir);
-    rp.addResource("dup", "file2.txt", pakDir);
+    it("refuses a duplicate name with duplicate-resource, the replace hint and the description byte-identical", () => {
+      const dir = withTheme();
+      fs.writeFileSync(path.join(dir, "other.ogg"), "other");
 
-    const savedPkg = JSON.parse(fs.readFileSync(path.join(pakDir, "package.json")).toString());
-    expect(savedPkg.resources).toHaveLength(1);
-    expect(savedPkg.resources[0].filename).toBe("file1.txt");
-  });
+      const error = expectRefused(dir, () => add("theme", "other.ogg", dir), 1);
 
-  it("should keep the project description after a resource is added", () => {
-    const pakDir = createPak("my-pak");
-    fs.writeFileSync(path.join(pakDir, "a.txt"), "a");
-    rp.addResource("a", "a.txt", pakDir);
+      expect(error.code).toBe("duplicate-resource");
+      expect(error.message).toBe("Resource \"theme\" already exists in @test/my-pak; it refers to music/theme.ogg.");
+      expect(error.hint).toBe(replaceResourceHint());
+    });
 
-    const packageJsonPath = path.join(pakDir, "package.json");
-    expect(fs.existsSync(packageJsonPath)).toBe(true);
-    const saved = JSON.parse(fs.readFileSync(packageJsonPath).toString());
-    expect(saved.name).toBe("@test/my-pak");
+    it("with force replaces the entry at the same position with the new file and size and no attributes", () => {
+      const dir = withTheme();
+      fs.writeFileSync(path.join(dir, "b.txt"), "b");
+      add("last", "b.txt", dir);
+      rewrite(dir, (description) => {
+        (description.resources as Array<Record<string, unknown>>)[0].attributes = { type: "audio" };
+      });
+      fs.writeFileSync(path.join(dir, "other.ogg"), "other data!");
+
+      const entry = add("theme", "other.ogg", dir, { force: true });
+
+      expect(entry).toEqual({ name: "theme", filename: "other.ogg", size: 11 });
+      expect(readDescription(dir).resources).toEqual([
+        { name: "theme", filename: "other.ogg", size: 11 },
+        { name: "last", filename: "b.txt", size: 1 },
+      ]);
+    });
+
+    it("with force and a name that does not exist simply adds it", () => {
+      const dir = withTheme();
+      fs.writeFileSync(path.join(dir, "b.txt"), "b");
+
+      add("new", "b.txt", dir, { force: true });
+
+      expect((readDescription(dir).resources ?? []).map((entry) => entry.name)).toEqual(["theme", "new"]);
+    });
+
+    it("accepts names that differ only in case or in Unicode composition (guard)", () => {
+      const dir = createPak("my-pak");
+      fs.writeFileSync(path.join(dir, "a.txt"), "a");
+      const names = ["theme", "Theme", "é", "é"];
+
+      for (const name of names) add(name, "a.txt", dir);
+
+      expect((readDescription(dir).resources ?? []).map((entry) => entry.name)).toEqual(names);
+    });
+
+    it("refuses an empty name", () => {
+      const dir = createPak("my-pak");
+      fs.writeFileSync(path.join(dir, "a.txt"), "a");
+
+      expectRefused(dir, () => add("", "a.txt", dir), 2);
+    });
+
+    it("refuses a name with an unpaired surrogate", () => {
+      const dir = createPak("my-pak");
+      fs.writeFileSync(path.join(dir, "a.txt"), "a");
+
+      for (const name of ["a\ud800", "\udc00b", "x\ud83dy"]) {
+        expectRefused(dir, () => add(name, "a.txt", dir), 2);
+      }
+    });
+
+    it("refuses a file that is missing with resource-file-missing", () => {
+      const dir = createPak("my-pak");
+
+      const error = expectRefused(dir, () => add("a", "nope.txt", dir), 2);
+
+      expect(error.code).toBe("resource-file-missing");
+      expect(error.message).toBe(`File not found: ${path.join(dir, "nope.txt")}`);
+    });
+
+    it("refuses a directory", () => {
+      const dir = createPak("my-pak");
+      fs.mkdirSync(path.join(dir, "music"));
+
+      const error = expectRefused(dir, () => add("a", "music", dir), 2);
+
+      expect(error.message).toBe(`${path.join(dir, "music")} is not a file.`);
+    });
+
+    describe("a file outside the project", () => {
+      const outside = (dir: string, file: string): string =>
+        `${file} is outside the resource pak project ${dir}; copy the file into the project first.`;
+
+      it("by .. is refused", () => {
+        const dir = createPak("my-pak");
+        fs.writeFileSync(path.join(parentDir, "elsewhere.txt"), "x");
+
+        const error = expectRefused(dir, () => add("a", "../elsewhere.txt", dir), 2);
+
+        expect(error.message).toBe(outside(dir, path.join(parentDir, "elsewhere.txt")));
+      });
+
+      it("by an absolute path is refused", () => {
+        const dir = createPak("my-pak");
+        const file = path.join(tempDir, "abs.txt");
+        fs.writeFileSync(file, "x");
+
+        const error = expectRefused(dir, () => add("a", file, dir), 2);
+
+        expect(error.message).toBe(outside(dir, file));
+      });
+
+      it("by a symbolic link that resolves outside is refused", () => {
+        const dir = createPak("my-pak");
+        const target = path.join(tempDir, "target.txt");
+        fs.writeFileSync(target, "x");
+        fs.symlinkSync(target, path.join(dir, "link.txt"));
+
+        const error = expectRefused(dir, () => add("a", "link.txt", dir), 2);
+
+        expect(error.message).toBe(outside(dir, path.join(dir, "link.txt")));
+      });
+    });
+
+    it("records an absolute path inside the project relative with /", () => {
+      const dir = createPak("my-pak");
+      fs.mkdirSync(path.join(dir, "music"));
+      fs.writeFileSync(path.join(dir, "music", "theme.ogg"), "ogg");
+
+      const entry = add("theme", path.join(dir, "music", "theme.ogg"), dir);
+
+      expect(entry.filename).toBe("music/theme.ogg");
+      expect((readDescription(dir).resources ?? [])[0].filename).toBe("music/theme.ogg");
+    });
+
+    it("in a directory that is not a pak project refuses with not-pak-project and adds no resources list", () => {
+      const dir = path.join(tempDir, "plain");
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: "@test/plain", version: "1.0.0" }, null, 2) + "\n");
+      fs.writeFileSync(path.join(dir, "a.txt"), "a");
+
+      const error = expectRefused(dir, () => add("a", "a.txt", dir), 2);
+
+      expect(error.code).toBe("not-pak-project");
+      expect(error.hint).toBe(createPakHint());
+      expect(readDescription(dir)).not.toHaveProperty("resources");
+    });
+
+    it("leaves neither the project directory nor the description on the object", () => {
+      const dir = createPak("my-pak");
+      fs.writeFileSync(path.join(dir, "a.txt"), "a");
+
+      add("a", "a.txt", dir);
+
+      expect(Object.keys(rp)).not.toContain("packageDir");
+      expect(Object.keys(rp)).not.toContain("package");
+      expect(Object.keys(rp)).not.toContain("save");
+    });
   });
 
   it("should build a .pak file with explicit packageDir", () => {

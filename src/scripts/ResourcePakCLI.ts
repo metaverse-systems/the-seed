@@ -1,23 +1,10 @@
 import fs from "fs";
-import path from "path";
 import inquirer from "inquirer";
 import Config from "../Config";
 import Signing from "../Signing";
 import { chooseScope } from "../cli/ScopeChoice";
 import ResourcePak from "../ResourcePak";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
-import { MissingError } from "../cli/ExitStatus";
-
-/** Stops with a missing-input error unless the directory holds a readable project description. */
-function requirePakProject(directory: string): void {
-  const description = path.join(directory, "package.json");
-  try {
-    JSON.parse(fs.readFileSync(description, "utf-8"));
-  } catch (error) {
-    const reason = (error as NodeJS.ErrnoException).code === "ENOENT" ? "" : ` (${(error as Error).message})`;
-    throw new MissingError(`No readable package.json in ${directory}${reason}; run this in a resource pak project.`);
-  }
-}
 
 const ResourcePakCLI = async (parsed: ParsedCommand, context: CliContext): Promise<void> => {
   const config = new Config(context.configDir);
@@ -42,12 +29,14 @@ const ResourcePakCLI = async (parsed: ParsedCommand, context: CliContext): Promi
       break;
     }
     case "add": {
-      requirePakProject(context.cwd);
-      const filename = parsed.positionals.filename as string;
-      if (!fs.existsSync(path.join(context.cwd, filename))) {
-        throw new MissingError(`File not found: ${path.resolve(context.cwd, filename)}`);
-      }
-      rp.addResource(parsed.positionals["resource-name"] as string, filename, context.cwd);
+      const entry = rp.addResource(
+        parsed.positionals["resource-name"] as string,
+        parsed.positionals.filename as string,
+        context.cwd,
+        { force: parsed.options.force === true }
+      );
+      const pak = rp.readProject(context.cwd).name;
+      console.log(`Added ${entry.name} (${entry.filename}, ${entry.size} bytes) to ${pak}`);
       break;
     }
     case "build": {

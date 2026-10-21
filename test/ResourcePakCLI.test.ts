@@ -13,6 +13,10 @@
  * - `build` prints `Built <dir>/<name>.pak (<n> resources, <bytes> bytes)` on standard output, where
  *   `<bytes>` is the size of the whole pak file, and nothing on standard error. A refusal is one `Error:`
  *   line followed by the hint line when there is one, and nothing on standard output.
+ * - `add` prints `Added <name> (<filename>, <n> bytes) to <pak name>` on standard output, `<filename>` being the
+ *   path as recorded in the description and `<n>` the file's size, and nothing on standard error. A refusal is
+ *   one `Error:` line followed by the hint line when there is one, and nothing on standard output. `add` acts
+ *   on the working directory; a file is named relative to it.
  * - The three cases of an invalid project directory that used to be in the exit status tests are
  *   kept here with their assertions unchanged.
  */
@@ -88,13 +92,16 @@ describe("configuration and project", () => {
   });
 
   it("resource-pak add with a file that does not exist is 2 and leaves the project description unchanged", async () => {
-    const env = makeEnv();
-    const description = JSON.stringify({ name: "@a/pak", version: "1.0.0" });
-    fs.writeFileSync(path.join(env.cwd, "package.json"), description);
-    const run = await exec(["resource-pak", "add", "x", "missing.dat"], env);
+    const env = makeEnv({ "@t": "T Author" });
+    await exec(["resource-pak", "create", "@t/pak"], env);
+    const project = path.join(env.cwd, "pak");
+    const description = fs.readFileSync(path.join(project, "package.json"), "utf-8");
+    const run = await runTheSeed(["resource-pak", "add", "x", "missing.dat"], {
+      home: env.home, configDir: env.configDir, cwd: project, interactive: false,
+    });
     expect(run.status).toBe(2);
     expect(errorLines(run)).toHaveLength(1);
-    expect(fs.readFileSync(path.join(env.cwd, "package.json"), "utf-8")).toBe(description);
+    expect(fs.readFileSync(path.join(project, "package.json"), "utf-8")).toBe(description);
   });
 });
 
@@ -351,5 +358,134 @@ describe("resource-pak build", () => {
     expect(fileDigest(pak)).toBe(before);
     expect(fs.readFileSync(path.join(env.project, "package.json")).equals(description)).toBe(true);
     expect(fs.readdirSync(env.project).filter((entry) => entry.endsWith(".tmp"))).toEqual([]);
+  });
+});
+
+describe("resource-pak add", () => {
+  const author = "T Author";
+  const hint = createPakHint();
+
+  /** A scratch environment with a created pak project `@t/sounds` and the given files in it, nothing added yet. */
+  function projectWith(files: Record<string, string>): Promise<Env & { project: string }> {
+    const env = makeEnv({ "@t": author });
+    return exec(["resource-pak", "create", "@t/sounds"], env).then(() => {
+      const project = path.join(env.cwd, "sounds");
+      for (const file of Object.keys(files)) {
+        fs.mkdirSync(path.dirname(path.join(project, file)), { recursive: true });
+        fs.writeFileSync(path.join(project, file), files[file]);
+      }
+      return { ...env, project };
+    });
+  }
+
+  const add = (env: Env & { project: string }, ...words: string[]): Promise<RunResult> =>
+    runTheSeed(["resource-pak", "add", ...words], { home: env.home, configDir: env.configDir, cwd: env.project, interactive: false });
+
+  const description = (env: Env & { project: string }): string =>
+    fs.readFileSync(path.join(env.project, "package.json"), "utf-8");
+
+  const entries = (env: Env & { project: string }): Array<{ name: string; filename: string; size: number }> =>
+    JSON.parse(description(env)).resources;
+
+  it("prints the name, the file, its size and the pak, and exits 0", async () => {
+    const env = await projectWith({ "music/theme.ogg": "ogg data" });
+
+    const run = await add(env, "theme", "music/theme.ogg");
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(run.stdout).toBe("Added theme (music/theme.ogg, 8 bytes) to @t/sounds\n");
+    expect(entries(env)).toEqual([{ name: "theme", filename: "music/theme.ogg", size: 8 }]);
+  });
+
+  it("a duplicate is 1 with the message, the replace hint and package.json unchanged", async () => {
+    const env = await projectWith({ "music/theme.ogg": "ogg data", "other.ogg": "other" });
+    expect((await add(env, "theme", "music/theme.ogg")).status).toBe(0);
+    const before = description(env);
+
+    const run = await add(env, "theme", "other.ogg");
+
+    expect(run.status).toBe(1);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toBe(
+      "Error: Resource \"theme\" already exists in @t/sounds; it refers to music/theme.ogg.\n" +
+      "Give --force to replace it.\n");
+    expect(description(env)).toBe(before);
+  });
+
+  it("with --force replaces the entry where it stands, exits 0 and prints the usual line", async () => {
+    const env = await projectWith({ "music/theme.ogg": "ogg data", "a.txt": "a", "other.ogg": "other data" });
+    await add(env, "theme", "music/theme.ogg");
+    await add(env, "last", "a.txt");
+
+    const run = await add(env, "theme", "other.ogg", "--force");
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(run.stdout).toBe("Added theme (other.ogg, 10 bytes) to @t/sounds\n");
+    expect(entries(env)).toEqual([
+      { name: "theme", filename: "other.ogg", size: 10 },
+      { name: "last", filename: "a.txt", size: 1 },
+    ]);
+  });
+
+  it("a missing file is 2 naming the file, package.json unchanged", async () => {
+    const env = await projectWith({});
+    const before = description(env);
+
+    const run = await add(env, "theme", "nope.ogg");
+
+    expect(run.status).toBe(2);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toBe(`Error: File not found: ${path.join(env.project, "nope.ogg")}\n`);
+    expect(description(env)).toBe(before);
+  });
+
+  it("a directory is 2 saying it is not a file, package.json unchanged", async () => {
+    const env = await projectWith({ "music/a.txt": "a" });
+    const before = description(env);
+
+    const run = await add(env, "theme", "music");
+
+    expect(run.status).toBe(2);
+    expect(run.stderr).toBe(`Error: ${path.join(env.project, "music")} is not a file.\n`);
+    expect(description(env)).toBe(before);
+  });
+
+  it("a file outside the project is 2 asking to copy it in, package.json unchanged", async () => {
+    const env = await projectWith({});
+    const outside = path.join(env.cwd, "outside.txt");
+    fs.writeFileSync(outside, "x");
+    const before = description(env);
+
+    const run = await add(env, "theme", "../outside.txt");
+
+    expect(run.status).toBe(2);
+    expect(run.stderr).toBe(
+      `Error: ${outside} is outside the resource pak project ${env.project}; copy the file into the project first.\n`);
+    expect(description(env)).toBe(before);
+  });
+
+  it("outside a pak project is 2 with the create hint and package.json unchanged", async () => {
+    const env = makeEnv({ "@t": author });
+    const text = JSON.stringify({ name: "@t/thing", version: "1.0.0" });
+    fs.writeFileSync(path.join(env.cwd, "package.json"), text);
+    fs.writeFileSync(path.join(env.cwd, "a.txt"), "a");
+
+    const run = await exec(["resource-pak", "add", "a", "a.txt"], env);
+
+    expect(run.status).toBe(2);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toBe(`Error: ${env.cwd} is not a resource pak project: package.json has no "resources" list.\n${hint}\n`);
+    expect(fs.readFileSync(path.join(env.cwd, "package.json"), "utf-8")).toBe(text);
+  });
+
+  it("with no package.json is 2 saying so, with the create hint", async () => {
+    const env = makeEnv({ "@t": author });
+
+    const run = await exec(["resource-pak", "add", "a", "a.txt"], env);
+
+    expect(run.status).toBe(2);
+    expect(run.stderr).toBe(`Error: ${env.cwd} is not a resource pak project: no package.json.\n${hint}\n`);
   });
 });
