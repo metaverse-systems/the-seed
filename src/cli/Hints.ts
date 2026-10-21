@@ -58,3 +58,13 @@ export function fullBuildHint(): string {
 export function resignHint(path?: string): string {
   return `Sign the file again with "the-seed signing sign ${path ?? "<path>"}".`;
 }
+
+/** Tells the user how to create a resource pak project. */
+export function createPakHint(): string {
+  return "Create one with \"the-seed resource-pak create\".";
+}
+
+/** Tells the user that an existing resource is replaced only with --force. */
+export function replaceResourceHint(): string {
+  return "Give --force to replace it.";
+}

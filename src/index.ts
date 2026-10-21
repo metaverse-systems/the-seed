@@ -5,6 +5,8 @@ import Build from "./Build";
 import Signing, { DEFAULT_VALIDITY_DAYS, MAX_VALIDITY_DAYS, SigningError, UnsupportedSigningKey } from "./Signing";
 import type { SigningErrorCode } from "./Signing";
 import type { SignedContent } from "./CmsBuilder";
+import { ProjectError } from "./ProjectError";
+import type { ProjectErrorCode } from "./ProjectError";
 import Installer from "./Installer";
 import type { InstallerRunResult } from "./Installer";
 import { InstallerMetadataError } from "./InstallerMetadata";
@@ -31,6 +33,8 @@ export {
   nativeComponentMessage,
   SignedContent,
   SigningErrorCode,
+  ProjectError,
+  ProjectErrorCode,
   Installer,
   InstallerMetadataError,
   InstallerRunResult,

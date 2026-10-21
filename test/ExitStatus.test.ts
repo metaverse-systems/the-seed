@@ -30,6 +30,13 @@
  * - `new FailedError(message: string, options?: { hint?: string; reported?: boolean })`: status
  *   1, with `reported` false when not given.
  * - Each class sets `name` to its own name and works with `instanceof` after compilation.
+ *
+ * The group `project errors` expects `src/ProjectError.ts` to export `ProjectError` (constructor
+ * `(code, message, hint?)`, fields `code`, `message`, `hint`, `name` "ProjectError") and the type
+ * `ProjectErrorCode`, `src/index.ts` to export the same class, and `src/cli/ExitStatus.ts` to export
+ * `projectErrorStatus(code): number`. Those modules are loaded when a case runs, so that the other
+ * cases of this file still load while they are absent. `toCliError` is expected to return a
+ * `CliError` (class name "CliError") for a `ProjectError`.
  */
 import { EXIT_STATUSES, CliError, UsageError, MissingError, FailedError } from "../src/cli/ExitStatus";
 import { helpHint, addScopeHint, createCertHint } from "../src/cli/Hints";
@@ -723,5 +730,83 @@ describe("end to end", () => {
     it("signing produced every status of verification and of its failures", () => {
       expect([...(observed.get("signing") ?? [])].sort()).toEqual([0, 1, 2, 3, 4]);
     });
+  });
+});
+
+describe("project errors", () => {
+  type ProjectErrorCode =
+    | "invalid-name" | "unknown-scope" | "author-name-missing" | "author-detail-unusable"
+    | "target-exists" | "not-pak-project" | "resource-file-missing" | "duplicate-resource"
+    | "resource-changed" | "write-failed";
+
+  interface ProjectErrorLike extends Error {
+    code: ProjectErrorCode;
+    hint?: string;
+  }
+  type ProjectErrorClass = new (code: ProjectErrorCode, message: string, hint?: string) => ProjectErrorLike;
+  interface ProjectErrorModule {
+    ProjectError: ProjectErrorClass;
+  }
+  interface StatusModule {
+    projectErrorStatus: (code: ProjectErrorCode) => number;
+    toCliError: (error: unknown) => CliError | null;
+  }
+
+  const expected: Array<[ProjectErrorCode, number]> = [
+    ["invalid-name", 3],
+    ["unknown-scope", 2],
+    ["author-name-missing", 2],
+    ["author-detail-unusable", 2],
+    ["not-pak-project", 2],
+    ["resource-file-missing", 2],
+    ["target-exists", 1],
+    ["duplicate-resource", 1],
+    ["resource-changed", 1],
+    ["write-failed", 1],
+  ];
+
+  const projectErrorModule = () => jest.requireActual<ProjectErrorModule>("../src/ProjectError");
+  const statusModule = () => jest.requireActual<StatusModule>("../src/cli/ExitStatus");
+
+  it("lists every code once", () => {
+    expect(new Set(expected.map(([code]) => code)).size).toBe(10);
+  });
+
+  it.each(expected)("projectErrorStatus(%s) is %i", (code, status) => {
+    expect(statusModule().projectErrorStatus(code)).toBe(status);
+  });
+
+  it.each(expected)("toCliError maps a ProjectError with code %s to a CliError with status %i", (code, status) => {
+    const { ProjectError } = projectErrorModule();
+    const mapped = statusModule().toCliError(new ProjectError(code, "the message", "the hint."));
+    expect(mapped).not.toBeNull();
+    expect(mapped).toBeInstanceOf(CliError);
+    expect(mapped?.status).toBe(status);
+    expect(mapped?.message).toBe("the message");
+    expect(mapped?.hint).toBe("the hint.");
+  });
+
+  it("toCliError carries no hint when the ProjectError has none", () => {
+    const { ProjectError } = projectErrorModule();
+    const mapped = statusModule().toCliError(new ProjectError("write-failed", "disk full"));
+    expect(mapped?.status).toBe(1);
+    expect(mapped?.hint).toBeUndefined();
+  });
+
+  it("a ProjectError has the fields it was built with, the name ProjectError and works with instanceof", () => {
+    const { ProjectError } = projectErrorModule();
+    const error = new ProjectError("target-exists", "./a already exists", "Choose another name.");
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(ProjectError);
+    expect(error.name).toBe("ProjectError");
+    expect(error.code).toBe("target-exists");
+    expect(error.message).toBe("./a already exists");
+    expect(error.hint).toBe("Choose another name.");
+    expect(new ProjectError("write-failed", "m").hint).toBeUndefined();
+  });
+
+  it("ProjectError is exported from the package entry point as the same class", () => {
+    const index = jest.requireActual<ProjectErrorModule>("../src/index");
+    expect(index.ProjectError).toBe(projectErrorModule().ProjectError);
   });
 });

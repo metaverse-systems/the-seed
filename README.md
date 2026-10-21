@@ -1114,6 +1114,15 @@ Sign and verify files using ECDSA P-256 certificates with support for embedded (
 
 `UnsupportedSigningKey` is a `SigningError` (code `unsupported-key`).
 
+#### ProjectError
+
+Raised when a project or a resource cannot be created or changed.
+
+| Member | Type | Description |
+|--------|------|-------------|
+| `code` | `ProjectErrorCode` | What went wrong: `invalid-name`, `unknown-scope`, `author-name-missing`, `author-detail-unusable`, `target-exists`, `not-pak-project`, `resource-file-missing`, `duplicate-resource`, `resource-changed` or `write-failed`; the command line maps it to an exit status |
+| `hint` | `string` | What to do about it, when there is something to do |
+
 #### NativeComponentMissingError
 
 Thrown when the native component is absent or does not load. Its message names the step that builds it (`cd "<package directory>" && npm run build-addon`) and, when the component exists but cannot be loaded, ends with the first line of the loading error. `nativeComponentMessage(loadError?)` returns the same text.
