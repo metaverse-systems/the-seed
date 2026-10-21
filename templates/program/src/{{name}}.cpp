@@ -1,4 +1,4 @@
-#include "SKELETON.hpp"
+#include "{{name}}.hpp"
 #include <iostream>
 #include <chrono>
 

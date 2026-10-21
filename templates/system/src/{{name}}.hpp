@@ -2,11 +2,11 @@
 
 #include <libecs-cpp/ecs.hpp>
 
-class SKELETON_ : public ecs::System
+class {{identifier}} : public ecs::System
 {
   public:
-    SKELETON_(); 
-    SKELETON_(nlohmann::json);
+    {{identifier}}();
+    {{identifier}}(nlohmann::json);
     nlohmann::json Export() const;
     void Update();
     void Initialize();

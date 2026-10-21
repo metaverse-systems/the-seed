@@ -1,5 +1,5 @@
 AC_PREREQ([2.71])
-AC_INIT([SKELETON], [0.0.1], [AUTHOR_EMAIL], [SKELETON], [AUTHOR_URL])
+AC_INIT([{{name}}], [0.0.1], [{{author_email}}], [{{name}}], [{{author_url}}])
 AC_CONFIG_HEADERS([config.h])
 AC_PROG_CXX
 AM_INIT_AUTOMAKE([subdir-objects])
@@ -14,5 +14,5 @@ PKG_CHECK_MODULES([LIBECS], [ecs-cpp >= 2.0.0])
 PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed >= 0.8.0])
 
 AC_CONFIG_FILES([Makefile src/Makefile])
-AC_CONFIG_FILES([SKELETON.pc])
+AC_CONFIG_FILES([{{name}}.pc])
 AC_OUTPUT

@@ -27,16 +27,24 @@ export interface ResourceType {
   attributes?: { [key: string]: string };
 }
 
-export interface PackageType {
-  author: AuthorType;
+export interface PackageAuthorType {
   name: string;
-  license: string;
+  email?: string;
+  url?: string;
+}
+
+export interface PackageType {
+  name: string;
   version: string;
+  description?: string;
+  /** Email and URL are omitted when empty */
+  author: PackageAuthorType;
+  license: string;
   scripts: {
     [index: string]: string;
   };
-  resources: ResourceType[];
-  main?: string;
+  /** Present only in resource pak projects */
+  resources?: ResourceType[];
 }
 
 export interface ScopeAnswersType {

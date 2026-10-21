@@ -1239,15 +1239,21 @@ interface ResourceType {
 }
 
 interface PackageType {
-    author: AuthorType;
     name: string;
-    license: string;
     version: string;
+    description?: string;
+    author: PackageAuthorType;
+    license: string;
     scripts: {
         [index: string]: string;
     };
-    resources: ResourceType[];
-    main?: string;
+    resources?: ResourceType[];
+}
+
+interface PackageAuthorType {
+    name: string;
+    email?: string;
+    url?: string;
 }
 
 interface DependencyResultType {

@@ -14,7 +14,7 @@ import { NativeComponentMissingError, nativeComponentMessage } from "./NativeCom
 import { readElfNames } from "./ElfNames";
 import type { ElfNames } from "./ElfNames";
 import { InstallerConfig } from "./Installer";
-import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, DependencyResultType, BuildStep, CertSubject, CertOptions, CertInfo, SignResult, DirectorySignResult, VerifyStatus, VerifyResult, DirectoryVerifyResult, SigFileFormat, SigningManifestFormat, SigningManifestEntry, SignatureForm, IntegrityState, IntegrityResult, TrustAnchor, TrustedCertificates, TrustState, UntrustedReason, TrustResult, MachOSliceResult, VerifyOptions, DirectoryFileResult, PlannedFile, UnpackagedLibrary, PackagePlan, PackageResult, SignatureType, BinaryFormat, FormatDetectionResult, SignOptions } from "./types";
+import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, PackageAuthorType, DependencyResultType, BuildStep, CertSubject, CertOptions, CertInfo, SignResult, DirectorySignResult, VerifyStatus, VerifyResult, DirectoryVerifyResult, SigFileFormat, SigningManifestFormat, SigningManifestEntry, SignatureForm, IntegrityState, IntegrityResult, TrustAnchor, TrustedCertificates, TrustState, UntrustedReason, TrustResult, MachOSliceResult, VerifyOptions, DirectoryFileResult, PlannedFile, UnpackagedLibrary, PackagePlan, PackageResult, SignatureType, BinaryFormat, FormatDetectionResult, SignOptions } from "./types";
 import { DependencyDiscoveryError, CyclicDependencyError, ConflictingProjectError, ProjectManifestError, DiscoveryCancelledError } from "./DependencyWalker";
 
 export {
@@ -49,6 +49,7 @@ export {
   ScopeDefaultsType,
   ResourceType,
   PackageType,
+  PackageAuthorType,
   DependencyResultType,
   BuildStep,
   CertSubject,

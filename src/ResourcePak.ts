@@ -53,7 +53,6 @@ class ResourcePak {
       "build": "the-seed resource-pak build"
     };
     this.package.resources = [];
-    delete this.package.main;
     this.save();
   };
 
@@ -98,7 +97,7 @@ class ResourcePak {
     
     // make a copy of this.package.resources that doesn't include the filename
     // property
-    const resources = this.package.resources.map((r) => {
+    const resources = (this.package.resources ?? []).map((r) => {
       return {
         name: r.name,
         size: r.size,
@@ -117,7 +116,7 @@ class ResourcePak {
 
     const [, name] = this.package.name.split("/");
     fs.writeFileSync(this.packageDir + "/" + name + ".pak", JSON.stringify(header) + "\n");
-    this.package.resources.forEach((r) => {
+    (this.package.resources ?? []).forEach((r) => {
       fs.appendFileSync(this.packageDir + "/" + name + ".pak", fs.readFileSync(this.packageDir + "/" + r.filename));
     });
   };

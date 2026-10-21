@@ -1,5 +1,5 @@
 AC_PREREQ([2.71])
-AC_INIT([SKELETON],[0.0.1],[AUTHOR_EMAIL],[SKELETON],[AUTHOR_URL])
+AC_INIT([{{name}}], [0.0.1], [{{author_email}}], [{{name}}], [{{author_url}}])
 AC_CONFIG_HEADERS([config.h])
 AC_PROG_CXX
 AM_INIT_AUTOMAKE([subdir-objects])

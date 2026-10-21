@@ -1,30 +1,30 @@
-#include <SKELETON.hpp>
+#include <{{name}}.hpp>
 
-SKELETON_::SKELETON_():
-  System("SCOPE/SKELETON") 
-{ 
-}
-
-SKELETON_::SKELETON_(nlohmann::json config):
-  System("SCOPE/SKELETON") 
+{{identifier}}::{{identifier}}():
+  System("{{package}}")
 {
 }
 
-nlohmann::json SKELETON_::Export() const
+{{identifier}}::{{identifier}}(nlohmann::json config):
+  System("{{package}}")
+{
+}
+
+nlohmann::json {{identifier}}::Export() const
 {
     nlohmann::json config;
     return config;
 }
 
-void SKELETON_::Initialize()
+void {{identifier}}::Initialize()
 {
 }
 
-void SKELETON_::Shutdown()
+void {{identifier}}::Shutdown()
 {
 }
 
-void SKELETON_::Update()
+void {{identifier}}::Update()
 {
     double dt = this->ElapsedSecondsGet();
     // dt is the length of this update in seconds: the same however often it is read, and the configured
@@ -36,9 +36,9 @@ extern "C"
 {
     ecs::System *create_system(void *p)
     {
-        if(p == nullptr) return new SKELETON_();
+        if(p == nullptr) return new {{identifier}}();
 
         nlohmann::json *config = (nlohmann::json *)p;
-        return new SKELETON_(*config);
+        return new {{identifier}}(*config);
     }
 }
