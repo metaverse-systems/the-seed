@@ -9,15 +9,33 @@
  *   it is recognised by name so that no static import of the class is needed.
  * - The project description is compared as text with the specified one: two-space indentation, a
  *   final newline, an empty email or web address left out.
+ * - `ResourcePak.readProject(dir)` and `build(dir)` (which returns the pak path) are reached through casts, so
+ *   that this file compiles while the signatures are the old ones. A refusal of `readProject` has the code
+ *   "not-pak-project", the message `<dir> is not a resource pak project: <rule>.` and the hint `createPakHint()`.
+ *   The rules the contract gives in words (no package.json, not valid JSON with the parser's first line, no
+ *   "resources" list, "name" not of the form @scope/name) are asserted exactly; for the others (unreadable, not an
+ *   object, entry without a name or filename, attributes not strings) the message must name the directory and the
+ *   field concerned.
+ * - A failure while the pak is written is simulated by replacing the resource file with a directory the first time
+ *   it is opened (spies on `openSync` of both `fs` and `fs-extra`), or by a read-only project directory (skipped
+ *   when the tests run as root). A file that changes while it is copied is simulated by making the first
+ *   `readSync` of the resource file return one byte fewer than it read (spies on both modules; only reads of the
+ *   descriptor opened for that file count, because Node reads package.json through `fs.readSync` too).
+ * - The message for a resource name that is not valid Unicode is matched with any index, `Resource <n> has ...`.
  * - Cases that create a project run with `HOME` set to a scratch directory, so that a program
  *   started on the way (the package manager) would leave its traces there, where they are looked for.
  */
 import fs from "fs";
 import os from "os";
 import path from "path";
+import fsExtra from "fs-extra";
 import ResourcePak from "../src/ResourcePak";
 import Config from "../src/Config";
+import { createPakHint } from "../src/cli/Hints";
+import { projectErrorStatus } from "../src/cli/ExitStatus";
+import { ProjectErrorCode } from "../src/ProjectError";
 import { snapshotTree } from "./helpers/RunCli";
+import { fileDigest } from "./helpers/NativeAbsent";
 
 type CreatePackage = (scope: string, name: string, parentDir?: string) => string;
 
@@ -326,5 +344,361 @@ describe("ResourcePak", () => {
     // Read the pak and verify it contains header JSON + resource data
     const pakContent = fs.readFileSync(pakFile);
     expect(pakContent.length).toBeGreaterThan(11); // header size + newline + content
+  });
+
+  describe("readProject", () => {
+    type ReadProject = (dir: string) => unknown;
+    const read = (dir: string): unknown => (rp as unknown as { readProject: ReadProject }).readProject(dir);
+
+    const projectWith = (content: string | null): string => {
+      const dir = path.join(parentDir, "proj");
+      fs.mkdirSync(dir);
+      if (content !== null) fs.writeFileSync(path.join(dir, "package.json"), content);
+      return dir;
+    };
+
+    const expectRefused = (dir: string, rule: string | RegExp): ProjectErrorShape => {
+      const error = refusal(() => read(dir));
+      expect(error.code).toBe("not-pak-project");
+      expect(error.hint).toBe(createPakHint());
+      expect(error.message.startsWith(`${dir} is not a resource pak project: `)).toBe(true);
+      if (typeof rule === "string") {
+        expect(error.message).toBe(`${dir} is not a resource pak project: ${rule}.`);
+      } else {
+        expect(error.message).toMatch(rule);
+      }
+      return error;
+    };
+
+    it("returns the parsed description of a pak project", () => {
+      const dir = createPak("ok-pak");
+
+      const project = read(dir) as { name: string; resources: unknown[] };
+
+      expect(project.name).toBe("@test/ok-pak");
+      expect(project.resources).toEqual([]);
+    });
+
+    it("refuses a directory without package.json", () => {
+      expectRefused(projectWith(null), "no package.json");
+    });
+
+    it("refuses a package.json that cannot be read", () => {
+      const dir = projectWith(null);
+      fs.mkdirSync(path.join(dir, "package.json"));
+
+      expectRefused(dir, /package\.json/);
+    });
+
+    it("refuses a package.json that is not JSON, giving the first line of the parser's message", () => {
+      const dir = projectWith("{ not json\n");
+      let parserMessage = "";
+      try {
+        JSON.parse("{ not json\n");
+      } catch (error) {
+        parserMessage = (error as Error).message.split("\n")[0];
+      }
+
+      expectRefused(dir, `package.json is not valid JSON (${parserMessage})`);
+    });
+
+    it.each(["[]", "42", "\"text\"", "null"])("refuses a package.json that is not an object (%s)", (content) => {
+      expectRefused(projectWith(content), /package\.json/);
+    });
+
+    it.each([
+      ["no name", { resources: [] }],
+      ["a name that is not text", { name: 5, resources: [] }],
+      ["no scope", { name: "plain", resources: [] }],
+      ["an empty scope", { name: "@/pak", resources: [] }],
+      ["an empty name", { name: "@scope/", resources: [] }],
+      ["no @", { name: "scope/pak", resources: [] }],
+      ["two slashes", { name: "@scope/a/b", resources: [] }],
+    ])("refuses %s: \"name\" is not of the form @scope/name", (_label, description) => {
+      expectRefused(projectWith(JSON.stringify(description)), "\"name\" is not of the form @scope/name");
+    });
+
+    it("refuses a description without resources", () => {
+      expectRefused(projectWith(JSON.stringify({ name: "@t/pak" })), "package.json has no \"resources\" list");
+    });
+
+    it.each([["an object", {}], ["text", "a"], ["a number", 3]])("refuses resources that are %s", (_label, value) => {
+      expectRefused(projectWith(JSON.stringify({ name: "@t/pak", resources: value })), /"resources"/);
+    });
+
+    it.each([
+      ["no name", { filename: "a.txt", size: 1 }, /name/],
+      ["a name that is not text", { name: 1, filename: "a.txt", size: 1 }, /name/],
+      ["no filename", { name: "a", size: 1 }, /filename/],
+      ["a filename that is not text", { name: "a", filename: 7, size: 1 }, /filename/],
+      ["not an object", "a.txt", /resources/],
+    ])("refuses an entry with %s", (_label, entry, field) => {
+      expectRefused(projectWith(JSON.stringify({ name: "@t/pak", resources: [entry] })), field);
+    });
+
+    it.each([
+      ["a list", ["a"]],
+      ["text", "a"],
+      ["an object with a number", { type: 3 }],
+      ["an object with a nested object", { type: { a: "b" } }],
+    ])("refuses attributes that are %s rather than an object of strings", (_label, attributes) => {
+      const description = { name: "@t/pak", resources: [{ name: "a", filename: "a.txt", size: 1, attributes }] };
+
+      expectRefused(projectWith(JSON.stringify(description)), /attributes/);
+    });
+
+    it("accepts attributes that are an object of strings, empty values included", () => {
+      const description = { name: "@t/pak", resources: [{ name: "a", filename: "a.txt", size: 1, attributes: { type: "", loop: "true" } }] };
+
+      expect(() => read(projectWith(JSON.stringify(description)))).not.toThrow();
+    });
+
+    it("maps not-pak-project to status 2", () => {
+      expect(projectErrorStatus("not-pak-project")).toBe(2);
+    });
+  });
+
+  describe("build", () => {
+    type Build = (dir: string) => string;
+    type Spied = Record<"openSync" | "readSync", (...args: unknown[]) => unknown>;
+    const build = (dir: string): string => (rp.build as unknown as Build)(dir);
+    const pakPath = (dir: string, name = "my-pak"): string => path.join(dir, name + ".pak");
+    const tmpFiles = (dir: string): string[] => fs.readdirSync(dir).filter((entry) => entry.endsWith(".tmp"));
+    const modules = (): Spied[] => [fs as unknown as Spied, fsExtra as unknown as Spied];
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    /** A project with the given files, each added as a resource named after its file. */
+    const pakWith = (files: Record<string, string | Buffer>, name = "my-pak"): string => {
+      const dir = createPak(name);
+      for (const file of Object.keys(files)) {
+        fs.mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+        fs.writeFileSync(path.join(dir, file), files[file]);
+        rp.addResource(file, file, dir);
+      }
+      return dir;
+    };
+
+    /** Rewrites the project description by hand, for what `add` would not let through. */
+    const rewrite = (dir: string, change: (description: Record<string, unknown>) => void): void => {
+      const description = readDescription(dir) as Record<string, unknown>;
+      change(description);
+      fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(description, null, 2) + "\n");
+    };
+
+    it("returns the path of the pak it wrote", () => {
+      const dir = pakWith({ "a.txt": "abc" });
+
+      expect(build(dir)).toBe(pakPath(dir));
+      expect(fs.existsSync(pakPath(dir))).toBe(true);
+    });
+
+    it("uses the files' sizes at build time, not the ones recorded by add", () => {
+      const dir = pakWith({ "a.txt": "abc" });
+      fs.writeFileSync(path.join(dir, "a.txt"), "a much longer content than before");
+
+      build(dir);
+
+      const pak = fs.readFileSync(pakPath(dir));
+      const line = JSON.parse(pak.subarray(0, pak.indexOf(0x0a)).toString("utf8"));
+      expect(line.resources[0].size).toBe("a much longer content than before".length);
+      expect(pak.subarray(pak.indexOf(0x0a) + 1).toString()).toBe("a much longer content than before");
+    });
+
+    it("leaves package.json byte-identical, a stale recorded size included", () => {
+      const dir = pakWith({ "a.txt": "abc" });
+      fs.writeFileSync(path.join(dir, "a.txt"), "changed");
+      const before = fileDigest(path.join(dir, "package.json"));
+      const mtime = fs.statSync(path.join(dir, "package.json")).mtimeMs;
+
+      build(dir);
+
+      expect(fileDigest(path.join(dir, "package.json"))).toBe(before);
+      expect(fs.statSync(path.join(dir, "package.json")).mtimeMs).toBe(mtime);
+    });
+
+    it("states the description line's UTF-8 byte length as headerSize", () => {
+      const dir = createPak("unicode-pak");
+      fs.writeFileSync(path.join(dir, "a.txt"), "abc");
+      rewrite(dir, (description) => {
+        description.name = "@test/päk";
+        description.resources = [{ name: "música", filename: "a.txt", size: 3, attributes: { "日本": "😀" } }];
+      });
+
+      build(dir);
+
+      const pak = fs.readFileSync(path.join(dir, "päk.pak"));
+      const lineBytes = pak.subarray(0, pak.indexOf(0x0a) + 1);
+      expect(Number(JSON.parse(lineBytes.toString("utf8")).headerSize)).toBe(lineBytes.length);
+      expect(pak.subarray(lineBytes.length).toString()).toBe("abc");
+    });
+
+    it("builds a resource that is an empty file (guard)", () => {
+      const dir = pakWith({ "empty.dat": "", "b.txt": "bb" });
+
+      build(dir);
+
+      const pak = fs.readFileSync(pakPath(dir));
+      const line = JSON.parse(pak.subarray(0, pak.indexOf(0x0a)).toString("utf8"));
+      expect(line.resources.map((r: { size: number }) => r.size)).toEqual([0, 2]);
+      expect(pak.subarray(pak.indexOf(0x0a) + 1).toString()).toBe("bb");
+    });
+
+    it("builds a project with no resources as a pak with an empty list (guard)", () => {
+      const dir = createPak("my-pak");
+
+      build(dir);
+
+      const pak = fs.readFileSync(pakPath(dir)).toString();
+      expect(pak.indexOf("\n")).toBe(pak.length - 1);
+      expect(JSON.parse(pak).resources).toEqual([]);
+    });
+
+    it("replaces an earlier pak and leaves no temporary file", () => {
+      const dir = pakWith({ "a.txt": "abc" });
+      build(dir);
+      fs.writeFileSync(path.join(dir, "a.txt"), "second");
+
+      build(dir);
+
+      expect(fs.readFileSync(pakPath(dir)).toString().endsWith("second")).toBe(true);
+      expect(tmpFiles(dir)).toEqual([]);
+      expect(fs.readdirSync(dir).sort()).toEqual(["a.txt", "my-pak.pak", "package.json"]);
+    });
+
+    describe("refusals leave an existing pak byte-identical and no temporary file", () => {
+      /** A project with a built pak of one resource "theme" (music/theme.ogg), ready to be broken. */
+      const builtPak = (): string => {
+        const dir = createPak("my-pak");
+        fs.mkdirSync(path.join(dir, "music"));
+        fs.writeFileSync(path.join(dir, "music", "theme.ogg"), "ogg data");
+        rp.addResource("theme", "music/theme.ogg", dir);
+        build(dir);
+        return dir;
+      };
+
+      /** Builds again, expecting a refusal with the given status (and code or message when given), and checks nothing changed. */
+      const expectRefusal = (dir: string, status: number, expected: { code?: string; message?: string | RegExp } = {}): ProjectErrorShape => {
+        const before = fileDigest(pakPath(dir));
+        const error = refusal(() => build(dir));
+
+        expect(projectErrorStatus(error.code as ProjectErrorCode)).toBe(status);
+        if (expected.code !== undefined) expect(error.code).toBe(expected.code);
+        if (typeof expected.message === "string") expect(error.message).toBe(expected.message);
+        if (expected.message instanceof RegExp) expect(error.message).toMatch(expected.message);
+        expect(fileDigest(pakPath(dir))).toBe(before);
+        expect(tmpFiles(dir)).toEqual([]);
+        return error;
+      };
+
+      it("a resource file that is missing", () => {
+        const dir = builtPak();
+        fs.rmSync(path.join(dir, "music", "theme.ogg"));
+
+        expectRefusal(dir, 2, { code: "resource-file-missing", message: "Resource \"theme\" refers to music/theme.ogg, which is missing." });
+      });
+
+      it("a resource file that is a directory", () => {
+        const dir = builtPak();
+        fs.rmSync(path.join(dir, "music", "theme.ogg"));
+        fs.mkdirSync(path.join(dir, "music", "theme.ogg"));
+
+        expectRefusal(dir, 2, { code: "resource-file-missing", message: "Resource \"theme\" refers to music/theme.ogg, which is not a file." });
+      });
+
+      it("a resource file outside the project", () => {
+        const dir = builtPak();
+        fs.writeFileSync(path.join(parentDir, "outside.dat"), "outside");
+        rewrite(dir, (description) => {
+          (description.resources as Array<{ filename: string }>)[0].filename = "../outside.dat";
+        });
+
+        expectRefusal(dir, 2, { code: "resource-file-missing", message: "Resource \"theme\" refers to ../outside.dat, which is outside the project." });
+      });
+
+      it("a resource name with an unpaired surrogate", () => {
+        const dir = builtPak();
+        rewrite(dir, (description) => {
+          (description.resources as Array<{ name: string }>)[0].name = "bad\ud800name";
+        });
+
+        expectRefusal(dir, 2, { message: /^Resource \d+ has a name that is not valid Unicode text\.$/ });
+      });
+
+      it("two entries with one name", () => {
+        const dir = builtPak();
+        fs.writeFileSync(path.join(dir, "other.ogg"), "other");
+        rewrite(dir, (description) => {
+          (description.resources as unknown[]).push({ name: "theme", filename: "other.ogg", size: 5 });
+        });
+
+        expectRefusal(dir, 2, { message: "Resource \"theme\" appears more than once in package.json." });
+      });
+
+      it("a resource replaced by a directory between the check and the copy is write-failed", () => {
+        const dir = builtPak();
+        const target = path.join(dir, "music", "theme.ogg");
+        let swapped = false;
+        for (const module of modules()) {
+          const original = module.openSync;
+          jest.spyOn(module, "openSync").mockImplementation((...args: unknown[]) => {
+            if (!swapped && typeof args[0] === "string" && path.resolve(args[0]) === target) {
+              swapped = true;
+              fs.rmSync(target);
+              fs.mkdirSync(target);
+            }
+            return original.apply(module, args);
+          });
+        }
+
+        const error = expectRefusal(dir, 1, { code: "write-failed" });
+
+        expect(swapped).toBe(true);
+        expect(error.message).toContain(pakPath(dir));
+      });
+
+      it("a read-only project directory is write-failed", () => {
+        if (process.getuid && process.getuid() === 0) return;
+        const dir = builtPak();
+        fs.chmodSync(dir, 0o555);
+        try {
+          const error = expectRefusal(dir, 1, { code: "write-failed" });
+
+          expect(error.message).toMatch(/^Cannot write .+: .+/);
+        } finally {
+          fs.chmodSync(dir, 0o755);
+        }
+      });
+
+      it("a file whose bytes differ in number from the size taken at the start is resource-changed, status 1", () => {
+        const dir = builtPak();
+        const target = path.join(dir, "music", "theme.ogg");
+        let shortened = false;
+        const resourceDescriptors = new Set<number>();
+        for (const module of modules()) {
+          const originalOpen = module.openSync;
+          jest.spyOn(module, "openSync").mockImplementation((...args: unknown[]) => {
+            const descriptor = originalOpen.apply(module, args) as number;
+            if (typeof args[0] === "string" && path.resolve(args[0]) === target) resourceDescriptors.add(descriptor);
+            return descriptor;
+          });
+          const original = module.readSync;
+          jest.spyOn(module, "readSync").mockImplementation((...args: unknown[]) => {
+            const count = original.apply(module, args) as number;
+            if (!shortened && count > 0 && resourceDescriptors.has(args[0] as number)) {
+              shortened = true;
+              return count - 1;
+            }
+            return count;
+          });
+        }
+
+        expectRefusal(dir, 1, { code: "resource-changed", message: "music/theme.ogg changed while the pak was written; build again." });
+
+        expect(shortened).toBe(true);
+      });
+    });
   });
 });

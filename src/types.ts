@@ -22,7 +22,9 @@ export interface ConfigType {
 
 export interface ResourceType {
   name: string;
+  /** Relative to the project directory, with "/" separators */
   filename: string;
+  /** Size when the resource was added; informational, a build uses the file's size at build time */
   size: number;
   attributes?: { [key: string]: string };
 }
@@ -45,6 +47,11 @@ export interface PackageType {
   };
   /** Present only in resource pak projects */
   resources?: ResourceType[];
+}
+
+/** A resource pak project's description: a package description that always lists its resources */
+export interface PakProjectType extends PackageType {
+  resources: ResourceType[];
 }
 
 export interface ScopeAnswersType {

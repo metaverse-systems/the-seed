@@ -4,6 +4,7 @@
 #include <libthe-seed/MachOParser.hpp>
 #include <libthe-seed/MachOSigner.hpp>
 #include <libthe-seed/MsiSigner.hpp>
+#include <libthe-seed/ResourcePak.hpp>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -737,8 +738,46 @@ Napi::Value MsiHasEmbeddedSignature(const Napi::CallbackInfo& info) {
   }
 }
 
+// ── Resource Pak Reader ─────────────────────────────────────
+
+// Opens a pak with libthe-seed's own reader and returns { names, resources }.
+Napi::Value ReadResourcePak(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+
+  if (info.Length() < 1 || !info[0].IsString()) {
+    Napi::TypeError::New(env, "Expected a string argument: path").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+
+  const std::string path = info[0].As<Napi::String>().Utf8Value();
+
+  try {
+    the_seed::ResourcePak pak(path);
+    const std::vector<std::string> names = pak.ResourceNames();
+
+    Napi::Array jsNames = Napi::Array::New(env, names.size());
+    Napi::Array jsResources = Napi::Array::New(env, names.size());
+    for (size_t i = 0; i < names.size(); i++) {
+      ecs::Resource resource = pak.Load(names[i]);
+      jsNames.Set(i, Napi::String::New(env, names[i]));
+      jsResources.Set(i, Napi::Buffer<uint8_t>::Copy(env, resource.Data.data(), resource.Data.size()));
+    }
+
+    Napi::Object jsResult = Napi::Object::New(env);
+    jsResult.Set("names", jsNames);
+    jsResult.Set("resources", jsResources);
+    return jsResult;
+  } catch (const std::exception& e) {
+    Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
+    return env.Null();
+  }
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("listDependencies", Napi::Function::New(env, ListDependencies));
+
+  // Resource pak reading
+  exports.Set("readResourcePak", Napi::Function::New(env, ReadResourcePak));
 
   // Format detection
   exports.Set("detectBinaryFormat", Napi::Function::New(env, DetectBinaryFormat));

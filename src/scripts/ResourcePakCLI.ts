@@ -50,10 +50,12 @@ const ResourcePakCLI = async (parsed: ParsedCommand, context: CliContext): Promi
       rp.addResource(parsed.positionals["resource-name"] as string, filename, context.cwd);
       break;
     }
-    case "build":
-      requirePakProject(context.cwd);
-      rp.build(context.cwd);
+    case "build": {
+      const pak = rp.build(context.cwd);
+      const count = rp.readProject(context.cwd).resources.length;
+      console.log(`Built ${pak} (${count} resources, ${fs.statSync(pak).size} bytes)`);
       break;
+    }
   }
 };
 

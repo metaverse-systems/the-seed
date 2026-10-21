@@ -1250,6 +1250,10 @@ interface PackageType {
     resources?: ResourceType[];
 }
 
+interface PakProjectType extends PackageType {
+    resources: ResourceType[];
+}
+
 interface PackageAuthorType {
     name: string;
     email?: string;
