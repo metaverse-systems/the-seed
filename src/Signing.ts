@@ -186,6 +186,18 @@ class Signing {
   }
 
   /**
+   * Read a scope's certificate information, failing when the scope holds no certificate.
+   * @throws SigningError with code certificate-missing and a hint for creating one
+   */
+  private requireCertInfo(scope: string): CertInfo {
+    const certInfo = this.getCertInfo(scope);
+    if (!certInfo) {
+      throw new SigningError("certificate-missing", `No signing certificate found for scope '${scope}'.`, createCertHint(scope));
+    }
+    return certInfo;
+  }
+
+  /**
    * Get certificate information for a scope. Returns null if no cert exists.
    */
   getCertInfo(scope: string): CertInfo | null {
@@ -542,14 +554,14 @@ class Signing {
    * buildSignatureContainer; the native addon computes the digest and embeds the result, replacing any earlier
    * signature. Works for any certificate the scope holds.
    * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
-   * @throws if file is not a valid PE binary, or UnsupportedSigningKey before any change, or
+   * @throws if file is not a valid PE binary, or SigningError certificate-missing before any change, or
    * NativeComponentMissingError when the native component is not built
    */
   async signFileAuthenticode(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
+    const certInfo = this.requireCertInfo(scope);
     const privateKey = key ?? this.loadSigningKey(scope);
-    const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
     const addon = loadNativeComponent<NativeAddon>();
@@ -612,13 +624,13 @@ class Signing {
    * attributes over each slice's code directory, built by buildSignatureContainer. Handles single-arch and
    * universal (fat) binaries; each slice is signed on its own.
    * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
-   * @throws if file is not a valid Mach-O binary, or UnsupportedSigningKey before any change
+   * @throws if file is not a valid Mach-O binary, or SigningError certificate-missing before any change
    */
   async signFileMachO(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
+    const certInfo = this.requireCertInfo(scope);
     const privateKey = key ?? this.loadSigningKey(scope);
-    const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
     const addon = loadNativeComponent<NativeAddon>();
@@ -686,13 +698,13 @@ class Signing {
    * Document format; the signature is stored in the \x05DigitalSignature stream by the native addon, which also
    * computes the package fingerprint. The stored signature is read back and its fingerprint compared.
    * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
-   * @throws if file is not a valid MSI/CFBF, or UnsupportedSigningKey before any change
+   * @throws if file is not a valid MSI/CFBF, or SigningError certificate-missing before any change
    */
   async signFileMsi(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
+    const certInfo = this.requireCertInfo(scope);
     const privateKey = key ?? this.loadSigningKey(scope);
-    const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
     const addon = loadNativeComponent<NativeAddon>();
@@ -772,10 +784,7 @@ class Signing {
     }
     const scope = options.scope;
     const certPath = this.scopeCertPath(scope);
-    const certInfo = this.getCertInfo(scope);
-    if (!certInfo) {
-      throw new SigningError("certificate-missing", `No signing certificate found for scope '${scope}'.`, createCertHint(scope));
-    }
+    const certInfo = this.requireCertInfo(scope);
     if (certInfo.isExpired && !options?.force) {
       throw new SigningError("certificate-expired", "Signing certificate is expired. Use --force to sign anyway.", replaceCertHint(scope));
     }
@@ -857,10 +866,7 @@ class Signing {
     }
     const scope = options.scope;
     const certPath = this.scopeCertPath(scope);
-    const certInfo = this.getCertInfo(scope);
-    if (!certInfo) {
-      throw new SigningError("certificate-missing", `No signing certificate found for scope '${scope}'.`, createCertHint(scope));
-    }
+    const certInfo = this.requireCertInfo(scope);
     if (certInfo.isExpired && !options?.force) {
       throw new SigningError("certificate-expired", "Signing certificate is expired. Use --force to sign anyway.", replaceCertHint(scope));
     }

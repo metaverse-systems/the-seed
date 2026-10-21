@@ -17,6 +17,8 @@ import {
   SigningManifestFormat,
 } from "../src/types";
 import { defined } from "./helpers/Defined";
+import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { runTheSeed } from "./helpers/RunCli";
 
 /**
  * Create a temporary directory for test isolation.
@@ -977,5 +979,107 @@ describe("SigningError", () => {
       expect(error.code).toBe("wrong-target");
       expect(error.message).toContain("is a signature file;");
     });
+  });
+});
+
+// ── direct signing without a certificate ─────────────────────
+
+describe("direct signing without a certificate", () => {
+  const fixtures = path.join(__dirname, "fixtures", "binaries");
+  const scope = "@test";
+
+  type Method = "signFileAuthenticode" | "signFileMachO" | "signFileMsi";
+  const cases: Array<[Method, string]> = [
+    ["signFileAuthenticode", "tiny.exe"],
+    ["signFileMachO", "genuine/tiny-macho-x86_64"],
+    ["signFileMsi", "genuine/tiny.msi"],
+  ];
+
+  let home: string;
+  let configDir: string;
+  let workDir: string;
+  let signing: Signing;
+
+  function componentAvailable(): boolean {
+    let loaded = true;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- only the ability to load is of interest
+      require("../src/NativeComponent").loadNativeComponent();
+    } catch {
+      loaded = false;
+    }
+    return optionalExternalCheck("native component", loaded, "the native component is not built");
+  }
+
+  function copyOf(name: string): string {
+    const target = path.join(workDir, path.basename(name));
+    fs.copyFileSync(path.join(fixtures, name), target);
+    return target;
+  }
+
+  function expectCertificateMissing(error: { code: string; message: string; hint?: string }): void {
+    expect(error.code).toBe("certificate-missing");
+    expect(error.message).toBe(`No signing certificate found for scope '${scope}'.`);
+    expect(error.hint).toBe(createCertHint(scope));
+  }
+
+  beforeEach(() => {
+    home = createTempDir();
+    configDir = path.join(home, "the-seed");
+    fs.mkdirSync(configDir, { recursive: true });
+    writeConfig(configDir, { scope, name: "Test User", email: "test@example.com" });
+    workDir = createTempDir();
+    signing = new Signing(configDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workDir, { recursive: true, force: true });
+  });
+
+  it.each(cases)("%s without the key argument rejects with certificate-missing and leaves %s unchanged", async (method, name) => {
+    if (!componentAvailable()) return;
+    const file = copyOf(name);
+    const before = fileDigest(file);
+
+    const error = await signingErrorOf(() => signing[method](file, scope));
+
+    expectCertificateMissing(error);
+    expect(fileDigest(file)).toBe(before);
+  });
+
+  it.each(cases)("%s with a key argument rejects with certificate-missing and leaves %s unchanged", async (method, name) => {
+    if (!componentAvailable()) return;
+    const file = copyOf(name);
+    const before = fileDigest(file);
+    const { privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+
+    const error = await signingErrorOf(() => signing[method](file, scope, privateKey));
+
+    expectCertificateMissing(error);
+    expect(fileDigest(file)).toBe(before);
+  });
+
+  it("signFile for the same scope rejects with the same error", async () => {
+    const file = copyOf("tiny.exe");
+    const before = fileDigest(file);
+
+    const error = await signingErrorOf(() => signing.signFile(file, { scope }));
+
+    expectCertificateMissing(error);
+    expect(fileDigest(file)).toBe(before);
+  });
+
+  it("signing sign through the command line ends with 2 and prints the error and the hint", async () => {
+    const file = copyOf("tiny.exe");
+    const before = fileDigest(file);
+
+    const run = await runTheSeed(["signing", "sign", file, "--scope", scope], { home, configDir });
+
+    expect(run.status).toBe(2);
+    expect(run.stdout).toBe("");
+    expect(run.stderr.split("\n")[0]).toBe(`Error: No signing certificate found for scope '${scope}'.`);
+    expect(run.stderr).toContain(createCertHint(scope));
+    expect(fileDigest(file)).toBe(before);
   });
 });
