@@ -4,6 +4,8 @@ A command-line tool and TypeScript library for scaffolding, building, packaging,
 
 The command reference below quotes the tool's own help screens, and the test suite fails when this README and the tool disagree (see [Running the checks](#running-the-checks)).
 
+What changed in each release, including what to do when upgrading, is in [CHANGELOG.md](CHANGELOG.md).
+
 ## Architecture
 
 The project consists of four repositories with a linear dependency chain:
@@ -1041,6 +1043,8 @@ Show help for the tool, a command or a subcommand.
 `the-seed help` with no argument prints the top-level help shown at the start of this reference.
 
 ## API Reference
+
+The changes in each release, including removed and reshaped interfaces, are listed in [CHANGELOG.md](CHANGELOG.md).
 
 Everything below is exported from `@metaverse-systems/the-seed`, except a few names that are imported from a public module instead: `ConfigError` from `@metaverse-systems/the-seed/Config`, `walkDependencies` from `@metaverse-systems/the-seed/DependencyWalker` and the loader functions from `@metaverse-systems/the-seed/NativeComponent`. The tables list every public member of a class with its parameters (`?` marks an optional one); the README check compares them with the source.
 
