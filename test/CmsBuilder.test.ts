@@ -143,7 +143,7 @@ interface TestCertificate {
   key: crypto.KeyObject;
 }
 
-const webcrypto = crypto.webcrypto as unknown as Crypto;
+const webcrypto = crypto.webcrypto as unknown as crypto.webcrypto.Crypto;
 
 async function makeCertificate(options: { serialHex: string; name: string }): Promise<TestCertificate> {
   x509.cryptoProvider.set(webcrypto);

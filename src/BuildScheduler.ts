@@ -66,11 +66,7 @@ export class InstallLock {
 
 /** The number of processors available to this process, never below 1. */
 export function processorCount(): number {
-  const withAvailable = os as typeof os & { availableParallelism?: () => number };
-  const count = typeof withAvailable.availableParallelism === "function"
-    ? withAvailable.availableParallelism()
-    : os.cpus().length;
-  return Math.max(1, count);
+  return Math.max(1, os.availableParallelism());
 }
 
 /**

@@ -498,7 +498,7 @@ function generateSelfSignedRSACert(privateKey: crypto.KeyObject): string {
   // Use crypto.X509Certificate isn't available for generation, so use a workaround:
   // create a CSR-like structure. Actually, Node doesn't have cert generation built-in for RSA.
   // We'll use @peculiar/x509 for this in the test.
-  const webcrypto = crypto.webcrypto as unknown as Crypto;
+  const webcrypto = crypto.webcrypto as unknown as crypto.webcrypto.Crypto;
   x509.cryptoProvider.set(webcrypto);
 
   // Export keys to JWK and re-import as CryptoKey

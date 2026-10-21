@@ -610,6 +610,9 @@ function installStage() {
       let output = combined(installed.result);
       if (installed.result.status !== 0) problems.push("install exited " + installed.result.status);
       if (output.indexOf("native component built against libthe-seed") === -1) problems.push("no built report in the install output");
+      // The compiler is a development dependency: the installed package must not carry it.
+      const installedCompiler = path.join(path.dirname(path.dirname(installed.tool)), "lib", "node_modules", "@metaverse-systems", "the-seed", "node_modules", "typescript");
+      if (fs.existsSync(installedCompiler)) problems.push("the installed package's node_modules holds typescript: " + installedCompiler);
       if (problems.length === 0) {
         const help = runCommand(installed.tool, ["help"], { env: installed.env, cwd: root });
         output = combined(help);

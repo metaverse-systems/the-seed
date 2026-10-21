@@ -471,14 +471,14 @@ describe("Signing.loadTrust", () => {
 
 describe("signer certificate details (_buildSignerInfo)", () => {
   async function selfSigned(
-    keyAlgorithm: EcKeyGenParams | RsaHashedKeyGenParams,
-    signingAlgorithm: Algorithm | RsaHashedImportParams | EcdsaParams,
+    keyAlgorithm: crypto.webcrypto.EcKeyGenParams | crypto.webcrypto.RsaHashedKeyGenParams,
+    signingAlgorithm: crypto.webcrypto.Algorithm | crypto.webcrypto.RsaHashedImportParams | crypto.webcrypto.EcdsaParams,
     notBefore: Date,
     notAfter: Date
   ): Promise<crypto.X509Certificate> {
-    const webcrypto = crypto.webcrypto as unknown as Crypto;
+    const webcrypto = crypto.webcrypto as unknown as crypto.webcrypto.Crypto;
     x509.cryptoProvider.set(webcrypto);
-    const keys = (await webcrypto.subtle.generateKey(keyAlgorithm, true, ["sign", "verify"])) as CryptoKeyPair;
+    const keys = (await webcrypto.subtle.generateKey(keyAlgorithm, true, ["sign", "verify"])) as crypto.webcrypto.CryptoKeyPair;
     const certificate = await x509.X509CertificateGenerator.createSelfSigned({
       serialNumber: "01",
       name: "CN=details",
@@ -491,7 +491,7 @@ describe("signer certificate details (_buildSignerInfo)", () => {
   }
 
   const DAY = 24 * 60 * 60 * 1000;
-  const p256 = { name: "ECDSA", namedCurve: "P-256" } as EcKeyGenParams;
+  const p256 = { name: "ECDSA", namedCurve: "P-256" } as crypto.webcrypto.EcKeyGenParams;
 
   it("names the key of a created certificate and reports it as valid now", async () => {
     const { signing } = await setup(["@a"], ["@a"]);
@@ -503,20 +503,20 @@ describe("signer certificate details (_buildSignerInfo)", () => {
 
   it("names an ECDSA P-384 key", async () => {
     const { signing } = await setup([], []);
-    const cert = await selfSigned({ name: "ECDSA", namedCurve: "P-384" } as EcKeyGenParams, { name: "ECDSA", hash: "SHA-384" } as EcdsaParams, new Date(Date.now() - DAY), new Date(Date.now() + DAY));
+    const cert = await selfSigned({ name: "ECDSA", namedCurve: "P-384" } as crypto.webcrypto.EcKeyGenParams, { name: "ECDSA", hash: "SHA-384" } as crypto.webcrypto.EcdsaParams, new Date(Date.now() - DAY), new Date(Date.now() + DAY));
     expect(signing._buildSignerInfo(cert).keyType).toBe("ECDSA P-384");
   });
 
   it("names an RSA key with its size", async () => {
     const { signing } = await setup([], []);
-    const rsa = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256", publicExponent: new Uint8Array([1, 0, 1]), modulusLength: 2048 } as RsaHashedKeyGenParams;
-    const cert = await selfSigned(rsa, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as RsaHashedImportParams, new Date(Date.now() - DAY), new Date(Date.now() + DAY));
+    const rsa = { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256", publicExponent: new Uint8Array([1, 0, 1]), modulusLength: 2048 } as crypto.webcrypto.RsaHashedKeyGenParams;
+    const cert = await selfSigned(rsa, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" } as crypto.webcrypto.RsaHashedImportParams, new Date(Date.now() - DAY), new Date(Date.now() + DAY));
     expect(signing._buildSignerInfo(cert).keyType).toBe("RSA 2048");
   });
 
   it("marks a certificate whose validity ended a day ago as expired and not 'not yet valid'", async () => {
     const { signing } = await setup([], []);
-    const cert = await selfSigned(p256, { name: "ECDSA", hash: "SHA-256" } as EcdsaParams, new Date(Date.now() - 30 * DAY), new Date(Date.now() - DAY));
+    const cert = await selfSigned(p256, { name: "ECDSA", hash: "SHA-256" } as crypto.webcrypto.EcdsaParams, new Date(Date.now() - 30 * DAY), new Date(Date.now() - DAY));
     const info = signing._buildSignerInfo(cert);
     expect(info.isExpired).toBe(true);
     expect(info.isNotYetValid).toBe(false);
@@ -525,7 +525,7 @@ describe("signer certificate details (_buildSignerInfo)", () => {
 
   it("marks a certificate that is not valid until tomorrow as not yet valid and not expired", async () => {
     const { signing } = await setup([], []);
-    const cert = await selfSigned(p256, { name: "ECDSA", hash: "SHA-256" } as EcdsaParams, new Date(Date.now() + DAY), new Date(Date.now() + 30 * DAY));
+    const cert = await selfSigned(p256, { name: "ECDSA", hash: "SHA-256" } as crypto.webcrypto.EcdsaParams, new Date(Date.now() + DAY), new Date(Date.now() + 30 * DAY));
     const info = signing._buildSignerInfo(cert);
     expect(info.isNotYetValid).toBe(true);
     expect(info.isExpired).toBe(false);
@@ -546,15 +546,15 @@ describe("verify with a scope certificate outside its validity", () => {
     const configDir = tempDir("trust-expiry-");
     writeConfig(configDir, [scope]);
     const signing = new Signing(configDir);
-    const webcrypto = crypto.webcrypto as unknown as Crypto;
+    const webcrypto = crypto.webcrypto as unknown as crypto.webcrypto.Crypto;
     x509.cryptoProvider.set(webcrypto);
-    const keys = (await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" } as EcKeyGenParams, true, ["sign", "verify"])) as CryptoKeyPair;
+    const keys = (await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" } as crypto.webcrypto.EcKeyGenParams, true, ["sign", "verify"])) as crypto.webcrypto.CryptoKeyPair;
     const generated = await x509.X509CertificateGenerator.createSelfSigned({
       serialNumber: "0a",
       name: "CN=Validity Test, O=" + scope,
       notBefore,
       notAfter,
-      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" } as EcdsaParams,
+      signingAlgorithm: { name: "ECDSA", hash: "SHA-256" } as crypto.webcrypto.EcdsaParams,
       keys,
     });
     const pkcs8 = Buffer.from(await webcrypto.subtle.exportKey("pkcs8", keys.privateKey));

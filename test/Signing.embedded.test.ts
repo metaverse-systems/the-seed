@@ -805,7 +805,7 @@ describe("signature sizes around the 4,096-byte threshold (real addon)", () => {
 
   /** A P-256 certificate with the fixed serial 01 followed by fifteen 0x11 bytes (no sign byte) and a common name of the given length. */
   async function makeSigner(nameLength: number): Promise<{ signing: Signing; scope: string; probe: number }> {
-    const webcrypto = crypto.webcrypto as unknown as Crypto;
+    const webcrypto = crypto.webcrypto as unknown as crypto.webcrypto.Crypto;
     x509.cryptoProvider.set(webcrypto);
     const keys = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
     const certificate = await x509.X509CertificateGenerator.createSelfSigned({

@@ -1233,7 +1233,7 @@ describe("BuildEndToEnd", () => {
 
     /** Replaces the scope's certificate by one whose validity ended in the past, signed by its own key. */
     async function writeExpiredCertificate(): Promise<void> {
-      const webcrypto = crypto.webcrypto as unknown as Crypto;
+      const webcrypto = crypto.webcrypto as unknown as crypto.webcrypto.Crypto;
       x509.cryptoProvider.set(webcrypto);
       const keys = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
       const day = 24 * 60 * 60 * 1000;

@@ -429,11 +429,11 @@ class Signing {
     const validityDays = requested ?? DEFAULT_VALIDITY_DAYS;
 
     // Set the crypto provider for @peculiar/x509 to use Node.js webcrypto
-    const webcrypto = crypto.webcrypto as unknown as Crypto;
+    const webcrypto = crypto.webcrypto;
     x509.cryptoProvider.set(webcrypto);
 
     // Generate ECDSA P-256 key pair using WebCrypto (required by @peculiar/x509)
-    const algorithm: EcKeyGenParams = {
+    const algorithm: crypto.webcrypto.EcKeyGenParams = {
       name: "ECDSA",
       namedCurve: "P-256",
     };
