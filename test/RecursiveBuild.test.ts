@@ -10,8 +10,9 @@
  *   `Config` to the module's functions. The existing cases keep calling them without a
  *   configuration.
  * - The build reads no configuration of its own: no `config.json` is read while it runs.
- * - The prefix of the configure step is observed by letting one `Build` construction run the real
- *   `getSteps`; every other case keeps the `Build` factory mock.
+ * - The real `Build` module is used; `getSteps` is replaced by a spy on `Build.prototype`, installed
+ *   before and restored after every case. The prefix of the configure step is observed by letting
+ *   the next call run the real method.
  */
 import fs from "fs";
 import os from "os";
@@ -38,7 +39,7 @@ jest.mock("../src/BuildScheduler", () => ({
   processorCount: () => mockProcessorCount(),
 }));
 
-// Mock Build
+// The stand-in for `Build.prototype.getSteps`
 const mockGetSteps = jest.fn((target: string, fullReconfigure: boolean, jobs?: number) => {
   const steps = [];
   if (fullReconfigure) {
@@ -54,16 +55,6 @@ const mockGetSteps = jest.fn((target: string, fullReconfigure: boolean, jobs?: n
   steps.push({ label: "compile", program: "make", args: [`-j${jobs ?? mockProcessorCount()}`] });
   steps.push({ label: "install", program: "make", args: ["install"] });
   return steps;
-});
-
-jest.mock("../src/Build", () => {
-  const MockBuild = jest.fn().mockImplementation(() => ({
-    getSteps: mockGetSteps,
-  }));
-  return {
-    __esModule: true,
-    default: MockBuild,
-  };
 });
 
 // The install phase is mocked; each case sets what it does. The default
@@ -140,11 +131,22 @@ function getRecursiveBuildSteps(projectDir: string, target: string, fullReconfig
   return getRecursiveBuildStepsInModule(SCRATCH_CONFIG, projectDir, target, fullReconfigure, jobs);
 }
 
-/** The next `Build` constructed runs the real `getSteps` on the configuration it is given. */
+/** The method on the prototype before any spy replaces it. */
+const realGetSteps = Build.prototype.getSteps;
+let getStepsSpy: jest.SpyInstance;
+
+beforeEach(() => {
+  getStepsSpy = jest.spyOn(Build.prototype, "getSteps").mockImplementation(mockGetSteps);
+});
+
+afterEach(() => {
+  getStepsSpy.mockRestore();
+});
+
+/** The next `getSteps` call runs the real method on the `Build` it is called on. */
 function nextBuildIsReal(): void {
-  (Build as unknown as jest.Mock).mockImplementationOnce((config: Config) => {
-    const Actual = jest.requireActual("../src/Build").default as new (config: Config) => unknown;
-    return new Actual(config);
+  getStepsSpy.mockImplementationOnce(function (this: Build, ...args: Parameters<Build["getSteps"]>) {
+    return realGetSteps.apply(this, args);
   });
 }
 

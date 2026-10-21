@@ -17,7 +17,7 @@ class ResourcePak {
     this.scopes = new Scopes(config);
   }
 
-  askName = () => {
+  askName() {
     return [
       {
         "type": "list",
@@ -31,7 +31,7 @@ class ResourcePak {
         "validate": (name: string): true | string => validateProjectName(name, "resource-pak") ?? true
       }
     ];
-  };
+  }
 
   /**
    * Creates the resource pak project <parentDir>/<name>.
@@ -43,7 +43,7 @@ class ResourcePak {
    * @returns The absolute path of the new project
    * @throws ProjectError when the project cannot be created
    */
-  createPackage = (scope: string, name: string, parentDir: string = process.cwd()): string => {
+  createPackage(scope: string, name: string, parentDir: string = process.cwd()): string {
     const invalid = validateProjectName(name, "resource-pak");
     if (invalid !== null) {
       throw new ProjectError("invalid-name", invalid);
@@ -94,16 +94,16 @@ class ResourcePak {
       throw new ProjectError("write-failed", `${target} could not be created: ${reason}`);
     }
     return target;
-  };
+  }
 
-  private exists = (file: string): boolean => {
+  private exists(file: string): boolean {
     try {
       fs.lstatSync(file);
       return true;
     } catch {
       return false;
     }
-  };
+  }
 
   /**
    * Adds a file to the resource pak project in a directory as a resource.
@@ -117,7 +117,7 @@ class ResourcePak {
    * @returns The entry that was recorded
    * @throws ProjectError when the project, the name or the file is unusable, or the name exists without `force`
    */
-  addResource = (name: string, filename: string, packageDir: string, options: { force?: boolean; attributes?: Array<[string, string]> } = {}): ResourceType => {
+  addResource(name: string, filename: string, packageDir: string, options: { force?: boolean; attributes?: Array<[string, string]> } = {}): ResourceType {
     const dir = path.resolve(packageDir);
     const project = this.readProject(dir);
 
@@ -178,7 +178,7 @@ class ResourcePak {
       throw new ProjectError("write-failed", `Cannot write ${description}: ${reason}`);
     }
     return entry;
-  };
+  }
 
   /**
    * Reads and checks the description of the resource pak project in a directory.
@@ -186,7 +186,7 @@ class ResourcePak {
    * @returns The parsed description
    * @throws ProjectError ("not-pak-project") naming the rule that failed
    */
-  readProject = (packageDir: string): PakProjectType => {
+  readProject(packageDir: string): PakProjectType {
     const dir = path.resolve(packageDir);
     const refuse = (rule: string): never => {
       throw new ProjectError("not-pak-project", `${dir} is not a resource pak project: ${rule}.`, createPakHint());
@@ -244,7 +244,7 @@ class ResourcePak {
       }
     });
     return description as unknown as PakProjectType;
-  };
+  }
 
   /**
    * Builds the pak of the resource pak project in a directory. Sizes and bytes come from the files at build time.
@@ -254,7 +254,7 @@ class ResourcePak {
    * @returns The path of the pak
    * @throws ProjectError when the project or a resource is unusable or the pak cannot be written
    */
-  build = (packageDir: string): string => {
+  build(packageDir: string): string {
     const dir = path.resolve(packageDir);
     const project = this.readProject(dir);
 
@@ -354,24 +354,25 @@ class ResourcePak {
       throw new ProjectError("write-failed", `Cannot write ${pak}: ${reason}`);
     }
     return pak;
-  };
+  }
 
   /** True when the text has no unpaired surrogate, so that UTF-8 can carry it. */
-  private static wellFormed = (text: string): boolean =>
-    !/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(text);
+  private static wellFormed(text: string): boolean {
+    return !/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(text);
+  }
 
   /** True when the path is the directory or lies below it (lexically). */
-  private static inside = (directory: string, file: string): boolean => {
+  private static inside(directory: string, file: string): boolean {
     const relative = path.relative(directory, file);
     return relative !== "" && relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
-  };
+  }
 
-  private static writeAll = (descriptor: number, buffer: Buffer, length: number): void => {
+  private static writeAll(descriptor: number, buffer: Buffer, length: number): void {
     let written = 0;
     while (written < length) {
       written += fs.writeSync(descriptor, buffer, written, length - written);
     }
-  };
+  }
 }
 
 export default ResourcePak;

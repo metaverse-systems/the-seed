@@ -46,7 +46,7 @@ class Package {
    * Includes both lib/ and bin/ directories since Windows DLLs are installed to bin/.
    * Also includes the MinGW cross-compiler runtime directory for Windows targets.
    */
-  getSearchPaths = (): string[] => {
+  getSearchPaths(): string[] {
     const searchPaths: string[] = [];
     for (const target of Object.keys(targets)) {
       const targetDir = targets[target];
@@ -86,13 +86,13 @@ class Package {
     }
 
     return searchPaths;
-  };
+  }
 
   /**
    * Parse src/Makefile.am in a project directory to determine the binary type and name.
    * Returns { type, name } for programs (bin_PROGRAMS) or libraries (lib_LTLIBRARIES), or null on error.
    */
-  parseMakefileAm = (projectDir: string): { type: "program" | "library"; name: string } | null => {
+  parseMakefileAm(projectDir: string): { type: "program" | "library"; name: string } | null {
     const makefileAmPath = path.join(projectDir, "src", "Makefile.am");
     if (!fs.existsSync(makefileAmPath)) {
       console.error("Error: src/Makefile.am not found in " + projectDir);
@@ -115,7 +115,7 @@ class Package {
 
     console.error("Error: Could not determine binary type from " + makefileAmPath);
     return null;
-  };
+  }
 
   /**
    * Resolve actual installed binary paths from a project directory for all build targets.
@@ -124,7 +124,7 @@ class Package {
    * For libraries: looks for {name}.so (native) or {name}*.dll (cross-compiled for Windows).
    * A native library is returned as the real file the development link {name}.so leads to.
    */
-  resolveBinaryPaths = (projectDir: string): string[] => {
+  resolveBinaryPaths(projectDir: string): string[] {
     const parsed = this.parseMakefileAm(projectDir);
     if (!parsed) return [];
 
@@ -178,17 +178,17 @@ class Package {
     }
 
     return binaryPaths;
-  };
+  }
 
   /**
    * Invoke the native addon's listDependencies() to call DependencyLister::ListDependencies() directly.
    * Returns the result as a plain JS object.
    * @throws NativeComponentMissingError when the native component is not built
    */
-  resolveDependencies = (binaryPaths: string[], searchPaths: string[]): DependencyResultType => {
+  resolveDependencies(binaryPaths: string[], searchPaths: string[]): DependencyResultType {
     const addon = loadNativeComponent<{ listDependencies(binaryPaths: string[], searchPaths: string[]): DependencyResultType }>();
     return addon.listDependencies(binaryPaths, searchPaths);
-  };
+  }
 
   /**
    * Decide what packaging the given project directories would write, without writing anything.
@@ -198,7 +198,7 @@ class Package {
    * ELF file, or two different files that would be written under one name. It also resolves a refusal, naming the
    * step that builds it, when the native component is not built.
    */
-  plan = async (projectDirs: string[]): Promise<PackagePlan> => {
+  async plan(projectDirs: string[]): Promise<PackagePlan> {
     const refuse = (message: string): PackagePlan => ({ ok: false, message });
 
     // Packaging needs the native component: refuse before discovery or any output
@@ -440,12 +440,12 @@ class Package {
       .map((name) => ({ name, neededBy: missing.get(name) as string }));
 
     return { ok: true, projects: [...projectNames.keys()], files, notPackaged };
-  };
+  }
 
   /**
    * The refusal text for two different files that would be written under one name.
    */
-  private collisionMessage = (first: PlannedFile, second: PlannedFile): string => {
+  private collisionMessage(first: PlannedFile, second: PlannedFile): string {
     const describe = (file: PlannedFile): string =>
       file.source + " (" + (file.origin.kind === "project"
         ? "build of " + file.origin.project
@@ -466,13 +466,13 @@ class Package {
     }
     lines.push("Nothing was written.");
     return lines.join("\n");
-  };
+  }
 
   /**
    * A file to be written under a name, with its content hash and its signature: the one named for
    * the packaged name in the directory the name was resolved in, else the one beside the real file.
    */
-  private plannedFile = (name: string, source: string, origin: PlannedFile["origin"], directory: string): PlannedFile => {
+  private plannedFile(name: string, source: string, origin: PlannedFile["origin"], directory: string): PlannedFile {
     const candidates = [path.join(directory, name + ".sig"), source + ".sig"];
     return {
       name,
@@ -481,7 +481,7 @@ class Package {
       signature: candidates.find((candidate) => fs.existsSync(candidate)) ?? null,
       origin,
     };
-  };
+  }
 
   /**
    * Main entry point: validate inputs, decide what to package, create the directory, copy files.
@@ -489,7 +489,7 @@ class Package {
    * as "Error: <message>", `success` is false and nothing is left written. Without the native component the
    * refusal names the step that builds it, and nothing is read or written.
    */
-  run = async (outputDir: string, projectDirs: string[]): Promise<PackageResult> => {
+  async run(outputDir: string, projectDirs: string[]): Promise<PackageResult> {
     const failed = (message: string): PackageResult => {
       console.error("Error: " + message);
       return {
@@ -567,7 +567,7 @@ class Package {
       fileCount,
       notPackaged: plan.notPackaged,
     };
-  };
+  }
 }
 
 export default Package;

@@ -49,7 +49,7 @@ class Build {
    * starts no other; the install phase runs under the force signal so a
    * single Ctrl+C lets an install in progress finish.
    */
-  buildProject = async (options: ProjectBuildOptions): Promise<ProjectBuildResult> => {
+  async buildProject(options: ProjectBuildOptions): Promise<ProjectBuildResult> {
     // A Windows build signs and strips Windows programs, which needs the native component; an incremental build
     // (no target) is stopped by the install phase instead, only when it installs a Windows program
     if (options.target === "windows") {
@@ -125,7 +125,7 @@ class Build {
     }
 
     return { status: "completed" };
-  };
+  }
 
   /**
    * Returns an ordered array of BuildStep objects for the given target and mode.
@@ -134,12 +134,12 @@ class Build {
    * @param jobs - compile job limit; defaults to the processor count, so the compile step is always "make -j<jobs>"
    * @param inherited - the environment whose PKG_CONFIG_PATH the library search extends; defaults to process.env
    */
-  getSteps = (
+  getSteps(
     target: string,
     fullReconfigure: boolean,
     jobs: number = processorCount(),
     inherited: NodeJS.ProcessEnv = process.env
-  ): BuildStep[] => {
+  ): BuildStep[] {
     const newTarget = targets[target];
     const prefix = this.config.config.prefix + "/" + newTarget;
 
@@ -151,14 +151,14 @@ class Build {
       reconfigure: fullReconfigure,
       distclean: true,
     });
-  };
+  }
 
   /**
    * Get the install prefix directory for the given target (native by default).
    */
-  getInstallPrefix = (target = "native"): string => {
+  getInstallPrefix(target = "native"): string {
     return this.config.config.prefix + "/" + targets[target];
-  };
+  }
 }
 
 /**

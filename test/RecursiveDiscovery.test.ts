@@ -22,18 +22,12 @@ const mockGetSteps = jest.fn((target: string, fullReconfigure: boolean, jobs?: n
   { label: "compile", program: "make", args: [`-j${jobs ?? 4}`] },
   { label: "install", program: "make", args: ["install"] },
 ]);
-jest.mock("../src/Build", () => ({
-  __esModule: true,
-  default: jest.fn().mockImplementation(() => ({
-    getSteps: mockGetSteps,
-  })),
-}));
-
 jest.mock("../src/InstallPhase", () => ({
   ...jest.requireActual("../src/InstallPhase"),
   runInstallPhase: jest.fn(),
 }));
 
+import Build from "../src/Build";
 import Config from "../src/Config";
 import { ConflictingProjectError, CyclicDependencyError } from "../src/DependencyWalker";
 import { runCommand } from "../src/ProcessRunner";
@@ -58,6 +52,7 @@ describe("recursive discovery", () => {
   let originalHome: string | undefined;
   let originalExitCode: typeof process.exitCode;
   let logSpy: jest.SpyInstance;
+  let getStepsSpy: jest.SpyInstance;
   let errorSpy: jest.SpyInstance;
   let cwdSpy: jest.SpyInstance | undefined;
   let homeSpy: jest.SpyInstance;
@@ -198,11 +193,13 @@ describe("recursive discovery", () => {
     process.exitCode = undefined;
     mockedRunCommand.mockReset();
     mockedInstallPhase.mockReset();
+    getStepsSpy = jest.spyOn(Build.prototype, "getSteps").mockImplementation(mockGetSteps);
     logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
     errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
   });
 
   afterEach(() => {
+    getStepsSpy.mockRestore();
     homeSpy.mockRestore();
     cwdSpy?.mockRestore();
     cwdSpy = undefined;

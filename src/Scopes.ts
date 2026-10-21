@@ -34,7 +34,7 @@ class Scopes {
     this.config = config;
   }
 
-  askWhichScope = () => {
+  askWhichScope() {
     return [
       {
         "type": "list",
@@ -43,9 +43,9 @@ class Scopes {
         "choices": this.getScopes()
       }
     ];
-  };
+  }
 
-  askNewScope = () => {
+  askNewScope() {
     return [
       {
         "name": "scopeName",
@@ -54,9 +54,9 @@ class Scopes {
       },
       ...this.askEditScope()
     ];
-  };
+  }
 
-  askEditScope = (defaults?: ScopeDefaultsType) => {
+  askEditScope(defaults?: ScopeDefaultsType) {
     return [
       {
         "name": "authorName",
@@ -74,9 +74,9 @@ class Scopes {
         "default": defaults?.url ? defaults.url : ""
       }
     ];
-  };
+  }
 
-  createOrEditScope = (answers: ScopeAnswersType) => {
+  createOrEditScope(answers: ScopeAnswersType) {
     let name = "";
     if(answers.scopeName[0] != "@") name = "@";
     name += answers.scopeName;
@@ -95,9 +95,9 @@ class Scopes {
         url: answers.authorURL
       }
     };
-  };
+  }
 
-  deleteScope = (scope: string) => {
+  deleteScope(scope: string) {
     let name = "";
     if(scope[0] != "@") name = "@";
     name += scope;
@@ -109,19 +109,19 @@ class Scopes {
     }
 
     delete this.config.config.scopes[name];
-  };
+  }
 
-  getScopes = () => {
+  getScopes() {
     const scopes: string[] = Object.keys(this.config.config.scopes);
 
     return scopes;
-  };
+  }
 
-  getScope = (scope: string) => {
+  getScope(scope: string) {
     return this.config.config.scopes[scope];
-  };
+  }
 
-  getQuestions = (defaults: { scopeName?: string }) => {
+  getQuestions(defaults: { scopeName?: string }) {
     return [
       {
         name: "scopeName",
@@ -129,7 +129,7 @@ class Scopes {
         default: defaults.scopeName || null
       }
     ];
-  };
+  }
 }
 
 export default Scopes;
