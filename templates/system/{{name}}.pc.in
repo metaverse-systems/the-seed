@@ -9,4 +9,4 @@ Description: {{name}}, {{kind_title}}
 Version: @PACKAGE_VERSION@
 Libs: -L${libdir} -l{{name}}
 Cflags: -I${includedir}
-Requires: ecs-cpp >= 2.0.0
+Requires: ecs-cpp >= {{ecs_cpp_version}}, the-seed >= {{the_seed_version}}
