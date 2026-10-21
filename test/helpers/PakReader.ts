@@ -48,7 +48,8 @@ function component(): ComponentWithReader | null {
 
 /** True when the native component loads and has the pak reader. */
 export function nativeReaderAvailable(): boolean {
-  return component() !== null;
+  const loaded = component();
+  return loaded !== null && typeof loaded.readResourcePak === "function";
 }
 
 /** Why the reader cannot be used, for the message of a skipped check. */

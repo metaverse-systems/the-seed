@@ -21,7 +21,7 @@
  *   entry in `package.json`; the success line is the same as without them. A malformed or repeated attribute is a
  *   usage error: status 3, nothing on standard output and exactly three lines on standard error (`Error: <message>`,
  *   the usage line of `add`, the help hint), given before the project or the file is read, so the working
- *   directory is unchanged. The messages are those of contracts/resource-pak.md.
+ *   directory is unchanged.
  * - The three cases of an invalid project directory that used to be in the exit status tests are
  *   kept here with their assertions unchanged.
  */
@@ -364,6 +364,80 @@ describe("resource-pak build", () => {
     expect(fs.readFileSync(path.join(env.project, "package.json")).equals(description)).toBe(true);
     expect(fs.readdirSync(env.project).filter((entry) => entry.endsWith(".tmp"))).toEqual([]);
   });
+
+  /** Builds once, applies a change to the project, builds again and checks the refusal left everything as it was. */
+  async function refusedAfter(
+    files: Record<string, string>, change: (project: string) => void, status: number, stderr: string
+  ): Promise<void> {
+    const env = await projectWith(files);
+    expect((await build(env)).status).toBe(0);
+    const pak = path.join(env.project, "sounds.pak");
+    const before = fileDigest(pak);
+    change(env.project);
+
+    const run = await build(env);
+
+    expect(run.status).toBe(status);
+    expect(run.stdout).toBe("");
+    expect(run.stderr).toBe(stderr);
+    expect(fileDigest(pak)).toBe(before);
+    expect(fs.readdirSync(env.project).filter((entry) => entry.endsWith(".tmp"))).toEqual([]);
+  }
+
+  const editResources = (project: string, edit: (resources: Array<Record<string, unknown>>) => void): void => {
+    const file = path.join(project, "package.json");
+    const description = JSON.parse(fs.readFileSync(file, "utf8")) as { resources: Array<Record<string, unknown>> };
+    edit(description.resources);
+    fs.writeFileSync(file, JSON.stringify(description, null, 2));
+  };
+
+  it("with a resource file that is a directory is 2 saying it is not a file, the existing pak unchanged", async () => {
+    await refusedAfter({ "theme.ogg": "ogg" }, (project) => {
+      fs.rmSync(path.join(project, "theme.ogg"));
+      fs.mkdirSync(path.join(project, "theme.ogg"));
+    }, 2, "Error: Resource \"theme.ogg\" refers to theme.ogg, which is not a file.\n");
+  });
+
+  it("with a resource file outside the project is 2 saying so, the existing pak unchanged", async () => {
+    await refusedAfter({ "theme.ogg": "ogg" }, (project) => {
+      fs.writeFileSync(path.join(path.dirname(project), "outside.dat"), "outside");
+      editResources(project, (resources) => { resources[0].filename = "../outside.dat"; });
+    }, 2, "Error: Resource \"theme.ogg\" refers to ../outside.dat, which is outside the project.\n");
+  });
+
+  it("with a resource name that is not well-formed Unicode is 2 naming the resource's index", async () => {
+    await refusedAfter({ "theme.ogg": "ogg" }, (project) => {
+      editResources(project, (resources) => { resources[0].name = "bad\ud800name"; });
+    }, 2, "Error: Resource 0 has a name that is not valid Unicode text.\n");
+  });
+
+  it("with two entries of one name in package.json is 2 naming the resource", async () => {
+    await refusedAfter({ "a.txt": "a", "b.txt": "b" }, (project) => {
+      editResources(project, (resources) => { resources[1].name = resources[0].name; });
+    }, 2, "Error: Resource \"a.txt\" appears more than once in package.json.\n");
+  });
+
+  (typeof process.getuid === "function" && process.getuid() !== 0 ? it : it.skip)(
+    "in a directory that cannot be written is 1 with the path and the system's reason, the existing pak unchanged",
+    async () => {
+      const env = await projectWith({ "theme.ogg": "ogg" });
+      expect((await build(env)).status).toBe(0);
+      const pak = path.join(env.project, "sounds.pak");
+      const before = fileDigest(pak);
+      fs.chmodSync(env.project, 0o555);
+      try {
+        const run = await build(env);
+
+        expect(run.status).toBe(1);
+        expect(run.stdout).toBe("");
+        expect(errorLines(run)).toHaveLength(1);
+        expect(run.stderr).toMatch(/^Error: Cannot write .+: .+\n$/);
+      } finally {
+        fs.chmodSync(env.project, 0o755);
+      }
+      expect(fileDigest(pak)).toBe(before);
+    }
+  );
 });
 
 describe("resource-pak add", () => {
