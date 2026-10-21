@@ -10,6 +10,9 @@
  * - The message for an email or web address with an unusable character names the detail ("email"
  *   or "web address"/"URL") and the character in double quotes; for a control character only the
  *   detail is checked.
+ * - The generated-files group compares each project with the specified text for its kind; the
+ *   program's `README.md` says "builds the program and installs it into the tool's prefix; `the-seed build
+ *   windows` cross-compiles it for Windows." and its `configure.ac` keeps today's order and `windows.h` check.
  * - The creation message printed by the command is `Created <kind> <scope>/<name> in ./<name>`.
  */
 import fs from "fs";
@@ -398,6 +401,211 @@ describe("createPackage", () => {
       expect(state()).toEqual(snapshot);
       expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
       expect(fs.readdirSync(elsewhere)).toEqual([]);
+    });
+  });
+});
+
+// The files a new project holds: the exact tree, no empty or generic files, one README, and the
+// formatting rules every template file follows.
+// Choices: the expected `README.md` for a program reads "builds the program and installs it into the
+// tool's prefix; `the-seed build windows` cross-compiles it for Windows."; the program's `configure.ac`
+// keeps its statement order and its `windows.h` check as they are today; the ignore file is compared
+// with the template's own, which is stored as `gitignore` (or `.gitignore` until it is renamed).
+describe("generated files", () => {
+  const templatesRoot = path.resolve(__dirname, "..", "templates");
+  const name = "mesh.loader";
+  const variables = [
+    "name", "identifier", "scope", "package", "kind", "kind_title", "author_name", "author_contact",
+    "author_email", "author_url", "pc_url_line", "readme_url_line", "year", "ecs_cpp_version", "the_seed_version"
+  ];
+  let root: string;
+  let parentDir: string;
+  let savedCwd: string;
+
+  beforeEach(() => {
+    root = createTempDir();
+    fs.mkdirSync(path.join(root, "cwd"));
+    parentDir = path.join(root, "work");
+    fs.mkdirSync(parentDir);
+    savedCwd = process.cwd();
+    process.chdir(path.join(root, "cwd"));
+  });
+
+  afterEach(() => {
+    process.chdir(savedCwd);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  const generate = (kind: Kind, author: Author = ada): string => {
+    const { configDir } = writeConfig(root, { "@acme": author });
+    const template = new Template(new Config(configDir));
+    template.type = kind;
+    return (template.createPackage as unknown as CreatePackage)("@acme", name, parentDir, new Date(2026, 5, 1));
+  };
+
+  const expectedTree = (kind: Kind): string[] => {
+    const tree = [
+      "AUTHORS", "COPYING", "Makefile.am", "README.md", "autogen.sh", "configure.ac", ".gitignore",
+      "package.json", "src/Makefile.am", `src/${name}.cpp`, `src/${name}.hpp`
+    ];
+    if (kind !== "program") tree.push(`${name}.pc.in`);
+    return tree.sort();
+  };
+
+  const expectedReadme = (kind: Kind, author: Author): string => {
+    const build = kind === "program" ? "builds the program" : "builds it for Linux";
+    return [
+      `# ${name}`,
+      "",
+      `${name} is ${kindTitle[kind]}, in the scope @acme.`,
+      "",
+      author.email === "" ? `Author: ${author.name}` : `Author: ${author.name} <${author.email}>`,
+      ...(author.url === "" ? [] : [`Web: ${author.url}`]),
+      "",
+      "## Building",
+      "",
+      "    the-seed build native",
+      "",
+      `${build} and installs it into the tool's prefix; \`the-seed build windows\` cross-compiles it for Windows.`,
+      "Run `the-seed help build` for the options.",
+      "",
+      "## Licence",
+      "",
+      "MIT; see COPYING.",
+      ""
+    ].join("\n");
+  };
+
+  const expectedConfigure = (kind: Kind): string => {
+    const head = [
+      "AC_PREREQ([2.71])",
+      `AC_INIT([${name}], [0.0.1], [ada@example.com], [${name}], [https://acme.example])`,
+      "AC_CONFIG_HEADERS([config.h])",
+      "AC_PROG_CXX",
+      "AM_INIT_AUTOMAKE([foreign subdir-objects])",
+      "LT_INIT",
+      ""
+    ];
+    const pkg = ["PKG_PROG_PKG_CONFIG", "PKG_INSTALLDIR", ""];
+    const macroDir = ["AC_CONFIG_MACRO_DIR([m4])", ""];
+    const checks = ["PKG_CHECK_MODULES([LIBECS], [ecs-cpp >= 2.1.0])"];
+    if (kind !== "component") checks.push("PKG_CHECK_MODULES([LIBTHE_SEED], [the-seed >= 0.8.0])");
+    checks.push("");
+    const windows = [
+      "AC_CHECK_HEADER([windows.h],",
+      "    [LIBS=\"$LIBS\"],",
+      "    [LIBS=\"$LIBS -ldl\"],",
+      "    [])",
+      ""
+    ];
+    const files = kind === "program"
+      ? ["AC_CONFIG_FILES([Makefile src/Makefile])", "AC_OUTPUT"]
+      : ["AC_CONFIG_FILES([Makefile src/Makefile])", `AC_CONFIG_FILES([${name}.pc])`, "AC_OUTPUT"];
+    const body = kind === "program"
+      ? [...head, ...macroDir, ...checks, ...windows, ...files]
+      : [...head, ...pkg, ...macroDir, ...checks, ...files];
+    return body.join("\n") + "\n";
+  };
+
+  for (const kind of kinds) {
+    describe(kind, () => {
+      it("holds exactly the files of the template tree", () => {
+        const project = generate(kind);
+
+        expect(listFiles(project)).toEqual(expectedTree(kind));
+      });
+
+      it("holds no empty file and no generic installation text", () => {
+        const project = generate(kind);
+
+        for (const file of listFiles(project)) {
+          const content = fs.readFileSync(path.join(project, file), "utf8");
+          expect({ file, empty: content.length === 0 }).toEqual({ file, empty: false });
+          expect({ file, generic: content.includes("Installation Instructions") }).toEqual({ file, generic: false });
+        }
+      });
+
+      it("has exactly one README, README.md, with the project's details", () => {
+        const project = generate(kind);
+
+        const readmes = listFiles(project).filter((file) => /^readme/i.test(path.basename(file)));
+        expect(readmes).toEqual(["README.md"]);
+        expect(fs.lstatSync(path.join(project, "README.md")).isFile()).toBe(true);
+        expect(fs.readFileSync(path.join(project, "README.md"), "utf8")).toBe(expectedReadme(kind, ada));
+      });
+
+      it("leaves out the Web line of the README when no web address is configured", () => {
+        const bare: Author = { name: "Ada Lovelace", email: "", url: "" };
+        const project = generate(kind, bare);
+
+        const readme = fs.readFileSync(path.join(project, "README.md"), "utf8");
+        expect(readme).toBe(expectedReadme(kind, bare));
+        expect(readme).not.toContain("Web:");
+      });
+
+      it("writes the ignore file, with the pkg-config line for components and systems", () => {
+        const project = generate(kind);
+
+        const source = ["gitignore", ".gitignore"]
+          .map((file) => path.join(templatesRoot, kind, file))
+          .find((file) => fs.existsSync(file));
+        expect(source).toBeDefined();
+        const written = fs.readFileSync(path.join(project, ".gitignore"), "utf8");
+        expect(written).toBe(fs.readFileSync(source as string, "utf8"));
+        expect(written.split("\n").includes("*.pc")).toBe(kind !== "program");
+      });
+
+      it("writes autogen.sh as an executable file", () => {
+        const project = generate(kind);
+
+        expect(fs.statSync(path.join(project, "autogen.sh")).mode & 0o777).toBe(0o755);
+      });
+
+      it("writes configure.ac as specified, in foreign mode", () => {
+        const project = generate(kind);
+
+        const text = fs.readFileSync(path.join(project, "configure.ac"), "utf8");
+        expect(text).toContain("AM_INIT_AUTOMAKE([foreign subdir-objects])");
+        expect(text).toBe(expectedConfigure(kind));
+      });
+    });
+  }
+
+  describe("template files", () => {
+    const files: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else files.push(full);
+      }
+    };
+    walk(templatesRoot);
+
+    const offenders = (test: (content: string) => boolean): string[] =>
+      files.filter((file) => test(fs.readFileSync(file, "utf8"))).map((file) => path.relative(templatesRoot, file));
+
+    it("have no line ending in a space or a tab", () => {
+      expect(offenders((content) => content.split("\n").some((line) => /[ \t]$/.test(line)))).toEqual([]);
+    });
+
+    it("have no line holding only whitespace", () => {
+      expect(offenders((content) => content.split("\n").some((line) => /^[ \t]+$/.test(line)))).toEqual([]);
+    });
+
+    it("end with exactly one newline", () => {
+      expect(offenders((content) => !content.endsWith("\n") || content.endsWith("\n\n"))).toEqual([]);
+    });
+
+    it("use only the known template variables", () => {
+      const unknown: string[] = [];
+      for (const file of files) {
+        const text = path.relative(templatesRoot, file) + "\n" + fs.readFileSync(file, "utf8");
+        for (const match of text.matchAll(/\{\{([a-z0-9_]+)\}\}/g)) {
+          if (!variables.includes(match[1])) unknown.push(path.relative(templatesRoot, file) + ": " + match[1]);
+        }
+      }
+      expect(unknown).toEqual([]);
     });
   });
 });
