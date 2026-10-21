@@ -287,6 +287,11 @@ class ResourcePak {
       }
       if (!ResourcePak.inside(root, real)) throw refers("is outside the project");
       if (!stats.isFile()) throw refers("is not a file");
+      try {
+        fs.accessSync(file, fs.constants.R_OK);
+      } catch {
+        throw refers("cannot be read");
+      }
       return { file, size: stats.size, filename: resource.filename };
     });
 

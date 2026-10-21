@@ -841,6 +841,18 @@ describe("ResourcePak", () => {
         expectRefusal(dir, 2, { code: "resource-file-missing", message: "Resource \"theme\" refers to music/theme.ogg, which is not a file." });
       });
 
+      it("a resource file that cannot be read", () => {
+        const dir = builtPak();
+        const file = path.join(dir, "music", "theme.ogg");
+        fs.chmodSync(file, 0o000);
+        try {
+          if (process.getuid && process.getuid() === 0) return; // root reads any file
+          expectRefusal(dir, 2, { code: "resource-file-missing", message: "Resource \"theme\" refers to music/theme.ogg, which cannot be read." });
+        } finally {
+          fs.chmodSync(file, 0o644);
+        }
+      });
+
       it("a resource file outside the project", () => {
         const dir = builtPak();
         fs.writeFileSync(path.join(parentDir, "outside.dat"), "outside");
