@@ -1,5 +1,4 @@
-import fs from "fs";
-import { ConfigType, ScopeAnswersType, ScopeDefaultsType } from "./types";
+import { ScopeAnswersType, ScopeDefaultsType } from "./types";
 import Config from "./Config";
 
 /**

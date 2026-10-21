@@ -380,36 +380,10 @@ export function resolveBuildOrder(
     // keep the resolved path
   }
 
-  // Compute in-degrees
-  const inDegree = new Map<string, number>();
-  for (const projectPath of graph.projects.keys()) {
-    inDegree.set(projectPath, 0);
-  }
-  for (const [, depPaths] of graph.edges) {
-    for (const depPath of depPaths) {
-      if (inDegree.has(depPath)) {
-        inDegree.set(depPath, (inDegree.get(depPath) || 0) + 1);
-      }
-    }
-  }
-
-  // Reverse edges: for Kahn's, we need to know which projects depend on a given project
-  // Actually, Kahn's uses forward edges. Let me re-think.
-  // In our graph, edges[A] = [B, C] means "A depends on B and C" (B and C must be built before A).
-  // For Kahn's: in-degree of a node = number of projects that must be built before it.
-  // Wait no — in-degree = number of edges pointing TO a node.
-  // If A depends on B, then there's an edge A -> B (A depends on B).
-  // For build ordering, B must come before A.
-  // In Kahn's for topological sort on a DAG:
-  //   - We want to produce an order where dependencies come first
-  //   - The edge "A depends on B" means B -> A in build order
-  //   - In-degree: count how many prerequisites each node has
-  //   - A node with in-degree 0 has no prerequisites → can be built first
-
-  // Recompute in-degrees correctly:
-  // edges[A] = [B, C] means A depends on B and C
-  // So A's in-degree should count its dependencies (B and C are prerequisites of A)
-  // In-degree of A = number of dependencies of A = edges[A].length
+  // Kahn's algorithm over "depends on" edges: edges[A] lists what A depends on, so
+  // a project's in-degree is the number of its dependencies that are in the graph.
+  // Projects with none are ready first; building a project releases its dependents.
+  // Ready projects are taken by type tier, then by name.
   const correctInDegree = new Map<string, number>();
   for (const projectPath of graph.projects.keys()) {
     const deps = graph.edges.get(projectPath) || [];

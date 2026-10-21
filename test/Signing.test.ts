@@ -438,12 +438,12 @@ describe("Signing", () => {
 
     it("validates ECDSA P-256 key type", async () => {
       // Generate an RSA key pair (unsupported) and write it
-      const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
+      const { privateKey } = crypto.generateKeyPairSync("rsa", {
         modulusLength: 2048,
       });
 
       // Create a self-signed cert with RSA (we need to write PEM files)
-      const certPem = generateSelfSignedRSACert(publicKey, privateKey);
+      const certPem = generateSelfSignedRSACert(privateKey);
       const keyPem = privateKey.export({ type: "pkcs8", format: "pem" }) as string;
 
       const rsaCertPath = path.join(externalDir, "rsa-cert.pem");
@@ -492,7 +492,7 @@ describe("Signing", () => {
 /**
  * Helper: generate a self-signed RSA certificate using Node.js crypto.
  */
-function generateSelfSignedRSACert(publicKey: crypto.KeyObject, privateKey: crypto.KeyObject): string {
+function generateSelfSignedRSACert(privateKey: crypto.KeyObject): string {
   // Use crypto.X509Certificate isn't available for generation, so use a workaround:
   // create a CSR-like structure. Actually, Node doesn't have cert generation built-in for RSA.
   // We'll use @peculiar/x509 for this in the test.
@@ -868,10 +868,10 @@ describe("SigningError", () => {
     });
 
     it("importCert with an RSA key", async () => {
-      const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
       const rsaCert = path.join(external, "rsa-cert.pem");
       const rsaKey = path.join(external, "rsa-key.pem");
-      fs.writeFileSync(rsaCert, generateSelfSignedRSACert(publicKey, privateKey));
+      fs.writeFileSync(rsaCert, generateSelfSignedRSACert(privateKey));
       fs.writeFileSync(rsaKey, privateKey.export({ type: "pkcs8", format: "pem" }) as string);
       const error = await signingErrorOf(() => signing.importCert(rsaCert, rsaKey, "@test"));
       expect(error.code).toBe("unsupported-key");
