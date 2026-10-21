@@ -746,8 +746,8 @@ Usage: the-seed resource-pak <create|add|build>
 Create a resource pak project, add resources to it and build it.
 
 Subcommands:
-  create
-      Create a resource pak project in the prefix's projects directory
+  create [<scope>/<name>]
+      Create a resource pak project in the current directory
   add <resource-name> <filename>
       Add a file to the resource pak project
   build

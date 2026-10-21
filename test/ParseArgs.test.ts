@@ -625,6 +625,54 @@ describe("parseCommandLine", () => {
     });
   });
 
+  describe("resource-pak create names", () => {
+    // The positional is keyed `name` like the one of `template` and holds `{ scope, name }`; it is
+    // optional, and the name follows the resource pak rule (form only, no identifier rules).
+    const FORM =
+      "A project name must start with a lowercase letter and contain only lowercase letters, digits, " +
+      "\".\", \"_\" and \"-\" (such as hello-world).";
+
+    it("accepts @s/sounds and s/sounds with the scope normalised", () => {
+      for (const word of ["@s/sounds", "s/sounds"]) {
+        const parsed = expectRun(parse("resource-pak", "create", word));
+        expect(parsed.subcommand).toBe("create");
+        expect(positionals(parsed).name).toEqual({ scope: "@s", name: "sounds" });
+      }
+    });
+
+    it("leaves the name absent when none is given", () => {
+      expect(positionals(expectRun(parse("resource-pak", "create")))).not.toHaveProperty("name");
+    });
+
+    it.each(["@s", "@s/", "@s/a/b", "@s/a b", "@a b/sounds"])("rejects the form %p like template does", (word) => {
+      const error = expectUsage(parse("resource-pak", "create", word));
+      expect(error.message).toBe(
+        `Invalid value "${word}" for <scope>/<name>; expected a scope and a name such as @my-scope/hello.`
+      );
+      expect(error.argument).toBe(word);
+      expect(error.command).toBe("resource-pak");
+      expect(error.subcommand).toBe("create");
+    });
+
+    it.each(["3d", "Hello", "-x", ".x", "_x", "p\u00e4k"])("rejects the name %p with the form sentence", (name) => {
+      const word = `@s/${name}`;
+      const error = expectUsage(parse("resource-pak", "create", word));
+      expect(error.message).toBe(`Invalid value "${word}" for <scope>/<name>; ${FORM}`);
+      expect(error.argument).toBe(word);
+    });
+
+    it.each(["class", "ecs", "std", "and", "a--b", "a__b", "mesh.loader", "hello-world", "x1"])(
+      "accepts %p: the identifier rules of code projects do not apply", (name) => {
+        const parsed = expectRun(parse("resource-pak", "create", `@s/${name}`));
+        expect(positionals(parsed).name).toEqual({ scope: "@s", name });
+      });
+
+    it("rejects an extra word after a valid name", () => {
+      const error = expectUsage(parse("resource-pak", "create", "@s/sounds", "b"));
+      expect(error.message).toBe("Unexpected argument \"b\" for \"the-seed resource-pak create\".");
+    });
+  });
+
   describe("targets", () => {
     it.each(["native", "windows"])("accepts %s for build and dependencies", (target) => {
       expect(positionals(expectRun(parse("build", target))).target).toBe(target);

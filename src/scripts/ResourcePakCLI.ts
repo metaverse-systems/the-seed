@@ -2,6 +2,8 @@ import fs from "fs";
 import path from "path";
 import inquirer from "inquirer";
 import Config from "../Config";
+import Signing from "../Signing";
+import { chooseScope } from "../cli/ScopeChoice";
 import ResourcePak from "../ResourcePak";
 import { CliContext, ParsedCommand } from "../cli/CommandSpec";
 import { MissingError } from "../cli/ExitStatus";
@@ -23,8 +25,20 @@ const ResourcePakCLI = async (parsed: ParsedCommand, context: CliContext): Promi
 
   switch (parsed.subcommand) {
     case "create": {
-      const answers = await inquirer.prompt(rp.askName());
-      rp.createPackage(answers.scopeName, answers.pakName);
+      const given = parsed.positionals.name as { scope: string; name: string } | undefined;
+      let scope: string;
+      let name: string;
+      if (given) {
+        // A scope that is not configured is refused before anything is written.
+        scope = await chooseScope(new Signing(context.configDir), given.scope, false);
+        name = given.name;
+      } else {
+        const answers = await inquirer.prompt(rp.askName());
+        scope = answers.scopeName;
+        name = answers.pakName;
+      }
+      rp.createPackage(scope, name, context.cwd);
+      console.log(`Created resource pak ${scope}/${name} in ./${name}`);
       break;
     }
     case "add": {

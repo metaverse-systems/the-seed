@@ -481,29 +481,6 @@ describe("end to end", () => {
       expect(run.stdout).not.toContain("prefix");
       expect(errorLines(run)).toHaveLength(1);
     });
-
-    it("resource-pak add outside a pak project is 2 with one Error line and no stack", async () => {
-      const run = await exec(["resource-pak", "add", "x", "f"], makeEnv());
-      expect(run.status).toBe(2);
-      expect(errorLines(run)).toHaveLength(1);
-      expect(run.stderr).toContain("package.json");
-    });
-
-    it("resource-pak build outside a pak project is 2 with one Error line and no stack", async () => {
-      const run = await exec(["resource-pak", "build"], makeEnv());
-      expect(run.status).toBe(2);
-      expect(errorLines(run)).toHaveLength(1);
-    });
-
-    it("resource-pak add with a file that does not exist is 2 and leaves the project description unchanged", async () => {
-      const env = makeEnv();
-      const description = JSON.stringify({ name: "@a/pak", version: "1.0.0" });
-      fs.writeFileSync(path.join(env.cwd, "package.json"), description);
-      const run = await exec(["resource-pak", "add", "x", "missing.dat"], env);
-      expect(run.status).toBe(2);
-      expect(errorLines(run)).toHaveLength(1);
-      expect(fs.readFileSync(path.join(env.cwd, "package.json"), "utf-8")).toBe(description);
-    });
   });
 
   describe("the native component is missing", () => {

@@ -265,9 +265,18 @@ export const COMMANDS: CommandSpec[] = [
     subcommands: [
       sub({
         name: "create",
-        summary: "Create a resource pak project in the prefix's projects directory",
+        summary: "Create a resource pak project in the current directory",
         handler: "resource-pak.create",
         interactive: true,
+        positionals: [
+          {
+            name: "name",
+            help: "The resource pak, such as @my-scope/sounds; asked for when not given",
+            required: false,
+            parse: packageName("resource-pak"),
+            usage: "<scope>/<name>",
+          },
+        ],
       }),
       sub({
         name: "add",

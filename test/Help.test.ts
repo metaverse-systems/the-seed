@@ -183,6 +183,36 @@ describe("subcommand help", () => {
   });
 });
 
+describe("resource-pak create help", () => {
+  const command = COMMANDS.find((candidate) => candidate.name === "resource-pak") as CommandSpec;
+  const create = command.subcommands.find((candidate) => candidate.name === "create") as SubcommandSpec;
+
+  it("has the summary for the current directory", () => {
+    expect(create.summary).toBe("Create a resource pak project in the current directory");
+    expect(renderSubcommandHelp(command, create)).toContain("Create a resource pak project in the current directory");
+  });
+
+  it("takes the optional positional [<scope>/<name>]", () => {
+    expect(create.positionals).toHaveLength(1);
+    expect(create.positionals[0].required).toBe(false);
+    const text = renderSubcommandHelp(command, create);
+    expect(text.split("\n")[0]).toBe("Usage: the-seed resource-pak create [<scope>/<name>]");
+  });
+
+  it("describes the positional", () => {
+    const args = section(renderSubcommandHelp(command, create), "Arguments") ?? [];
+    expect(args).toHaveLength(1);
+    expect(args[0].text).toContain("The resource pak, such as @my-scope/sounds; asked for when not given");
+  });
+
+  it("lists create [<scope>/<name>] with its summary in the help of the command", () => {
+    const entries = section(renderCommandHelp(command), "Subcommands") ?? [];
+    const entry = entries.find((candidate) => candidate.head.startsWith("create"));
+    expect(entry?.text).toContain("create [<scope>/<name>]");
+    expect(entry?.text).toContain("Create a resource pak project in the current directory");
+  });
+});
+
 describe("every help text", () => {
   it.each(allHelpTexts().map((help) => [help.label, help.text] as const))(
     "%s has no line over 100 characters and never names the script file",

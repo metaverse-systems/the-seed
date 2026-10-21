@@ -1,8 +1,12 @@
+import crypto from "crypto";
 import fs from "fs-extra";
-import { execSync } from "child_process";
+import path from "path";
 import Config from "./Config";
 import Scopes from "./Scopes";
-import { PackageType } from "./types";
+import { PackageAuthorType, PackageType } from "./types";
+import { ProjectError } from "./ProjectError";
+import { validateProjectName } from "./ProjectName";
+import { editScopeHint } from "./cli/Hints";
 
 class ResourcePak {
   packageDir = "";
@@ -25,35 +29,82 @@ class ResourcePak {
       },
       {
         "name": "pakName",
-        "message": "Choose name for resource pak"
+        "message": "Choose name for resource pak",
+        "validate": (name: string): true | string => validateProjectName(name, "resource-pak") ?? true
       }
     ];
   };
 
-  createPackage = (scope: string, name: string) => {
-    const scopeDir = this.config.config.prefix + "/projects/" + scope;
-    fs.mkdirSync(scopeDir, { recursive: true });
-
-    this.packageDir = scopeDir + "/" + name;
-    fs.mkdirSync(this.packageDir, { recursive: true });
-
-    // Create default package.json
-    execSync("npm init --yes", { cwd: this.packageDir });
-
-    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json").toString());
-    if(!this.package) {
-      return;
+  /**
+   * Creates the resource pak project <parentDir>/<name>.
+   * Before anything is written it checks the name, the scope, the author's name and the target; the project is
+   * written into a hidden sibling and renamed into place.
+   * @param scope Scope the project belongs to, with its "@"
+   * @param name Project name
+   * @param parentDir Directory the project is created in (the current directory by default)
+   * @returns The absolute path of the new project
+   * @throws ProjectError when the project cannot be created
+   */
+  createPackage = (scope: string, name: string, parentDir: string = process.cwd()): string => {
+    const invalid = validateProjectName(name, "resource-pak");
+    if (invalid !== null) {
+      throw new ProjectError("invalid-name", invalid);
     }
-    this.package.author = this.scopes.getScope(scope).author;
-    this.package.license = "UNLICENSED";
-    this.package.name = scope + "/" + name;
-    this.package.version = "0.0.1";
-    this.package.scripts = {
-      "test": "echo \"Error: no test specified\" && exit 1",
-      "build": "the-seed resource-pak build"
+    const configured = this.config.config.scopes;
+    if (!Object.prototype.hasOwnProperty.call(configured, scope)) {
+      const names = Object.keys(configured);
+      throw new ProjectError("unknown-scope",
+        `Scope "${scope}" is not configured. Configured scopes: ${names.length > 0 ? names.join(", ") : "none"}.`);
+    }
+    const author = configured[scope].author;
+    if (!author.name || author.name.trim() === "") {
+      throw new ProjectError("author-name-missing", `Required author name is missing for scope '${scope}'.`, editScopeHint(scope));
+    }
+
+    const parent = path.resolve(parentDir);
+    const target = path.join(parent, name);
+    if (this.exists(target)) {
+      throw new ProjectError("target-exists", `${target} already exists; nothing was created.`);
+    }
+
+    const packageAuthor: PackageAuthorType = { name: author.name };
+    if (author.email) packageAuthor.email = author.email;
+    if (author.url) packageAuthor.url = author.url;
+    const description: PackageType = {
+      name: `${scope}/${name}`,
+      version: "0.0.1",
+      author: packageAuthor,
+      license: "UNLICENSED",
+      scripts: {
+        "build": "the-seed resource-pak build"
+      },
+      resources: []
     };
-    this.package.resources = [];
-    this.save();
+
+    const hidden = path.join(parent, `.${name}.creating-${crypto.randomBytes(6).toString("hex")}`);
+    try {
+      fs.mkdirSync(hidden);
+      fs.writeFileSync(path.join(hidden, "package.json"), JSON.stringify(description, null, 2) + "\n");
+      if (this.exists(target)) {
+        throw new ProjectError("target-exists", `${target} already exists; nothing was created.`);
+      }
+      fs.renameSync(hidden, target);
+    } catch (error) {
+      fs.rmSync(hidden, { recursive: true, force: true });
+      if (error instanceof ProjectError) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new ProjectError("write-failed", `${target} could not be created: ${reason}`);
+    }
+    return target;
+  };
+
+  private exists = (file: string): boolean => {
+    try {
+      fs.lstatSync(file);
+      return true;
+    } catch {
+      return false;
+    }
   };
 
   save = () => {
