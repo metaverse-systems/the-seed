@@ -137,7 +137,7 @@ function readArguments(command: CommandSpec, sub: SubcommandSpec, words: string[
       }
       const result = option.value.parse(raw, name);
       if (!result.ok) {
-        throw fail(result.message, valueArgument);
+        throw fail(result.message, result.argument ?? valueArgument);
       }
       if (option.repeatable) {
         const values = (parsed.options[key] as unknown[] | undefined) ?? [];

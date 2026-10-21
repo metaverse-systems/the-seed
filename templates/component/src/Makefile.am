@@ -1,7 +1,7 @@
-ACLOCAL_AMFLAGS=-I m4
-lib_LTLIBRARIES = libSKELETON.la
-pkginclude_HEADERS = SKELETON.hpp
-libSKELETON__la_SOURCES = SKELETON.cpp
-libSKELETON__la_CXXFLAGS = -std=c++20 ${LIBECS_CFLAGS}
-libSKELETON__la_LDFLAGS = -no-undefined
-libSKELETON__la_LIBADD = ${LIBECS_LIBS}
+ACLOCAL_AMFLAGS = -I m4
+lib_LTLIBRARIES = lib{{name}}.la
+pkginclude_HEADERS = {{name}}.hpp
+lib{{identifier}}_la_SOURCES = {{name}}.cpp
+lib{{identifier}}_la_CXXFLAGS = -std=c++20 ${LIBECS_CFLAGS}
+lib{{identifier}}_la_LDFLAGS = -no-undefined
+lib{{identifier}}_la_LIBADD = ${LIBECS_LIBS}

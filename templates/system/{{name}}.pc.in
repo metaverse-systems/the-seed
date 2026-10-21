@@ -1,0 +1,12 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+includedir=@includedir@
+
+Name: @PACKAGE_NAME@
+Description: {{name}}, {{kind_title}}
+{{pc_url_line}}
+Version: @PACKAGE_VERSION@
+Libs: -L${libdir} -l{{name}}
+Cflags: -I${includedir}
+Requires: ecs-cpp >= {{ecs_cpp_version}}, the-seed >= {{the_seed_version}}

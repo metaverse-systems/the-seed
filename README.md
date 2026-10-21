@@ -160,7 +160,7 @@ The scope `@my-project` is saved to your configuration. `the-seed scopes list` p
 
 ### Step 3: Create a component in the current directory
 
-Code projects are created in the directory you are in, never under the prefix:
+Every project is created in the directory you are in, in a directory named after it, and nothing is written under the prefix:
 
 ```bash
 mkdir -p ~/work && cd ~/work
@@ -168,10 +168,10 @@ the-seed template component @my-project/hello-world
 ```
 
 ```text
-Copying template from /usr/lib/node_modules/@metaverse-systems/the-seed/templates/component to hello-world
+Created component @my-project/hello-world in ./hello-world
 ```
 
-This creates `./hello-world` with autotools build files and a package.json whose name is `@my-project/hello-world` and whose author is the scope's author. Without the argument the command asks for the scope and the name:
+This creates `./hello-world` holding a licence (`COPYING`) and an `AUTHORS` file that name the scope's author, a `README.md`, the autotools build files (`autogen.sh`, `configure.ac` and a `Makefile.am` in the project and in `src`), the source files, a `.gitignore`, the pkg-config file `hello-world.pc.in` (components and systems) and a `package.json` whose name is `@my-project/hello-world` and whose author is the scope's author. Without the argument the command asks for the scope and the name:
 
 ```text
 ? Choose scope for component: @my-project
@@ -280,7 +280,6 @@ The installation prefix (default `~/the-seed`) has this layout:
 ~/the-seed/
 +-- config.json                    # Configuration file (prefix, scopes)
 +-- include/                       # Shared headers
-+-- projects/                      # Resource paks, by scope and name
 +-- signing/                       # Certificates and keys, one directory per scope
 |   +-- @scope-name/
 +-- x86_64-linux-gnu/              # Native Linux target
@@ -293,7 +292,7 @@ The installation prefix (default `~/the-seed`) has this layout:
         +-- pkgconfig/             # pkg-config files
 ```
 
-Code projects (components, systems and programs from `template`) are created in the current directory. Resource paks are created under `<prefix>/projects/<scope>/<name>` as they behave now.
+Every project, code project or resource pak, is created in the current directory. Creating a project reads the scopes from the configuration and writes nothing under the prefix. A `projects` directory left there by earlier versions is not used, moved or deleted.
 
 ## Exit statuses
 
@@ -304,9 +303,9 @@ Every command ends with one of these statuses:
 | Status | Meaning |
 |---|---|
 | 0 | The command did what was asked, including printing help that was asked for and a verification that is valid |
-| 1 | The command ran and the outcome is a failure: a build, packaging, installer, dependency installation or signing operation failed; verification found the file invalid, not fully signed, not checked or unsigned; the user declined to overwrite; an unexpected internal error |
-| 2 | Something the command needs is missing or unusable: a file or directory, a project description, scopes, the named scope, a certificate (or it has expired or cannot be read), a valid configuration file, the native component, a required program such as wixl |
-| 3 | Usage error, or input the command cannot interpret (for verification: a malformed manifest, or a signature file given in place of a signed file) |
+| 1 | The command ran and the outcome is a failure: a build, packaging, installer, dependency installation or signing operation failed; verification found the file invalid, not fully signed, not checked or unsigned; the user declined to overwrite; a project directory that already exists; a resource name that already exists (without --force); a resource file that changed while the pak was written; an unexpected internal error |
+| 2 | Something the command needs is missing or unusable: a file or directory, a project description, scopes, the named scope, a certificate (or it has expired or cannot be read), a valid configuration file, the native component, a required program such as wixl; the scope author's name (or an email or web address the build configuration cannot hold); a resource file; a resource pak project description |
+| 3 | Usage error, or input the command cannot interpret |
 | 4 | Verification only: intact but not trusted |
 | 128+N | A build stopped by signal N (130 after Ctrl+C) |
 
@@ -346,13 +345,15 @@ Exit statuses:
          verification that is valid
   1      The command ran and the outcome is a failure: a build, packaging, installer, dependency
          installation or signing operation failed; verification found the file invalid, not fully
-         signed, not checked or unsigned; the user declined to overwrite; an unexpected internal
-         error
+         signed, not checked or unsigned; the user declined to overwrite; a project directory that
+         already exists; a resource name that already exists (without --force); a resource file that
+         changed while the pak was written; an unexpected internal error
   2      Something the command needs is missing or unusable: a file or directory, a project
          description, scopes, the named scope, a certificate (or it has expired or cannot be read),
-         a valid configuration file, the native component, a required program such as wixl
-  3      Usage error, or input the command cannot interpret (for verification: a malformed manifest,
-         or a signature file given in place of a signed file)
+         a valid configuration file, the native component, a required program such as wixl; the
+         scope author's name (or an email or web address the build configuration cannot hold); a
+         resource file; a resource pak project description
+  3      Usage error, or input the command cannot interpret
   4      Verification only: intact but not trusted
   128+N  A build stopped by signal N (130 after Ctrl+C)
 
@@ -438,37 +439,74 @@ Subcommands:
   program [<scope>/<name>]
       Create a program
 
-The project is created in the current directory.
+Every project is created in the current directory, in a directory named after it; nothing is created
+under the prefix.
 
 Run "the-seed help template <subcommand>" for one subcommand's details.
 ```
 
-The project is created in the current directory, in a directory named after the project. `template component @my-project/hello-world` takes the scope and the name together; given alone, `template component` asks for them (`template system` and `template program` work the same way):
+The project is created in the current directory, in a directory named after the project (`./<name>`); the prefix is not written. `template component @my-project/hello-world` takes the scope and the name together; given alone, `template component` asks for them (`template system` and `template program` work the same way):
 
 ```text
 ? Choose scope for component: @my-project
 ? Choose name for component: hello-world
 ```
 
-A value that is not of the form `<scope>/<name>` is a usage error (status 3) that shows an example. Template variable substitutions applied during scaffolding:
+A value that is not of the form `<scope>/<name>` is a usage error (status 3) that shows an example.
 
-| Variable | Replaced With |
-|----------|---------------|
-| `SKELETON` | Project name |
-| `SKELETON_` | Project name with `-` replaced by `_` |
-| `AUTHOR_EMAIL` | Scope author email |
-| `AUTHOR_URL` | Scope author URL |
+**Names.** A project name starts with a lowercase letter and holds only lowercase letters, digits, `.`, `_` and `-`; anything else (upper case, a leading digit, non-ASCII characters, `/` or spaces) is a usage error (status 3), and the prompt asks again. For C++ and Automake names `-` and `.` become `_`: `hello-world` gives `hello_world` and `mesh.loader` gives `mesh_loader`. A name whose C++ form is a reserved word, has two underscores in a row, or is one the generated code already uses (such as `std`) is refused with status 3 as well.
 
-The generated `package.json` includes build scripts:
+**Generated files.** Each project holds these files, and none of them is empty:
+
+| File | Content |
+|------|---------|
+| `COPYING` | The MIT licence, with the copyright line naming the scope's author and the year |
+| `AUTHORS` | The author's name and, when set, the email in angle brackets |
+| `README.md` | What the project is, the author's name, email and web address, how to build it with `the-seed build` |
+| `configure.ac` | The project name and version `0.0.1`, the author's email as the bug-report address and the web address as the project URL, and the checks for the libraries the project links |
+| `Makefile.am` (project and `src`), `autogen.sh` | The build files; Automake runs in `foreign` mode |
+| `src/<name>.cpp`, `src/<name>.hpp` | The source; the type string is `<scope>/<name>` |
+| `<name>.pc.in` | Components and systems: the pkg-config file, whose description names the project and whose `URL:` field holds the web address |
+| `.gitignore` | Written from the template's `gitignore` |
+| `package.json` | Name, version, description, the author's name, email and web address, `"license": "MIT"` and the build scripts |
+
+The author's details come from the scope (`scopes edit` changes them): the name is required, the email and the web address are optional and are left out of the files when empty.
+
+**Library requirements.** `configure.ac` checks every library the project links, and the pkg-config file of a component or system requires them, at the versions `the-seed dependencies check` requires: libecs-cpp 2.1.0 and, for systems and programs, libthe-seed 0.8.0.
+
+**Refusals.** Nothing is created in these cases:
+
+| Situation | Status |
+|-----------|--------|
+| `./<name>` already exists (a file, directory or link) | 1 |
+| The scope is not configured | 2 |
+| The scope author's name is empty (the hint names `the-seed scopes edit`) | 2 |
+| The author's email or web address contains `[`, `]`, `$`, `'`, `"`, `\` or a backtick, which the build configuration cannot hold | 2 |
+| The name is not accepted | 3 |
+
+The project is written to a hidden directory first and renamed into place, so a failure leaves nothing behind.
+
+The generated `package.json` looks like this (`email` and `url` are left out when the scope has none):
 
 ```json
 {
+  "name": "@my-project/hello-world",
+  "version": "0.0.1",
+  "description": "hello-world, a component for libecs-cpp",
+  "author": {
+    "name": "Jane Developer",
+    "email": "jane@example.com",
+    "url": "https://example.com"
+  },
+  "license": "MIT",
   "scripts": {
     "build": "the-seed build native",
     "build-win64": "the-seed build windows"
   }
 }
 ```
+
+A web address that contains `@<word>@` may be altered by `configure` in the installed pkg-config file.
 
 The `component` and `system` templates include a `.pc.in` file for pkg-config. The `program` template does not.
 
@@ -673,7 +711,7 @@ Run "the-seed help dependencies <subcommand>" for one subcommand's details.
 - `ecs-cpp`: Cloned from `https://github.com/metaverse-systems/libecs-cpp.git`
 - `the-seed`: Cloned from `https://github.com/metaverse-systems/libthe-seed.git`
 
-Minimum versions are libecs-cpp 2.1.0 and libthe-seed 0.8.0. An installed copy older than its minimum is treated as missing and reinstalled; if the clone directory already exists it is updated first with a fast-forward-only `git pull`, and the install fails naming the directory when that update fails. Projects generated by earlier versions keep their unversioned `the-seed` line in `configure.ac`; new projects ask for `the-seed >= 0.8.0`.
+Minimum versions are libecs-cpp 2.1.0 and libthe-seed 0.8.0. An installed copy older than its minimum is treated as missing and reinstalled; if the clone directory already exists it is updated first with a fast-forward-only `git pull`, and the install fails naming the directory when that update fails. New projects ask for libecs-cpp and libthe-seed at these versions; projects generated by earlier versions may ask for older ones (libecs-cpp 2.0.0).
 
 ### package
 
@@ -746,30 +784,46 @@ Usage: the-seed resource-pak <create|add|build>
 Create a resource pak project, add resources to it and build it.
 
 Subcommands:
-  create
-      Create a resource pak project in the prefix's projects directory
-  add <resource-name> <filename>
+  create [<scope>/<name>]
+      Create a resource pak project in the current directory
+  add <resource-name> <filename> [--attribute <key>=<value>]... [--force]
       Add a file to the resource pak project
   build
       Build the resource pak
 
-add and build run in a resource pak project's directory.
+Every project is created in the current directory. add and build run in a resource pak project's
+directory.
 
 Run "the-seed help resource-pak <subcommand>" for one subcommand's details.
 ```
 
-`resource-pak create` prompts:
+`resource-pak create` creates the project in the current directory, in `./<name>`, like `template`; nothing is written under the prefix. Given `<scope>/<name>` it asks nothing; without the argument it prompts:
 
 ```text
 ? Choose scope for resource pak: @my-project
 ? Choose name for resource pak: my-assets
 ```
 
-This creates a project directory at `<prefix>/projects/<scope>/<name>/` (not in the current directory) with a `package.json` containing a `resources` array.
+```text
+Created resource pak @my-project/my-assets in ./my-assets
+```
 
-`the-seed resource-pak add <resource-name> <filename>` reads `package.json` from the current directory and adds a resource entry with `name`, `filename`, and `size`. If a resource with the same name already exists, it is skipped.
+The name follows the same rule as a code project's (lowercase letters, digits, `.`, `_` and `-`, starting with a letter), without the C++ restrictions. The project holds a `package.json` with the scope author's details and an empty `resources` array. It is refused with status 1 when `./<name>` exists, and with status 2 when the scope is not configured or its author has no name.
 
-`the-seed resource-pak build` reads `package.json` from the current directory and produces a `.pak` file. The file format consists of a JSON header (containing the name, a zero-padded 10-digit header size, and resource metadata) followed by a newline and the concatenated raw resource bytes. `add` and `build` outside a resource pak project (no readable `package.json`) stop with status 2.
+`the-seed resource-pak add <resource-name> <filename>` reads `package.json` from the current directory and adds a resource entry with `name`, `filename`, and `size`. The file must be inside the project directory (a file elsewhere is refused with status 2; copy it in first), and is written to `package.json` relative to it. Give `--attribute <key>=<value>` once per attribute to record it on the resource, in the order given; the pair is split at the first `=` (`expr=a=b` has the value `a=b`), the value may be empty, and a pair without `=`, an empty key or a key given twice is a usage error (status 3). A resource of the same name already in the project is an error (status 1) and nothing changes:
+
+```text
+Error: Resource "theme" already exists in @my-project/sounds; it refers to music/theme.ogg.
+Give --force to replace it.
+```
+
+With `--force` the entry is replaced where it stands, with the new file and the new attributes. `package.json` is replaced atomically, so a failure leaves the old one.
+
+`the-seed resource-pak build` reads `package.json` from the current directory and produces `<name>.pak` there. It uses each file's size at build time and never rewrites `package.json`; the pak replaces an earlier one only when it is complete. The file format consists of a JSON header (containing the name, a zero-padded 10-digit `headerSize`, and resource metadata) followed by a newline and the concatenated raw resource bytes. `headerSize` is the length of the header line in bytes, including its newline, so a name, resource name or attribute with non-ASCII characters is counted correctly; when the attributes are read back, whole-number keys come first. A resource file that is missing, is not a file, or lies outside the project stops the build with status 2; a file that changes while the pak is written stops it with status 1 and keeps the earlier pak.
+
+`add` and `build` outside a resource pak project (no readable `package.json`, one that is not valid JSON, one without a `resources` list or without a name of the form `@scope/name`) stop with status 2 and the hint `Create one with "the-seed resource-pak create".`.
+
+Paks built by earlier versions with non-ASCII characters in the pak name, a resource name or an attribute state a header size that is too small, and libthe-seed 0.8.0 refuses them as damaged: run `the-seed resource-pak build` in their project again. Paks with only ASCII characters are unchanged.
 
 ### signing
 
@@ -1114,6 +1168,15 @@ Sign and verify files using ECDSA P-256 certificates with support for embedded (
 
 `UnsupportedSigningKey` is a `SigningError` (code `unsupported-key`).
 
+#### ProjectError
+
+Raised when a project or a resource cannot be created or changed.
+
+| Member | Type | Description |
+|--------|------|-------------|
+| `code` | `ProjectErrorCode` | What went wrong: `invalid-name`, `unknown-scope`, `author-name-missing`, `author-detail-unusable`, `target-exists`, `not-pak-project`, `resource-file-missing`, `duplicate-resource`, `resource-changed` or `write-failed`; the command line maps it to an exit status |
+| `hint` | `string` | What to do about it, when there is something to do |
+
 #### NativeComponentMissingError
 
 Thrown when the native component is absent or does not load. Its message names the step that builds it (`cd "<package directory>" && npm run build-addon`) and, when the component exists but cannot be loaded, ends with the first line of the loading error. `nativeComponentMessage(loadError?)` returns the same text.
@@ -1230,15 +1293,25 @@ interface ResourceType {
 }
 
 interface PackageType {
-    author: AuthorType;
     name: string;
-    license: string;
     version: string;
+    description?: string;
+    author: PackageAuthorType;
+    license: string;
     scripts: {
         [index: string]: string;
     };
+    resources?: ResourceType[];
+}
+
+interface PakProjectType extends PackageType {
     resources: ResourceType[];
-    main?: string;
+}
+
+interface PackageAuthorType {
+    name: string;
+    email?: string;
+    url?: string;
 }
 
 interface DependencyResultType {

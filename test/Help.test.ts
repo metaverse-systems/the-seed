@@ -8,6 +8,12 @@
  * exports `EXIT_STATUSES: Array<{ status: string; meaning: string }>`. A meaning that does not
  * fit on a line may continue on following lines that are indented deeper than the entry; the
  * continuation is joined with single spaces before it is compared.
+ *
+ * Choices where the contracts leave a detail open: the notes and the positional help are compared
+ * with the registry values and, with whitespace collapsed, with the rendered text; "no help text
+ * mentions projects" is the word `projects` as a whole word in the rendered help of `template` and
+ * `resource-pak` and their subcommands (other commands, such as `package`, use the word for other
+ * things; the singular `project` is allowed).
  */
 import { COMMANDS } from "../src/cli/Commands";
 import { renderTopLevelHelp, renderCommandHelp, renderSubcommandHelp } from "../src/cli/Help";
@@ -180,6 +186,114 @@ describe("subcommand help", () => {
       const entry = (options ?? []).find((candidate) => candidate.head.startsWith(option.name));
       expect(entry?.text).toContain(option.help);
     }
+  });
+});
+
+describe("template help", () => {
+  const command = COMMANDS.find((candidate) => candidate.name === "template") as CommandSpec;
+  const positionalHelp =
+    "The project, such as @my-scope/hello; asked for when not given. " +
+    "The name starts with a lowercase letter and holds only lowercase letters, digits, \".\", \"_\" and \"-\".";
+  const notes =
+    "Every project is created in the current directory, in a directory named after it; " +
+    "nothing is created under the prefix.";
+
+  it("has the note on where every project is created", () => {
+    expect(command.notes).toEqual([notes]);
+    expect(renderCommandHelp(command).replace(/\s+/g, " ")).toContain(notes);
+  });
+
+  it.each(command.subcommands.map((sub) => [sub.name, sub] as const))(
+    "template %s describes the project name form",
+    (_kind, sub) => {
+      expect(sub.positionals).toHaveLength(1);
+      expect(sub.positionals[0].help).toBe(positionalHelp);
+      const args = section(renderSubcommandHelp(command, sub), "Arguments") ?? [];
+      expect(args).toHaveLength(1);
+      expect(args[0].text).toContain(positionalHelp);
+    }
+  );
+});
+
+describe("resource-pak help notes", () => {
+  const command = COMMANDS.find((candidate) => candidate.name === "resource-pak") as CommandSpec;
+
+  it("has the note on the current directory and on add and build", () => {
+    const note =
+      "Every project is created in the current directory. add and build run in a resource pak project's directory.";
+    expect(command.notes).toEqual([note]);
+    expect(renderCommandHelp(command).replace(/\s+/g, " ")).toContain(note);
+  });
+});
+
+describe("no help text of the project-creating commands names the projects directory", () => {
+  const creating = allHelpTexts().filter((help) => /^(template|resource-pak)\b/.test(help.label));
+
+  it("covers template, resource-pak and their subcommands", () => {
+    expect(creating.length).toBeGreaterThanOrEqual(2 + 3 + 3);
+  });
+
+  it.each(creating.map((help) => [help.label, help.text] as const))("%s does not mention projects", (_label, text) => {
+    expect(text).not.toMatch(/\bprojects\b/);
+  });
+});
+
+describe("resource-pak create help", () => {
+  const command = COMMANDS.find((candidate) => candidate.name === "resource-pak") as CommandSpec;
+  const create = command.subcommands.find((candidate) => candidate.name === "create") as SubcommandSpec;
+
+  it("has the summary for the current directory", () => {
+    expect(create.summary).toBe("Create a resource pak project in the current directory");
+    expect(renderSubcommandHelp(command, create)).toContain("Create a resource pak project in the current directory");
+  });
+
+  it("takes the optional positional [<scope>/<name>]", () => {
+    expect(create.positionals).toHaveLength(1);
+    expect(create.positionals[0].required).toBe(false);
+    const text = renderSubcommandHelp(command, create);
+    expect(text.split("\n")[0]).toBe("Usage: the-seed resource-pak create [<scope>/<name>]");
+  });
+
+  it("describes the positional", () => {
+    const args = section(renderSubcommandHelp(command, create), "Arguments") ?? [];
+    expect(args).toHaveLength(1);
+    expect(args[0].text).toContain("The resource pak, such as @my-scope/sounds; asked for when not given");
+  });
+
+  it("lists create [<scope>/<name>] with its summary in the help of the command", () => {
+    const entries = section(renderCommandHelp(command), "Subcommands") ?? [];
+    const entry = entries.find((candidate) => candidate.head.startsWith("create"));
+    expect(entry?.text).toContain("create [<scope>/<name>]");
+    expect(entry?.text).toContain("Create a resource pak project in the current directory");
+  });
+});
+
+describe("resource-pak add help", () => {
+  const command = COMMANDS.find((candidate) => candidate.name === "resource-pak") as CommandSpec;
+  const add = command.subcommands.find((candidate) => candidate.name === "add") as SubcommandSpec;
+
+  it("lists --force with its description", () => {
+    const options = section(renderSubcommandHelp(command, add), "Options") ?? [];
+    const entry = options.find((candidate) => candidate.head.startsWith("--force"));
+    expect(entry?.text).toContain("Replace a resource of the same name");
+  });
+
+  it("has the usage line with --attribute and --force", () => {
+    expect(renderSubcommandHelp(command, add).split("\n")[0]).toBe(
+      "Usage: the-seed resource-pak add <resource-name> <filename> [--attribute <key>=<value>]... [--force]");
+  });
+
+  it("lists --attribute <key>=<value> with its description", () => {
+    const options = section(renderSubcommandHelp(command, add), "Options") ?? [];
+    const entry = options.find((candidate) => candidate.head.startsWith("--attribute"));
+    expect(entry?.head).toContain("--attribute <key>=<value>");
+    expect(entry?.text).toContain("Record an attribute on the resource; give it once per attribute");
+  });
+
+  it("lists add with --attribute and --force in the help of the command", () => {
+    const entries = section(renderCommandHelp(command), "Subcommands") ?? [];
+    const entry = entries.find((candidate) => candidate.head.startsWith("add"));
+    expect(entry?.text).toContain("add <resource-name> <filename> [--attribute <key>=<value>]... [--force]");
   });
 });
 

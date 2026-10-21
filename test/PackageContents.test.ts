@@ -73,6 +73,23 @@ function listPackedEntries(): string[] {
   return parsed[0].files.map((file) => file.path);
 }
 
+/** Every file under dir, as relative paths with "/" separators (dot files included). */
+function listTemplateFiles(dir: string): string[] {
+  const found: string[] = [];
+  const walk = (current: string): void => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else {
+        found.push(path.relative(dir, full).split(path.sep).join("/"));
+      }
+    }
+  };
+  walk(dir);
+  return found.sort();
+}
+
 function createStray(relative: string): void {
   const full = path.join(packageRoot, relative);
   const created: string[] = [];
@@ -128,6 +145,24 @@ describe("package contents", () => {
       }
     }
     expect(missing).toEqual([]);
+  });
+
+  test("every file under templates/ is listed by the dry-run pack", () => {
+    if (!optionalExternalCheck("npm", npmAvailable(), "npm is not installed")) {
+      return;
+    }
+    const entries = listPackedEntries();
+    const onDisk = listTemplateFiles(path.join(packageRoot, "templates"));
+    const missing = onDisk.filter((file) => !entries.includes("templates/" + file));
+    expect(onDisk.length).toBeGreaterThan(0);
+    expect(missing).toEqual([]);
+  });
+
+  test("no generic or empty placeholder file and no dot-named ignore file exists under templates/", () => {
+    const unwanted = new Set(["INSTALL", "ChangeLog", "NEWS", "README", ".gitignore"]);
+    const found = listTemplateFiles(path.join(packageRoot, "templates")).filter((file) =>
+      unwanted.has(path.basename(file)));
+    expect(found).toEqual([]);
   });
 
   test("a stray built native component and a stray test result are not listed", () => {

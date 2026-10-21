@@ -10,7 +10,24 @@ The README describes the tool for its users, including the configuration file an
 * `src/InstallerMetadata.ts` holds the pure functions that check and escape what goes into an installer description: names, versions and identifiers.
 * `test/Readme.test.ts` keeps `README.md` in agreement with the registry, the exit-status table and the exported types and classes, and checks the repository paths named in the README and in this file. `test/Hints.test.ts` finds every `the-seed` command line in the source and parses it. `test/helpers/HintScan.ts` is the scanner and command-line checker both use; `test/helpers/RunCli.ts` runs the command line in-process with a scratch home; `test/helpers/WxsReader.ts` reads an installer description back for the metadata cases.
 
+## Projects, templates and resource paks
+
+* `templates/component`, `templates/system` and `templates/program` are the trees `Template.createPackage` copies. Each holds one `README.md`, the build files and the source; `gitignore` is written as `.gitignore` (npm never packs a `.gitignore`), and `{{name}}`-style variables in file names and contents are replaced by `src/TemplateEngine.ts`. No template file is empty, and `package.json` is written by the tool, not copied.
+* `src/TemplateEngine.ts` renders a template tree: it substitutes the `{{…}}` variables once per file and file name (an unknown variable is an error), escapes each value for the format of the file, removes a line that is only an empty variable, and writes the project into a hidden directory that is renamed into place.
+* `src/RequiredVersions.ts` holds the minimum versions of libecs-cpp and libthe-seed that generated projects ask for and `the-seed dependencies` checks.
+* `src/ProjectName.ts` checks a project name (the name form, and for code projects the C++ and Automake identifier rules) and derives the identifier.
+* `src/ProjectError.ts` is the error of project creation and the resource pak commands: a code, a message and a hint; `src/cli/ExitStatus.ts` maps each code to a status.
+* `src/Template.ts` and `src/ResourcePak.ts` create projects in a given directory (the current one for the commands) and never write under the prefix.
+* `test/Template.test.ts`, `test/TemplateEngine.test.ts`, `test/ProjectName.test.ts` and `test/RequiredVersions.test.ts` check those modules; `test/TemplateBuild.test.ts` builds each generated kind end to end against the installed libraries; `test/ResourcePak.test.ts`, `test/ResourcePakCLI.test.ts` and `test/ResourcePakRoundTrip.test.ts` check the pak commands and read the built paks back with libthe-seed's reader.
+* `test/helpers/PakReader.ts` reads a pak back with the native component's `readResourcePak` and parses its description line; `test/fixtures/paks/` holds a pak built by an earlier version and the project it was built from (see its `README.md`).
+
 ## Native addon (`native/src/addon.cpp`)
+
+Resource pak reading export:
+
+| Export | Purpose |
+|---|---|
+| `readResourcePak(path)` | Open a pak with libthe-seed's own reader and return `{ names, resources }`: the resource names in order and the bytes of each resource |
 
 Mach-O code signing exports:
 

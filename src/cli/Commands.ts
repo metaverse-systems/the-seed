@@ -11,11 +11,12 @@ import {
   wholeNumber,
 } from "./CommandSpec";
 import { validateScopeName } from "../Scopes";
+import { ProjectKind, validateProjectName } from "../ProjectName";
 
 const TARGETS = ["native", "windows"];
 
 /** `<scope>/<name>` as typed for a new package: the scope with its "@" and the name. */
-const packageName: ValueParser = (raw, label) => {
+export const packageName = (kind: ProjectKind): ValueParser => (raw, label) => {
   const fail = {
     ok: false as const,
     message: `Invalid value "${raw}" for ${label}; expected a scope and a name such as @my-scope/hello.`,
@@ -24,6 +25,10 @@ const packageName: ValueParser = (raw, label) => {
   if (parts.length !== 2 || parts[1] === "" || /\s/.test(parts[1])) return fail;
   const scope = parts[0].startsWith("@") ? parts[0] : `@${parts[0]}`;
   if (validateScopeName(scope) !== null) return fail;
+  const reason = validateProjectName(parts[1], kind);
+  if (reason !== null) {
+    return { ok: false, message: `Invalid value "${raw}" for ${label}; ${reason}` };
+  }
   return { ok: true, value: { scope, name: parts[1] } };
 };
 
@@ -32,6 +37,18 @@ const scopeOption = (help: string): OptionSpec => ({
   value: { placeholder: "scope", parse: scopeName },
   help,
 });
+
+/** `<key>=<value>`: split at the first "=", so the value may hold more of them or be empty. */
+const attribute: ValueParser = (raw, label) => {
+  const equals = raw.indexOf("=");
+  if (equals === -1) {
+    return { ok: false, message: `Invalid value "${raw}" for ${label}; expected <key>=<value>, such as type=audio.`, argument: label };
+  }
+  if (equals === 0) {
+    return { ok: false, message: `Invalid value "${raw}" for ${label}; the key before "=" cannot be empty.`, argument: label };
+  }
+  return { ok: true, value: [raw.slice(0, equals), raw.slice(equals + 1)] };
+};
 
 const forceOption = (help: string): OptionSpec => ({ name: "--force", help });
 
@@ -165,9 +182,11 @@ const templateSub = (kind: string, summary: string): SubcommandSpec =>
     positionals: [
       {
         name: "name",
-        help: "The package, such as @my-scope/hello; asked for when not given",
+        help:
+          "The project, such as @my-scope/hello; asked for when not given. " +
+          "The name starts with a lowercase letter and holds only lowercase letters, digits, \".\", \"_\" and \"-\".",
         required: false,
-        parse: packageName,
+        parse: packageName(kind as ProjectKind),
         usage: "<scope>/<name>",
       },
     ],
@@ -203,7 +222,10 @@ export const COMMANDS: CommandSpec[] = [
     name: "template",
     summary: "Create a component, system or program from a template",
     whenEmpty: "help",
-    notes: ["The project is created in the current directory."],
+    notes: [
+      "Every project is created in the current directory, in a directory named after it; " +
+        "nothing is created under the prefix.",
+    ],
     subcommands: [
       templateSub("component", "Create a component"),
       templateSub("system", "Create a system"),
@@ -256,13 +278,24 @@ export const COMMANDS: CommandSpec[] = [
     name: "resource-pak",
     summary: "Create a resource pak project, add resources to it and build it",
     whenEmpty: "help",
-    notes: ["add and build run in a resource pak project's directory."],
+    notes: [
+      "Every project is created in the current directory. add and build run in a resource pak project's directory.",
+    ],
     subcommands: [
       sub({
         name: "create",
-        summary: "Create a resource pak project in the prefix's projects directory",
+        summary: "Create a resource pak project in the current directory",
         handler: "resource-pak.create",
         interactive: true,
+        positionals: [
+          {
+            name: "name",
+            help: "The resource pak, such as @my-scope/sounds; asked for when not given",
+            required: false,
+            parse: packageName("resource-pak"),
+            usage: "<scope>/<name>",
+          },
+        ],
       }),
       sub({
         name: "add",
@@ -272,9 +305,30 @@ export const COMMANDS: CommandSpec[] = [
           { name: "resource-name", help: "Name the resource is stored under", required: true, parse: nonEmpty },
           pathArgument("filename", "The file to add"),
         ],
+        options: [
+          {
+            name: "--attribute",
+            // The help wraps the placeholder in angle brackets, giving "<key>=<value>".
+            value: { placeholder: "key>=<value", parse: attribute },
+            repeatable: true,
+            help: "Record an attribute on the resource; give it once per attribute",
+          },
+          forceOption("Replace a resource of the same name"),
+        ],
       }),
       sub({ name: "build", summary: "Build the resource pak", handler: "resource-pak.build" }),
     ],
+    validate: (parsed) => {
+      const given = (parsed.options.attribute as Array<[string, string]> | undefined) ?? [];
+      const seen = new Set<string>();
+      for (const [key] of given) {
+        if (seen.has(key)) {
+          return { argument: "--attribute", message: `--attribute "${key}" is given twice; give each key once.` };
+        }
+        seen.add(key);
+      }
+      return null;
+    },
   },
   {
     name: "signing",

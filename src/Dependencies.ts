@@ -6,12 +6,13 @@ import { BuildStep } from "./types";
 import { runStep, stepText } from "./StepRunner";
 import { processorCount } from "./BuildScheduler";
 import { librarySearchEnv } from "./LibrarySearch";
+import { REQUIRED_VERSIONS } from "./RequiredVersions";
 
 const libEcsRepo = "https://github.com/metaverse-systems/libecs-cpp.git";
 const libTheSeedRepo = "https://github.com/metaverse-systems/libthe-seed.git";
 
-export const requiredLibEcsVersion = "2.1.0";
-export const requiredLibTheSeedVersion = "0.8.0";
+export const requiredLibEcsVersion = REQUIRED_VERSIONS["ecs-cpp"];
+export const requiredLibTheSeedVersion = REQUIRED_VERSIONS["the-seed"];
 
 export const checkLib = (config: Config, library: string, target: string, minVersion?: string) => {
   const options = {

@@ -1,19 +1,40 @@
-import fs from "fs-extra";
-import { execSync } from "child_process";
+import crypto from "crypto";
+import fs from "fs";
 import path from "path";
 import Config from "./Config";
 import Scopes from "./Scopes";
-import { PackageType } from "./types";
+import { PackageAuthorType, PackageType } from "./types";
+import { ProjectError } from "./ProjectError";
+import { toIdentifier, validateProjectName } from "./ProjectName";
+import { REQUIRED_VERSIONS } from "./RequiredVersions";
+import { renderTemplate, TemplateValues } from "./TemplateEngine";
+import { editScopeHint } from "./cli/Hints";
 
 const build_command = "the-seed build native";
 const build_win64_command = "the-seed build windows";
 
+type TemplateKind = "component" | "system" | "program";
+
+const kindTitles: Record<TemplateKind, string> = {
+  component: "a component for libecs-cpp",
+  system: "a system for libecs-cpp",
+  program: "a program for The Seed"
+};
+
+/** Characters the build configuration (AC_INIT) cannot hold in an email or web address, besides control characters. */
+const unusableCharacters = "[]$'\"\\`";
+
+const isControl = (character: string): boolean => {
+  const code = character.charCodeAt(0);
+  return code < 0x20 || code === 0x7f;
+};
+
 class Template {
-  type = "";
+  type: TemplateKind = "component";
+  /** Absolute path of the last project created */
   packageDir = "";
   config: Config;
   scopes: Scopes;
-  package?: PackageType;
 
   constructor(config: Config) {
     this.config = config;
@@ -30,91 +51,121 @@ class Template {
       },
       {
         "name": "templateName",
-        "message": "Choose name for " + this.type
+        "message": "Choose name for " + this.type,
+        "validate": (name: string): true | string => validateProjectName(name, this.type) ?? true
       }
     ];
   };
 
-  copyTemplate = (scope: string, name: string) => {
+  /**
+   * Creates the project <parentDir>/<name> from the template of this.type.
+   * Before anything is written it checks, in order, the name, the scope, the author's name, the author's email and
+   * web address, and the target; the project is rendered into a hidden sibling and renamed into place.
+   * @param scope Scope the project belongs to, with its "@"
+   * @param name Project name
+   * @param parentDir Directory the project is created in (the current directory by default)
+   * @param now Date the copyright year is taken from (the current date by default)
+   * @returns The absolute path of the new project
+   * @throws ProjectError when the project cannot be created
+   */
+  createPackage = (scope: string, name: string, parentDir: string = process.cwd(), now: Date = new Date()): string => {
+    const invalid = validateProjectName(name, this.type);
+    if (invalid !== null) {
+      throw new ProjectError("invalid-name", invalid);
+    }
+    const configured = this.config.config.scopes;
+    if (!Object.prototype.hasOwnProperty.call(configured, scope)) {
+      const names = Object.keys(configured);
+      throw new ProjectError("unknown-scope",
+        `Scope "${scope}" is not configured. Configured scopes: ${names.length > 0 ? names.join(", ") : "none"}.`);
+    }
+    const author = configured[scope].author;
+
+    if (!author.name || author.name.trim() === "") {
+      throw new ProjectError("author-name-missing", `Required author name is missing for scope '${scope}'.`, editScopeHint(scope));
+    }
+    this.checkDetail(scope, "email", author.email);
+    this.checkDetail(scope, "web address", author.url);
+
+    const parent = path.resolve(parentDir);
+    const target = path.join(parent, name);
+    if (this.exists(target)) {
+      throw new ProjectError("target-exists", `${target} already exists; nothing was created.`);
+    }
+
+    const email = author.email ?? "";
+    const url = author.url ?? "";
+    const values: TemplateValues = {
+      name,
+      identifier: toIdentifier(name),
+      scope,
+      package: `${scope}/${name}`,
+      kind: this.type,
+      kind_title: kindTitles[this.type],
+      author_name: author.name,
+      author_contact: email !== "" ? `${author.name} <${email}>` : author.name,
+      author_email: email,
+      author_url: url,
+      pc_url_line: url !== "" ? `URL: ${url}` : "",
+      readme_url_line: url !== "" ? `Web: ${url}` : "",
+      year: String(now.getFullYear()),
+      ecs_cpp_version: REQUIRED_VERSIONS["ecs-cpp"],
+      the_seed_version: REQUIRED_VERSIONS["the-seed"]
+    };
+
     const templateDir = path.join(__dirname, "..", "templates", this.type);
-    const scopeDir = this.config.config.prefix + "/projects/" + scope;
-
-    const underscoreRegex = new RegExp("-", "g");
-    const underscoreName = name.replace(underscoreRegex, "_");
-    
-    if(!fs.existsSync(scopeDir)) {
-      fs.mkdirSync(scopeDir, { recursive: true });
+    const hidden = path.join(parent, `.${name}.creating-${crypto.randomBytes(6).toString("hex")}`);
+    try {
+      renderTemplate(templateDir, hidden, values);
+      fs.writeFileSync(path.join(hidden, "package.json"), JSON.stringify(this.describe(values, author), null, 2) + "\n");
+      if (this.exists(target)) {
+        throw new ProjectError("target-exists", `${target} already exists; nothing was created.`);
+      }
+      fs.renameSync(hidden, target);
+    } catch (error) {
+      fs.rmSync(hidden, { recursive: true, force: true });
+      if (error instanceof ProjectError) throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new ProjectError("write-failed", `${target} could not be created: ${reason}`);
     }
 
-    // Create package from template
-    console.log("Copying template from " + templateDir + " to " + this.packageDir);
-    fs.copySync(templateDir, this.packageDir);
+    this.packageDir = target;
+    return target;
+  };
 
-    // Replace template variables with real values
-    const author = this.scopes.getScope(scope).author;
-
-    const variables: {
-      [index: string]: string;
-    } = {
-      "AUTHOR_EMAIL": author.email,
-      "AUTHOR_URL": author.url,
-      "SCOPE": scope,
-      "SKELETON_": underscoreName,
-      "SKELETON": name
+  private describe = (values: TemplateValues, author: { name: string; email?: string; url?: string }): PackageType => {
+    const packageAuthor: PackageAuthorType = { name: author.name };
+    if (values.author_email !== "") packageAuthor.email = values.author_email;
+    if (values.author_url !== "") packageAuthor.url = values.author_url;
+    return {
+      name: values.package,
+      version: "0.0.1",
+      description: `${values.name}, ${values.kind_title}`,
+      author: packageAuthor,
+      license: "MIT",
+      scripts: {
+        "build": build_command,
+        "build-win64": build_win64_command
+      }
     };
+  };
 
-    const files = [
-      "AUTHORS",
-      "COPYING",
-      "configure.ac",
-      "Makefile.am",
-      "src/Makefile.am",
-      "src/SKELETON.hpp",
-      "src/SKELETON.cpp"
-    ];
+  private checkDetail = (scope: string, detail: string, value: string | undefined): void => {
+    const character = Array.from(value ?? "").find((c) => unusableCharacters.includes(c) || isControl(c));
+    if (character === undefined) return;
+    const shown = isControl(character) ? "a control character" : `"${character}"`;
+    throw new ProjectError("author-detail-unusable",
+      `The author's ${detail} for scope ${scope} contains ${shown}, which the build configuration cannot hold.`,
+      editScopeHint(scope));
+  };
 
-    if(this.type != "program") {
-      files.push("SKELETON.pc.in");
+  private exists = (file: string): boolean => {
+    try {
+      fs.lstatSync(file);
+      return true;
+    } catch {
+      return false;
     }
-
-    files.forEach((file) => {
-      let temp = fs.readFileSync(this.packageDir + "/" + file).toString();
-      Object.keys(variables).forEach((variable) => {
-        const regex = new RegExp(variable, "g");
-        temp = temp.replace(regex, variables[variable]);
-      });
-      fs.writeFileSync(this.packageDir + "/" + file, temp);
-    });
-
-    fs.renameSync(this.packageDir + "/src/SKELETON.hpp", this.packageDir + "/src/" + name + ".hpp");
-    fs.renameSync(this.packageDir + "/src/SKELETON.cpp", this.packageDir + "/src/" + name + ".cpp");
-    if(this.type != "program") fs.renameSync(this.packageDir + "/SKELETON.pc.in", this.packageDir + "/" + name + ".pc.in");
-  };
-
-  createPackage = (scope: string, name: string) => {
-    this.packageDir = name;
-    this.copyTemplate(scope, name);
-
-    // Create default package.json
-    execSync("npm init --yes", { cwd: this.packageDir });
-
-    this.package = JSON.parse(fs.readFileSync(this.packageDir + "/package.json").toString()) as PackageType;
-    this.package.author = this.scopes.getScope(scope).author;
-    this.package.license = "UNLICENSED";
-    this.package.name = scope + "/" + name;
-    this.package.version = "0.0.1";
-    this.package.scripts = {
-      "test": "echo \"Error: no test specified\" && exit 1",
-      "build": build_command,
-      "build-win64": build_win64_command
-    };
-    delete this.package.main;
-    this.save();
-  };
-
-  save = () => {
-    if (!this.package) return;
-    fs.writeFileSync(this.packageDir + "/package.json", JSON.stringify(this.package, null, 2));
   };
 }
 

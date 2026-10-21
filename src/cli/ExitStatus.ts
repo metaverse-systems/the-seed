@@ -1,4 +1,5 @@
 import type { SigningErrorCode } from "../Signing";
+import type { ProjectErrorCode } from "../ProjectError";
 import { helpHint } from "./Hints";
 
 /** One row of the table of exit statuses shown in the help and the README. */
@@ -21,20 +22,20 @@ export const EXIT_STATUSES: ExitStatusRow[] = [
     meaning:
       "The command ran and the outcome is a failure: a build, packaging, installer, dependency installation or signing " +
       "operation failed; verification found the file invalid, not fully signed, not checked or unsigned; the user " +
-      "declined to overwrite; an unexpected internal error",
+      "declined to overwrite; a project directory that already exists; a resource name that already exists (without " +
+      "--force); a resource file that changed while the pak was written; an unexpected internal error",
   },
   {
     status: "2",
     meaning:
       "Something the command needs is missing or unusable: a file or directory, a project description, scopes, the " +
       "named scope, a certificate (or it has expired or cannot be read), a valid configuration file, the native " +
-      "component, a required program such as wixl",
+      "component, a required program such as wixl; the scope author's name (or an email or web address the build " +
+      "configuration cannot hold); a resource file; a resource pak project description",
   },
   {
     status: "3",
-    meaning:
-      "Usage error, or input the command cannot interpret (for verification: a malformed manifest, or a signature " +
-      "file given in place of a signed file)",
+    meaning: "Usage error, or input the command cannot interpret",
   },
   { status: "4", meaning: "Verification only: intact but not trusted" },
   { status: "128+N", meaning: "A build stopped by signal N (130 after Ctrl+C)" },
@@ -120,6 +121,26 @@ export function signingErrorStatus(code: SigningErrorCode): number {
   }
 }
 
+/** The exit status the command line ends with for each way creating or changing a project can fail. */
+export function projectErrorStatus(code: ProjectErrorCode): number {
+  switch (code) {
+    case "invalid-name":
+      return 3;
+    case "unknown-scope":
+    case "author-name-missing":
+    case "author-detail-unusable":
+    case "not-pak-project":
+    case "resource-file-missing":
+      return 2;
+    case "target-exists":
+    case "duplicate-resource":
+    case "resource-changed":
+    case "write-failed":
+    default:
+      return 1;
+  }
+}
+
 /** Whether the error, or a class it extends, has the given name (classes are matched by name so that a reloaded module still matches). */
 function hasClassName(error: Error, name: string): boolean {
   for (let proto: object | null = Object.getPrototypeOf(error); proto !== null; proto = Object.getPrototypeOf(proto)) {
@@ -138,6 +159,10 @@ export function toCliError(error: unknown): CliError | null {
   if (hasClassName(error, "SigningError")) {
     const signing = error as Error & { code: SigningErrorCode; hint?: string };
     return new CliError(signingErrorStatus(signing.code), signing.message, { hint: signing.hint });
+  }
+  if (hasClassName(error, "ProjectError")) {
+    const project = error as Error & { code: ProjectErrorCode; hint?: string };
+    return new CliError(projectErrorStatus(project.code), project.message, { hint: project.hint });
   }
   if (hasClassName(error, "ConfigError") || hasClassName(error, "NativeComponentMissingError") || hasClassName(error, "InstallerMetadataError")) {
     return new MissingError(error.message);

@@ -22,7 +22,8 @@
  * `editScopeHint(scope)`, `createCertHint(scope)`, `replaceCertHint(scope)`,
  * `chooseScopeHint(scopes: string[])`, `forceHint(scope)`, `listScopesHint()`,
  * `helpHint(command?, subcommand?)`, `buildWindowsHint()`, `fullBuildHint()` and
- * `resignHint(path?)`, each returning one sentence.
+ * `resignHint(path?)`, each returning one sentence, and the functions `createPakHint()` and
+ * `replaceResourceHint()` (read when their cases run, so that the other cases still load).
  */
 import {
   addScopeHint,
@@ -44,7 +45,33 @@ import Signing from "../src/Signing";
 import { hintSourceFiles, scanHintFiles, scanHintText, checkCommandLine } from "./helpers/HintScan";
 import { runTheSeed, RunResult } from "./helpers/RunCli";
 
+interface ProjectHints {
+  createPakHint: () => string;
+  replaceResourceHint: () => string;
+}
+
+// Loaded when the case runs, so that this file still compiles and its other cases still run
+// while the two functions are absent.
+function projectHints(): ProjectHints {
+  return jest.requireActual<ProjectHints>("../src/cli/Hints");
+}
+
 describe("hint texts", () => {
+  it("createPakHint", () => {
+    expect(projectHints().createPakHint()).toBe("Create one with \"the-seed resource-pak create\".");
+  });
+
+  it("replaceResourceHint", () => {
+    expect(projectHints().replaceResourceHint()).toBe("Give --force to replace it.");
+  });
+
+  it("the resource pak hints are one sentence on one line", () => {
+    for (const hint of [projectHints().createPakHint(), projectHints().replaceResourceHint()]) {
+      expect(hint).not.toContain("\n");
+      expect(hint.endsWith(".")).toBe(true);
+    }
+  });
+
   it("addScopeHint", () => {
     expect(addScopeHint()).toBe("Add one with \"the-seed scopes add\".");
   });
