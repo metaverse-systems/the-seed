@@ -31,6 +31,7 @@ jest.mock("../src/BuildScheduler", () => ({
 }));
 
 import { runCommand, findOnPath, formatCommand, CommandResult, RunCommandOptions } from "../src/ProcessRunner";
+import { defined } from "./helpers/Defined";
 const mockedFindOnPath = findOnPath as jest.MockedFunction<typeof findOnPath>;
 const mockedRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
 
@@ -78,9 +79,9 @@ describe("test Build", () => {
 
   describe("getSteps inherited environment", () => {
     it("extends the PKG_CONFIG_PATH of the environment it is given", () => {
-      const configure = build.getSteps("native", true, 2, { PKG_CONFIG_PATH: "/given/path" }).find((s) => s.label === "configure")!;
+      const configure = defined(build.getSteps("native", true, 2, { PKG_CONFIG_PATH: "/given/path" }).find((s) => s.label === "configure"), "configure step");
 
-      expect(configure.env!.PKG_CONFIG_PATH).toBe(
+      expect(defined(configure.env, "configure environment").PKG_CONFIG_PATH).toBe(
         path.join(config.config.prefix, "x86_64-linux-gnu", "lib", "pkgconfig") + ":/given/path"
       );
     });
@@ -121,12 +122,12 @@ describe("test Build", () => {
     }
 
     function installStepOf(target: string, full: boolean): BuildStep {
-      return build.getSteps(target, full).find((s) => s.label === "install")!;
+      return defined(build.getSteps(target, full).find((s) => s.label === "install"), "install step");
     }
 
     /** Makes the call of the step whose program and first argument match fail with the given result. */
     function failStep(label: string, result: Partial<CommandResult>): void {
-      const step = build.getSteps("native", true).find((s) => s.label === label)!;
+      const step = defined(build.getSteps("native", true).find((s) => s.label === label), "step");
       mockedRunCommand.mockImplementation(async (program: string, args: string[]) => {
         events.push("run:" + program + " " + args.join(" "));
         return program === step.program && args.join(" ") === step.args.join(" ")
@@ -220,7 +221,7 @@ describe("test Build", () => {
     it("lays the configure step's environment over the base environment", async () => {
       await build.buildProject(buildOptions({ env: { SEED_BASE_VALUE: "kept" } }));
 
-      const configure = mockedRunCommand.mock.calls.find((call) => call[0] === "./configure")!;
+      const configure = defined(mockedRunCommand.mock.calls.find((call) => call[0] === "./configure"), "configure call");
       const env = (configure[2] as { env: NodeJS.ProcessEnv }).env;
       expect(env.SEED_BASE_VALUE).toBe("kept");
       expect(env.PKG_CONFIG_PATH).toContain(path.join(build.getInstallPrefix("native"), "lib/pkgconfig"));
@@ -233,7 +234,7 @@ describe("test Build", () => {
     it("extends the PKG_CONFIG_PATH of the base environment it was given, not the tool's own", async () => {
       await build.buildProject(buildOptions({ env: { PKG_CONFIG_PATH: "/base/only/path" } }));
 
-      const configure = mockedRunCommand.mock.calls.find((call) => call[0] === "./configure")!;
+      const configure = defined(mockedRunCommand.mock.calls.find((call) => call[0] === "./configure"), "configure call");
       const env = (configure[2] as { env: NodeJS.ProcessEnv }).env;
       expect(env.PKG_CONFIG_PATH).toBe(
         path.join(config.config.prefix, "x86_64-linux-gnu", "lib", "pkgconfig") + ":/base/only/path"
@@ -320,8 +321,9 @@ describe("test Build", () => {
 
     it("streams each step's output to the given sink", async () => {
       mockedRunCommand.mockImplementation(async (program: string, _args: string[], options?: RunCommandOptions) => {
-        options!.output!.stdout(Buffer.from("out:" + program + ";"));
-        options!.output!.stderr(Buffer.from("err:" + program + ";"));
+        const output = defined(defined(options, "run options").output, "output sink");
+        output.stdout(Buffer.from("out:" + program + ";"));
+        output.stderr(Buffer.from("err:" + program + ";"));
         return commandResult();
       });
 
@@ -355,7 +357,7 @@ describe("test Build", () => {
 
       const result = await build.buildProject(buildOptions());
 
-      const compile = build.getSteps("native", true).find((s) => s.label === "compile")!;
+      const compile = defined(build.getSteps("native", true).find((s) => s.label === "compile"), "compile step");
       expect(result).toEqual({
         status: "failed",
         step: "compile",
@@ -684,7 +686,7 @@ describe("test Build", () => {
     function stepOf(steps: BuildStep[], label: string): BuildStep {
       const step = steps.find((s) => s.label === label);
       expect(step).toBeDefined();
-      return step!;
+      return defined(step, "step " + label);
     }
 
     it("returns 5 steps for full native build", () => {

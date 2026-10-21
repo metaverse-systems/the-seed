@@ -355,7 +355,7 @@ describe("test Package", () => {
       }));
       const depDir = createNodeModuleDep(projectDir, "@org/libfoo",
         "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
-      const depLib = installBuildOutput(depDir, "libfoo-0.dll", "dll-content");
+      installBuildOutput(depDir, "libfoo-0.dll", "dll-content");
 
       const outputDir = path.join(tempDir, "my-release");
 

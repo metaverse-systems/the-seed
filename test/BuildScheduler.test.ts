@@ -11,6 +11,7 @@ import {
   ProjectOutcome,
   ScheduleResult,
 } from "../src/BuildScheduler";
+import { defined } from "./helpers/Defined";
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -216,7 +217,7 @@ function start(g: Graph, fake: FakeBuilds, concurrency: number, processors = 4, 
 }
 
 function stateOf<F>(result: ScheduleResult<F>, g: Graph, name: string): string {
-  return result.states.get(g.byName.get(name)!.path)!.state;
+  return defined(result.states.get(defined(g.byName.get(name), "project " + name).path), "state of " + name).state;
 }
 
 /** Start/end intervals of each project's install phase. */
@@ -596,7 +597,7 @@ describe("runSchedule capacity and compile jobs", () => {
       });
       await flush();
       while (!done) {
-        const runningJobs = [...fake.running].map((name) => fake.contexts.get(name)!.jobs!);
+        const runningJobs = [...fake.running].map((name) => defined(defined(fake.contexts.get(name), "context " + name).jobs, "jobs of " + name));
         for (const jobs of runningJobs) {
           expect(jobs).toBeGreaterThanOrEqual(1);
         }
@@ -632,7 +633,7 @@ describe("runSchedule capacity and compile jobs", () => {
       });
       await flush();
       while (!done) {
-        const runningJobs = [...fake.running].map((name) => fake.contexts.get(name)!.jobs!);
+        const runningJobs = [...fake.running].map((name) => defined(defined(fake.contexts.get(name), "context " + name).jobs, "jobs of " + name));
         for (const jobs of runningJobs) {
           expect(jobs).toBeGreaterThanOrEqual(1);
         }
@@ -659,7 +660,7 @@ describe("runSchedule capacity and compile jobs", () => {
     const g = wide();
     const fake = new FakeBuilds();
     await drive(fake, start(g, fake, 3));
-    const ordinals = fake.started().map((name) => fake.contexts.get(name)!.ordinal);
+    const ordinals = fake.started().map((name) => defined(fake.contexts.get(name), "context " + name).ordinal);
     expect(ordinals).toEqual(ordinals.map((_, i) => i));
   });
 });
@@ -807,7 +808,7 @@ describe("runSchedule cancellation", () => {
     cancel.abort();
     await flush();
     for (const name of ["A", "B", "C"]) {
-      expect(fake.contexts.get(name)!.signal.aborted).toBe(true);
+      expect(defined(fake.contexts.get(name), "context " + name).signal.aborted).toBe(true);
     }
     const result = await schedule;
 
@@ -832,8 +833,8 @@ describe("runSchedule cancellation", () => {
 
     cancel.abort();
     await flush();
-    expect(fake.contexts.get("B")!.signal.aborted).toBe(true);
-    expect(fake.installSignals.get("A")!.aborted).toBe(false);
+    expect(defined(fake.contexts.get("B"), "context B").signal.aborted).toBe(true);
+    expect(defined(fake.installSignals.get("A"), "install signal A").aborted).toBe(false);
     expect(fake.isRunning("A")).toBe(true);
 
     fake.finishInstall("A");
@@ -920,7 +921,7 @@ describe("runSchedule cancellation", () => {
     await flush();
     expect(fake.isRunning("A")).toBe(true);
     force.abort();
-    expect(fake.installSignals.get("A")!.aborted).toBe(true);
+    expect(defined(fake.installSignals.get("A"), "install signal A").aborted).toBe(true);
     const result = await schedule;
 
     expect(stateOf(result, g, "A")).toBe("interrupted");
@@ -972,7 +973,7 @@ describe("runSchedule cancellation", () => {
     expect(fake.started()).toEqual([]);
     expect(result.cancelled).toBe(true);
     for (const project of g.order) {
-      expect(result.states.get(project.path)!.state).toBe("notStarted");
+      expect(defined(result.states.get(project.path), "state of " + project.path).state).toBe("notStarted");
     }
   });
 });

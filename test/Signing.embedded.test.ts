@@ -14,6 +14,7 @@ import { makeUniversal } from "./helpers/Universal";
 import { ReplacementKey, replaceScopeKey } from "./helpers/IndependentCheck";
 import { signingErrorOf } from "./helpers/SigningErrors";
 import * as CmsBuilder from "../src/CmsBuilder";
+import { defined } from "./helpers/Defined";
 
 /**
  * Create a temporary directory for test isolation.
@@ -643,7 +644,7 @@ describe("installer samples and the independent checker", () => {
     (name) => {
       const pkg = parsePackage(fs.readFileSync(genuinePath(name)));
       expect(pkg.fingerprint()).toBe(msiReference.fingerprint.get(name));
-      const entries = msiReference.entries.get(name)!;
+      const entries = defined(msiReference.entries.get(name), "reference entries for " + name);
       expect(pkg.countEntries()).toBe(entries.count);
       const found = pkg.findSignature();
       expect(found === null ? null : found.size).toBe(entries.signatureSize);

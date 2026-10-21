@@ -38,6 +38,7 @@ jest.mock("../src/BuildScheduler", () => ({
 
 import { spawnSync, SpawnSyncReturns } from "child_process";
 import { runStep } from "../src/StepRunner";
+import { defined } from "./helpers/Defined";
 const mockedSpawnSync = spawnSync as unknown as jest.Mock;
 
 /** What spawnSync returns for a pkg-config that ran. */
@@ -351,7 +352,7 @@ describe("test Dependencies", () => {
     it("uses options.jobs for the compile step", async () => {
       await installLib(config, repo, "test-dir", "native", { jobs: 3 });
 
-      const compile = stepsRun().find((step) => step.label === "test-dir compile")!;
+      const compile = defined(stepsRun().find((step) => step.label === "test-dir compile"), "test-dir compile step");
       expect(compile).toMatchObject({ program: "make", args: ["-j3"], cwd: "test-dir" });
     });
 
@@ -362,7 +363,7 @@ describe("test Dependencies", () => {
         for (const target of ["native", "windows"]) {
           mockedRunStep.mockClear();
           await installLib(config, repo, "test-dir", target);
-          const configure = stepsRun().find((step) => step.label === "test-dir configure")!;
+          const configure = defined(stepsRun().find((step) => step.label === "test-dir configure"), "test-dir configure step");
           expect(configure.env).toEqual(librarySearchEnv(config.config.prefix, target, process.env));
         }
       } finally {
@@ -479,8 +480,8 @@ describe("test Dependencies", () => {
 
       const configure = stepsRun().find((step) => step.program === "./configure");
       expect(configure).toBeDefined();
-      expect(configure!.args.join(" ")).not.toContain("--host");
-      expect(configure!.args).toEqual(["--prefix=" + config.config.prefix + "/x86_64-linux-gnu"]);
+      expect(defined(configure, "configure step").args.join(" ")).not.toContain("--host");
+      expect(defined(configure, "configure step").args).toEqual(["--prefix=" + config.config.prefix + "/x86_64-linux-gnu"]);
     });
 
     it("windows target includes --host flag", async () => {
@@ -488,7 +489,7 @@ describe("test Dependencies", () => {
 
       const configure = stepsRun().find((step) => step.program === "./configure");
       expect(configure).toBeDefined();
-      expect(configure!.args).toContain("--host=x86_64-w64-mingw32");
+      expect(defined(configure, "configure step").args).toContain("--host=x86_64-w64-mingw32");
     });
   });
 
@@ -507,7 +508,7 @@ describe("test Dependencies", () => {
     it("delegates to installLib with libecs-cpp repo", async () => {
       const result = await installLibEcs(config, "native");
       expect(result).toBe(true);
-      const clone = mockedRunStep.mock.calls.map((call) => call[0]).find((step) => step.program === "git")!;
+      const clone = defined(mockedRunStep.mock.calls.map((call) => call[0]).find((step) => step.program === "git"), "git step");
       expect(clone.args).toEqual(["clone", expect.stringContaining("libecs-cpp"), "libecs-cpp"]);
     });
 
@@ -533,7 +534,7 @@ describe("test Dependencies", () => {
     it("delegates to installLib with libthe-seed repo", async () => {
       const result = await installLibTheSeed(config, "native");
       expect(result).toBe(true);
-      const clone = mockedRunStep.mock.calls.map((call) => call[0]).find((step) => step.program === "git")!;
+      const clone = defined(mockedRunStep.mock.calls.map((call) => call[0]).find((step) => step.program === "git"), "git step");
       expect(clone.args).toEqual(["clone", expect.stringContaining("libthe-seed"), "libthe-seed"]);
     });
 
@@ -648,7 +649,7 @@ describe("test Dependencies", () => {
     it("clones a repository into the named directory", () => {
       const steps = getInstallSteps(config, "native");
       for (const lib of ["libecs-cpp", "libthe-seed"]) {
-        const clone = steps.find((step) => step.label === "clone " + lib)!;
+        const clone = defined(steps.find((step) => step.label === "clone " + lib), "clone step");
         expect(clone.program).toBe("git");
         expect(clone.args).toEqual(["clone", expect.stringContaining(lib), lib]);
         expect(clone).not.toHaveProperty("command");
@@ -660,7 +661,7 @@ describe("test Dependencies", () => {
         (target: fs.PathLike) => path.basename(String(target)) === "libecs-cpp"
       );
       try {
-        const update = getInstallSteps(config, "native").find((step) => step.label === "update libecs-cpp")!;
+        const update = defined(getInstallSteps(config, "native").find((step) => step.label === "update libecs-cpp"), "update step");
         expect(update.program).toBe("git");
         expect(update.args).toEqual(["-C", "libecs-cpp", "pull", "--ff-only"]);
       } finally {
@@ -672,7 +673,7 @@ describe("test Dependencies", () => {
       const steps = getInstallSteps(config, "native");
       const prefix = config.config.prefix + "/x86_64-linux-gnu";
       for (const lib of ["libecs-cpp", "libthe-seed"]) {
-        const byLabel = (suffix: string) => steps.find((step) => step.label === `${lib} ${suffix}`)!;
+        const byLabel = defined((suffix: string) => steps.find((step) => step.label === `${lib} ${suffix}`), "step");
         expect(byLabel("autogen")).toMatchObject({ program: "./autogen.sh", args: [], cwd: lib });
         expect(byLabel("configure")).toMatchObject({
           program: "./configure",
@@ -733,7 +734,7 @@ describe("test Dependencies", () => {
 
     it("adds --host for the windows target", () => {
       const steps = getInstallSteps(config, "windows");
-      const configure = steps.find((step) => step.label === "libecs-cpp configure")!;
+      const configure = defined(steps.find((step) => step.label === "libecs-cpp configure"), "configure step");
       expect(configure.args).toEqual([
         "--prefix=" + config.config.prefix + "/x86_64-w64-mingw32",
         "--host=x86_64-w64-mingw32",

@@ -6,7 +6,6 @@ import { execSync } from "child_process";
 import * as x509 from "@peculiar/x509";
 import Signing from "../src/Signing";
 import * as SigningModule from "../src/Signing";
-import Config from "../src/Config";
 import { expectPresent } from "./helpers/Assert";
 import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 import { signingErrorClass, signingErrorOf } from "./helpers/SigningErrors";
@@ -17,6 +16,7 @@ import {
   SigFileFormat,
   SigningManifestFormat,
 } from "../src/types";
+import { defined } from "./helpers/Defined";
 
 /**
  * Create a temporary directory for test isolation.
@@ -147,7 +147,7 @@ describe("Signing", () => {
 
   describe("createCert", () => {
     it("creates cert.pem and key.pem", async () => {
-      const info = await signing.createCert({ scope: "@test" });
+      await signing.createCert({ scope: "@test" });
 
       expect(fs.existsSync(signing.scopeCertPath("@test"))).toBe(true);
       expect(fs.existsSync(signing.scopeKeyPath("@test"))).toBe(true);
@@ -324,8 +324,8 @@ describe("Signing", () => {
       expect(result.status).toBe("VALID");
       expect(result.filePath).toBe(path.resolve(binPath));
       expect(result.signer).toBeDefined();
-      expect(result.signer!.subject.commonName).toBe("Test User");
-      expect(result.signer!.fingerprint).toMatch(/^SHA256:/);
+      expect(defined(result.signer, "signer").subject.commonName).toBe("Test User");
+      expect(defined(result.signer, "signer").fingerprint).toMatch(/^SHA256:/);
       expect(result.trust.state).toBe("trusted");
       expect(result.integrity.state).toBe("intact");
     });

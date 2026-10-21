@@ -78,6 +78,7 @@ import {
   CyclicDependencyError,
 } from "../src/DependencyWalker";
 import { runCommand, formatCommand, formatFailureOutput, CommandResult } from "../src/ProcessRunner";
+import { defined } from "./helpers/Defined";
 import { buildRecursive, getRecursiveBuildSteps } from "../src/RecursiveBuild";
 import { runInstallPhase } from "../src/InstallPhase";
 import type { InstallPhaseOptions, InstallPhaseResult, InstallReport } from "../src/types";
@@ -149,7 +150,7 @@ function useGraph(order: BuildableProject[]): void {
   mockedWalkDependencies.mockResolvedValue({
     projects: new Map(order.map((p) => [p.path, p])),
     edges: new Map(
-      order.map((p) => [p.path, p.dependencies.map((d) => byName.get(d)!.path)])
+      order.map((p) => [p.path, p.dependencies.map((d) => defined(byName.get(d), "project " + d).path)])
     ),
   });
   mockedResolveBuildOrder.mockReturnValue(order);

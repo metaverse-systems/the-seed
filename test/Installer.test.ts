@@ -22,6 +22,7 @@ import { runTheSeed, snapshotTree } from "./helpers/RunCli";
 import { addScopeHint, buildWindowsHint, createCertHint } from "../src/cli/Hints";
 import { readWxs, WxsElement } from "./helpers/WxsReader";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { defined } from "./helpers/Defined";
 
 // Mock child_process for wixl/which detection
 jest.mock("child_process", () => ({
@@ -215,11 +216,11 @@ describe("Installer", () => {
 
       const result = installer.readProjectMetadata(projectDir);
       expect(result.ok).toBe(true);
-      const config = result.ok ? result.config : null;
-      expect(config!.productName).toBe("my-game");
-      expect(config!.version).toBe("1.2.3");
-      expect(config!.manufacturer).toBe("Test Author");
-      expect(config!.upgradeCode).toBe(generateUpgradeCode("my-game"));
+      const config = defined(result.ok ? result.config : null, "project metadata");
+      expect(config.productName).toBe("my-game");
+      expect(config.version).toBe("1.2.3");
+      expect(config.manufacturer).toBe("Test Author");
+      expect(config.upgradeCode).toBe(generateUpgradeCode("my-game"));
     });
 
     it("should keep the three numbers of the version", () => {
@@ -287,11 +288,11 @@ describe("Installer", () => {
 
       const result = installer.readProjectMetadata(projectDir);
       expect(result.ok).toBe(true);
-      const config = result.ok ? result.config : null;
-      expect(config!.productName).toBe("client");
-      expect(config!.version).toBe("0.0.1");
+      const config = defined(result.ok ? result.config : null, "project metadata");
+      expect(config.productName).toBe("client");
+      expect(config.version).toBe("0.0.1");
       // UpgradeCode should use the full scoped name for determinism
-      expect(config!.upgradeCode).toBe(generateUpgradeCode("@metaverse-systems/client"));
+      expect(config.upgradeCode).toBe(generateUpgradeCode("@metaverse-systems/client"));
     });
 
     it("should handle scoped names with nested scope", () => {
@@ -414,9 +415,10 @@ describe("Installer", () => {
       fs.writeFileSync(path.join(projectDir, "src", "Makefile.am"), "bin_PROGRAMS = app\napp_SOURCES = app.cpp\n");
       fs.writeFileSync(path.join(projectDir, "src", ".libs", "app"), "program-content");
       mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
-      // The working directory is left as it is: its own dist/ is only observed
-      const cwdDist = path.join(process.cwd(), "dist");
-      const before = fs.existsSync(cwdDist) ? fs.statSync(cwdDist).mtimeMs : null;
+      // The working directory is an empty scratch directory, so nothing another suite builds can show up in it
+      const workDir = path.join(tempDir, "work");
+      fs.mkdirSync(workDir);
+      const cwdSpy = jest.spyOn(process, "cwd").mockReturnValue(workDir);
 
       const logSpy = jest.spyOn(console, "log").mockImplementation();
       const errorSpy = jest.spyOn(console, "error").mockImplementation();
@@ -424,13 +426,14 @@ describe("Installer", () => {
       try {
         result = await installer.ensureDist(projectDir);
       } finally {
+        cwdSpy.mockRestore();
         logSpy.mockRestore();
         errorSpy.mockRestore();
       }
 
       expect(result).toBe(true);
       expect(fs.readFileSync(path.join(projectDir, "dist", "app"), "utf-8")).toBe("program-content");
-      expect(fs.existsSync(cwdDist) ? fs.statSync(cwdDist).mtimeMs : null).toBe(before);
+      expect(fs.readdirSync(workDir)).toEqual([]);
     });
   });
 
@@ -446,7 +449,7 @@ describe("Installer", () => {
     });
 
     it("should return false when wixl fails", () => {
-      mockedExecFileSync.mockImplementation((command: string, _args?: readonly string[]) => {
+      mockedExecFileSync.mockImplementation((command: string) => {
         if (command === "wixl") {
           const err = new Error("wixl failed") as Error & { stderr: Buffer };
           err.stderr = Buffer.from("Compilation error details");
