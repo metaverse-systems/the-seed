@@ -1352,3 +1352,55 @@ describe("pak fixture", () => {
     expect(resources.some((r) => fs.statSync(path.join(projectDir, r.filename)).size === 0)).toBe(true);
   });
 });
+
+describe("lint gate", () => {
+  type LintArguments = (targets?: string[]) => string[];
+  const lintArguments = (runChecks as unknown as { lintArguments?: LintArguments }).lintArguments;
+  let directory: string;
+
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), "lint-gate-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("builds the ESLint arguments with --max-warnings 0 and the given targets", () => {
+    expect(typeof lintArguments).toBe("function");
+    const defaults = (lintArguments as LintArguments)();
+    expect(defaults[defaults.indexOf("--max-warnings") + 1]).toBe("0");
+    expect(defaults).toContain("--ext");
+    expect(defaults).toContain(".ts");
+    expect(defaults.slice(-2)).toEqual(["src", "test"]);
+    expect((lintArguments as LintArguments)(["elsewhere"]).slice(-1)).toEqual(["elsewhere"]);
+  });
+
+  it("fails on a single warning when run with the stage's arguments", () => {
+    expect(typeof lintArguments).toBe("function");
+    fs.copyFileSync(rel(".eslintrc.json"), path.join(directory, ".eslintrc.json"));
+    fs.symlinkSync(rel("node_modules"), path.join(directory, "node_modules"), "dir");
+    fs.writeFileSync(path.join(directory, "probe.ts"), "export function probe(): number {\n  const unused = 1;\n  return 2;\n}\n");
+    const args = (lintArguments as LintArguments)(["."]);
+    const run = spawnSync(process.execPath, [rel("node_modules", "eslint", "bin", "eslint.js"), ...args], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, DISABLE_V8_COMPILE_CACHE: "1" },
+    });
+    expect(run.stdout).toContain("'unused' is assigned a value but never used");
+    expect(run.status).not.toBe(0);
+  });
+
+  it("exits 0 with the same file and no warning limit (the warning alone does not fail)", () => {
+    fs.copyFileSync(rel(".eslintrc.json"), path.join(directory, ".eslintrc.json"));
+    fs.symlinkSync(rel("node_modules"), path.join(directory, "node_modules"), "dir");
+    fs.writeFileSync(path.join(directory, "probe.ts"), "export function probe(): number {\n  const unused = 1;\n  return 2;\n}\n");
+    const run = spawnSync(process.execPath, [rel("node_modules", "eslint", "bin", "eslint.js"), "--ext", ".ts", "."], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, DISABLE_V8_COMPILE_CACHE: "1" },
+    });
+    expect(run.stdout).toContain("never used");
+    expect(run.status).toBe(0);
+  });
+});

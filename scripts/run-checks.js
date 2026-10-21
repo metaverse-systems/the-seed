@@ -366,8 +366,12 @@ function typecheckStage() {
   return runNode([localBin("typescript", "bin", "tsc"), "-p", "tsconfig.test.json"]);
 }
 
+function lintArguments(targets = ["src", "test"]) {
+  return ["--ext", ".ts", "--max-warnings", "0", ...targets];
+}
+
 function lintStage() {
-  return runNode([localBin("eslint", "bin", "eslint.js"), "--ext", ".ts", "src", "test"]);
+  return runNode([localBin("eslint", "bin", "eslint.js"), ...lintArguments()]);
 }
 
 function isolatedEnvironment(base, scratchHome, scratchTmp) {
@@ -766,7 +770,7 @@ function main(argv) {
   return outcomes.every((o) => o.passed) ? 0 : 1;
 }
 
-module.exports = { parseArguments, STAGES, summariseStages, installEnvironment, summariseResults, validateKnownGaps, validateKnownGapFiles, findLeftovers, snapshotRealHome, compareRealHome, isolatedEnvironment };
+module.exports = { parseArguments, STAGES, summariseStages, installEnvironment, summariseResults, validateKnownGaps, validateKnownGapFiles, findLeftovers, snapshotRealHome, compareRealHome, isolatedEnvironment, lintArguments };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));
