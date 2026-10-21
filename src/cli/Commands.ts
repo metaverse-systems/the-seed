@@ -182,7 +182,9 @@ const templateSub = (kind: string, summary: string): SubcommandSpec =>
     positionals: [
       {
         name: "name",
-        help: "The package, such as @my-scope/hello; asked for when not given",
+        help:
+          "The project, such as @my-scope/hello; asked for when not given. " +
+          "The name starts with a lowercase letter and holds only lowercase letters, digits, \".\", \"_\" and \"-\".",
         required: false,
         parse: packageName(kind as ProjectKind),
         usage: "<scope>/<name>",
@@ -220,7 +222,10 @@ export const COMMANDS: CommandSpec[] = [
     name: "template",
     summary: "Create a component, system or program from a template",
     whenEmpty: "help",
-    notes: ["The project is created in the current directory."],
+    notes: [
+      "Every project is created in the current directory, in a directory named after it; " +
+        "nothing is created under the prefix.",
+    ],
     subcommands: [
       templateSub("component", "Create a component"),
       templateSub("system", "Create a system"),
@@ -273,7 +278,9 @@ export const COMMANDS: CommandSpec[] = [
     name: "resource-pak",
     summary: "Create a resource pak project, add resources to it and build it",
     whenEmpty: "help",
-    notes: ["add and build run in a resource pak project's directory."],
+    notes: [
+      "Every project is created in the current directory. add and build run in a resource pak project's directory.",
+    ],
     subcommands: [
       sub({
         name: "create",

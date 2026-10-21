@@ -22,20 +22,20 @@ export const EXIT_STATUSES: ExitStatusRow[] = [
     meaning:
       "The command ran and the outcome is a failure: a build, packaging, installer, dependency installation or signing " +
       "operation failed; verification found the file invalid, not fully signed, not checked or unsigned; the user " +
-      "declined to overwrite; an unexpected internal error",
+      "declined to overwrite; a project directory that already exists; a resource name that already exists (without " +
+      "--force); a resource file that changed while the pak was written; an unexpected internal error",
   },
   {
     status: "2",
     meaning:
       "Something the command needs is missing or unusable: a file or directory, a project description, scopes, the " +
       "named scope, a certificate (or it has expired or cannot be read), a valid configuration file, the native " +
-      "component, a required program such as wixl",
+      "component, a required program such as wixl; the scope author's name (or an email or web address the build " +
+      "configuration cannot hold); a resource file; a resource pak project description",
   },
   {
     status: "3",
-    meaning:
-      "Usage error, or input the command cannot interpret (for verification: a malformed manifest, or a signature " +
-      "file given in place of a signed file)",
+    meaning: "Usage error, or input the command cannot interpret",
   },
   { status: "4", meaning: "Verification only: intact but not trusted" },
   { status: "128+N", meaning: "A build stopped by signal N (130 after Ctrl+C)" },

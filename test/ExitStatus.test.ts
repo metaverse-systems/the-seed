@@ -15,6 +15,9 @@
  * - A failing step of `dependencies install` is made by replacing `installLibEcs` in the module
  *   `Dependencies`; an unexpected error is made by replacing `checkLibEcs` with a function that
  *   throws a `TypeError`, run as `dependencies check`.
+ * - The meanings of statuses 1 and 2 are checked for each condition phrase of the exit-status
+ *   wording (case-insensitive, in any order), status 3 for its exact wording; the allowed statuses
+ *   of `template` and `resource-pak` are 0, 1, 2 and 3.
  * - A scratch directory is a project of the resource-pak kind when it has a `package.json`.
  *
  * Interfaces this file expects from `src/cli/ExitStatus.ts`:
@@ -79,6 +82,18 @@ describe("scheme", () => {
       expect(meanings[4]).toMatch(/not trusted/i);
       expect(meanings[5]).toMatch(/signal N/);
       expect(meanings[5]).toMatch(/130/);
+    });
+
+    it("names the project and resource conditions in the meanings of statuses 1 and 2", () => {
+      const meanings = EXIT_STATUSES.map((row) => row.meaning);
+      expect(meanings[1]).toMatch(/project directory that already exists/i);
+      expect(meanings[1]).toMatch(/resource name that already exists \(without --force\)/i);
+      expect(meanings[1]).toMatch(/resource file that changed while the pak was written/i);
+      expect(meanings[2]).toMatch(/scope author's name/i);
+      expect(meanings[2]).toMatch(/email or web address the build configuration cannot hold/i);
+      expect(meanings[2]).toMatch(/a resource file/i);
+      expect(meanings[2]).toMatch(/a resource pak project description/i);
+      expect(meanings[3]).toBe("Usage error, or input the command cannot interpret");
     });
 
     it("keeps every meaning on one line", () => {
@@ -687,11 +702,11 @@ describe("end to end", () => {
     const allowed: Record<string, number[]> = {
       config: [0, 2, 3],
       scopes: [0, 2, 3],
-      template: [0, 3],
+      template: [0, 1, 2, 3],
       build: [0, 1, 2, 3],
       dependencies: [0, 1, 3],
       package: [0, 1, 2, 3],
-      "resource-pak": [0, 2, 3],
+      "resource-pak": [0, 1, 2, 3],
       signing: [0, 1, 2, 3, 4],
       installer: [0, 1, 2, 3],
     };
