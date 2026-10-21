@@ -32,6 +32,7 @@ jest.mock("../src/RecursiveBuild", () => ({
   }),
 }));
 
+import Config from "../src/Config";
 import { buildRecursive } from "../src/RecursiveBuild";
 import {
   CyclicDependencyError,
@@ -150,6 +151,19 @@ describe("BuildCLI dashed --recursive", () => {
   it("runs a recursive build for 'windows --recursive --release'", async () => {
     await build(["windows", "--recursive", "--release"]);
     expectRecursiveCall("windows", true);
+  });
+
+  it("passes the recursive build the Config built from the context's configuration directory", async () => {
+    const configDir = "/scratch/other-config";
+    await build(["native", "--recursive"], { configDir });
+
+    expect(mockedBuildRecursive).toHaveBeenCalledTimes(1);
+    // The configuration is a field the options gain when the build is given one; read through a cast so this compiles either way.
+    const given = (mockedBuildRecursive.mock.calls[0][0] as unknown as { config?: { configDir: string } }).config;
+    expect(given).toBeDefined();
+    expect(given?.configDir).toBe(configDir);
+    const built = (Config as unknown as jest.Mock).mock.results.map((result) => result.value as unknown);
+    expect(built).toContain(given);
   });
 
   it("builds only the current project for 'native --release'", async () => {
@@ -432,9 +446,11 @@ describe("BuildCLI deprecated bare word", () => {
     await build(["windows", "recursive", "--release", "--parallel", "2"]);
     await build(["windows", "--recursive", "--release", "--parallel", "2"]);
     expect(mockedBuildRecursive).toHaveBeenCalledTimes(2);
-    // Each build gets its own cancellation signals; everything else is the same.
+    // Each build gets its own cancellation signals and its own configuration object (built from the
+    // same directory); everything else is the same.
     const withoutSignals = (call: number) => {
-      const { signal, forceSignal, ...rest } = mockedBuildRecursive.mock.calls[call][0];
+      const { signal, forceSignal, config, ...rest } = mockedBuildRecursive.mock.calls[call][0];
+      expect(config.configDir).toBe("/fake/config");
       expect(signal).toBeInstanceOf(AbortSignal);
       expect(forceSignal).toBeInstanceOf(AbortSignal);
       return rest;

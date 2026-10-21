@@ -34,17 +34,24 @@ const describeError = (error: unknown): string => {
   return String((error as Error)?.message ?? error).split("\n")[0];
 };
 
+/**
+ * The directory the configuration lives in unless another is given: `the-seed` in the home directory.
+ */
+export function defaultConfigDir(): string {
+  return path.join(os.homedir(), "the-seed");
+}
+
 class Config {
   configDir: string;
   configFile: string;
   configPath: string;
   config: ConfigType = {
-    prefix: path.join(os.homedir(), "the-seed"),
+    prefix: defaultConfigDir(),
     scopes: {}
   };
 
   constructor(configDir?: string) {
-    this.configDir = configDir || path.join(os.homedir(), "the-seed");
+    this.configDir = configDir || defaultConfigDir();
     this.configFile = "config.json";
     this.configPath = path.join(this.configDir, this.configFile);
     this.loadConfig();
@@ -100,7 +107,7 @@ class Config {
     }
     return {
       ...loaded,
-      prefix: (loaded.prefix as string | undefined) ?? path.join(os.homedir(), "the-seed"),
+      prefix: (loaded.prefix as string | undefined) ?? defaultConfigDir(),
       scopes: (loaded.scopes as ConfigType["scopes"] | undefined) ?? {}
     };
   };

@@ -22,6 +22,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { spawnSync } from "child_process";
 import { runCli } from "../src/scripts/Cli";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
 import { runTheSeed, snapshotTree } from "./helpers/RunCli";
@@ -474,5 +475,27 @@ describe("scopes list", () => {
     const run = await runTheSeed(["config", "--help"], { home });
     expect(run.status).toBe(0);
     expect(run.stdout).not.toMatch(/scopes/i);
+  });
+});
+
+describe("the command's default configuration directory", () => {
+  const script = path.resolve(__dirname, "..", "dist", "scripts", "the-seed.js");
+
+  it("config list, spawned with a scratch HOME, reports the configuration location <HOME>/the-seed", () => {
+    if (!optionalExternalCheck("built command", fs.existsSync(script), "dist/scripts/the-seed.js is not built")) {
+      return;
+    }
+    const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cli-default-dir-test-")));
+    try {
+      const run = spawnSync(process.execPath, [script, "config", "list"], {
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      });
+      expect(run.status).toBe(0);
+      expect(run.stdout.split("\n")[0]).toBe(path.join(home, "the-seed", "config.json"));
+      expect(fs.existsSync(path.join(home, "the-seed", "config.json"))).toBe(true);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+    }
   });
 });

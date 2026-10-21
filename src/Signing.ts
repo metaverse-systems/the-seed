@@ -7,7 +7,7 @@ import { execSync } from "child_process";
 import { pipeline } from "stream/promises";
 import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
-import Config from "./Config";
+import Config, { defaultConfigDir } from "./Config";
 import { addScopeHint, createCertHint, editScopeHint, replaceCertHint } from "./cli/Hints";
 import { NativeComponentMissingError, loadNativeComponent, requireNativeComponent } from "./NativeComponent";
 import { buildSignatureContainer, containerCapacity } from "./CmsBuilder";
@@ -128,7 +128,7 @@ class Signing {
   signingDir: string;
 
   constructor(configDir?: string) {
-    this.configDir = configDir || path.join(os.homedir(), "the-seed");
+    this.configDir = configDir || defaultConfigDir();
     this.signingDir = path.join(this.configDir, "signing");
   }
 

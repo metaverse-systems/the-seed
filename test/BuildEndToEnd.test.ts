@@ -299,8 +299,8 @@ describe("BuildEndToEnd", () => {
   }
 
   function recursiveBuild() {
-    // jobs is not known to every version of the options type; the object is built apart so it is accepted either way.
     const options = {
+      config: new Config(configDir),
       target: "native",
       fullReconfigure: true,
       projectDir,
@@ -1021,6 +1021,7 @@ describe("BuildEndToEnd", () => {
         logSpy.mockClear();
 
         const result = await buildRecursive({
+          config: new Config(configDir),
           target: "native",
           fullReconfigure: true,
           projectDir: dirB,

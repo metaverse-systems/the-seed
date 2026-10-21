@@ -3,6 +3,7 @@ import Config from "./Config";
 import { spawnSync } from "child_process";
 import { targets } from "./Build";
 import { BuildStep } from "./types";
+import { autotoolsSteps } from "./AutotoolsSteps";
 import { runStep, stepText } from "./StepRunner";
 import { processorCount } from "./BuildScheduler";
 import { librarySearchEnv } from "./LibrarySearch";
@@ -73,15 +74,20 @@ export const installLibTheSeed = async (config: Config, target: string) => {
  * existing clone, then autogen, configure, compile and install inside it.
  */
 const getLibrarySteps = (name: string, repo: string, installDir: string, prefix: string, target: string, jobs: number, search: Record<string, string>): BuildStep[] => {
-  const hostArgs = target !== "native" ? ["--host=" + targets[target]] : [];
   return [
     fs.existsSync(installDir)
       ? { label: `update ${name}`, program: "git", args: ["-C", installDir, "pull", "--ff-only"] }
       : { label: `clone ${name}`, program: "git", args: ["clone", repo, installDir] },
-    { label: `${name} autogen`, program: "./autogen.sh", args: [], cwd: installDir },
-    { label: `${name} configure`, program: "./configure", args: [`--prefix=${prefix}`, ...hostArgs], cwd: installDir, env: search },
-    { label: `${name} compile`, program: "make", args: [`-j${jobs}`], cwd: installDir },
-    { label: `${name} install`, program: "make", args: ["install"], cwd: installDir },
+    ...autotoolsSteps({
+      prefix,
+      host: target !== "native" ? targets[target] : null,
+      jobs,
+      env: search,
+      reconfigure: true,
+      distclean: false,
+      cwd: installDir,
+      labelPrefix: name,
+    }),
   ];
 };
 

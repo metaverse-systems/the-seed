@@ -1,6 +1,7 @@
 import Config from "./Config";
 import { BuildStep, ProjectBuildOptions, ProjectBuildResult } from "./types";
 import { processorCount } from "./BuildScheduler";
+import { autotoolsSteps } from "./AutotoolsSteps";
 import { librarySearchEnv } from "./LibrarySearch";
 import { runStep, stepText } from "./StepRunner";
 import { runInstallPhase } from "./InstallPhase";
@@ -142,29 +143,14 @@ class Build {
     const newTarget = targets[target];
     const prefix = this.config.config.prefix + "/" + newTarget;
 
-    const steps: BuildStep[] = [];
-
-    if (fullReconfigure) {
-      steps.push({ label: "autogen", program: "./autogen.sh", args: [] });
-
-      steps.push({ label: "distclean", program: "make", args: ["distclean"], ignoreExitCode: true });
-
-      steps.push({
-        label: "configure",
-        program: "./configure",
-        args: [
-          "--prefix=" + prefix,
-          ...(target === "windows" ? ["--host=" + targets["windows"]] : []),
-        ],
-        env: librarySearchEnv(this.config.config.prefix, target, inherited),
-      });
-    }
-
-    steps.push({ label: "compile", program: "make", args: [`-j${jobs}`] });
-
-    steps.push({ label: "install", program: "make", args: ["install"] });
-
-    return steps;
+    return autotoolsSteps({
+      prefix,
+      host: target === "windows" ? targets["windows"] : null,
+      jobs,
+      env: librarySearchEnv(this.config.config.prefix, target, inherited),
+      reconfigure: fullReconfigure,
+      distclean: true,
+    });
   };
 
   /**
