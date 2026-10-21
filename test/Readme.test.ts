@@ -35,7 +35,15 @@
  *   name starts with `_`, which may be left out (but are checked when listed). The header row of
  *   a table (the row before the separator row) is ignored.
  * - The `api-example` block is compiled as a TypeScript module with strict settings in which
- *   `@metaverse-systems/the-seed` resolves to `src/index.ts`; it must produce no diagnostics.
+ *   `@metaverse-systems/the-seed` resolves to `src/index.ts` and each public subpath named by the
+ *   `exports` map of package.json (`./Config`, ...) resolves to its source module (`dist/X.js`
+ *   becomes `src/X.ts`); it must produce no diagnostics.
+ * - The `public-modules` marker is followed by a Markdown table of the public modules: a header row,
+ *   a separator row, then one row per key of `exports` except `./package.json`, in the order of
+ *   `exports`: `| <specifier> | <what it holds> |`, where the specifier is the package name followed
+ *   by the subpath without its `./` (backticks around a cell are ignored) and the second cell is the
+ *   text of `PUBLIC_MODULE_CONTENTS` in this file. The sentence "Nothing else in the package is
+ *   public; other paths cannot be imported." has to appear in the README outside fenced blocks.
  * - Backticked repository paths are inline code spans (outside fenced blocks) that start with
  *   `src/`, `test/`, `native/`, `scripts/`, `templates/` or `.github/` and contain no space,
  *   `*`, `<`, `{` or `...`. Relative Markdown links in the README also have to exist, and the
@@ -81,7 +89,7 @@ interface Fence {
 }
 
 interface Marker {
-  /** "help", "help: build", "exit-statuses", "api-types" or "api-example" */
+  /** "help", "help: build", "exit-statuses", "api-types", "api-example" or "public-modules" */
   key: string;
   line: number;
   /** For a fenced block: the fence. For a table: open is the first row and close the last. */
@@ -105,7 +113,7 @@ interface Parsed {
   fenced: Set<number>;
 }
 
-const MARKER = /^<!--\s*(help|help:\s*[a-z][a-z-]*|exit-statuses|api-types|api-example)\s*-->\s*$/;
+const MARKER = /^<!--\s*(help|help:\s*[a-z][a-z-]*|exit-statuses|api-types|api-example|public-modules)\s*-->\s*$/;
 
 function parseMarkdown(text: string): Parsed {
   const lines = text.split("\n");
@@ -133,7 +141,7 @@ function parseMarkdown(text: string): Parsed {
     let next = i + 1;
     while (next < lines.length && lines[next].trim() === "") next++;
     let block: Fence | null = null;
-    if (key === "exit-statuses") {
+    if (key === "exit-statuses" || key === "public-modules") {
       if (next < lines.length && lines[next].trim().startsWith("|")) {
         let last = next;
         while (last + 1 < lines.length && lines[last + 1].trim().startsWith("|")) last++;
@@ -190,6 +198,62 @@ function stripBackticks(text: string): string {
 
 function subcommandSpecs(command: CommandSpec): SubcommandSpec[] {
   return [...(command.root ? [command.root] : []), ...command.subcommands];
+}
+
+const PACKAGE_NAME = "@metaverse-systems/the-seed";
+const PUBLIC_SENTENCE = "Nothing else in the package is public; other paths cannot be imported.";
+
+/** What each public module holds, as the Public modules table words it. */
+const PUBLIC_MODULE_CONTENTS: Record<string, string> = {
+  ".": "The entry point: the classes, error types and type declarations listed in this reference",
+  "./Build": "`Build`, the build target table and the strip-tool helpers",
+  "./Config": "`Config` and `ConfigError`",
+  "./Dependencies": "The dependency checks and installers for libecs-cpp and libthe-seed",
+  "./DependencyWalker": "`walkDependencies` and the dependency discovery errors",
+  "./Hints": "The hint texts that follow command-line messages",
+  "./Installer": "`Installer` and its configuration and result types",
+  "./NativeComponent": "The native component loader functions and `NativeComponentMissingError`",
+  "./Package": "`Package`",
+  "./ProjectError": "`ProjectError` and its error codes",
+  "./RecursiveBuild": "`buildRecursive` and `getRecursiveBuildSteps`",
+  "./ResourcePak": "`ResourcePak`",
+  "./Scopes": "`Scopes`, `ScopeNameError` and `validateScopeName`",
+  "./Signing": "`Signing`, `SigningError` and the signing constants",
+  "./Template": "`Template`",
+  "./types": "The shared type declarations",
+};
+
+/** The keys of package.json's exports map, in order, without the manifest itself. */
+function publicSubpaths(): string[] {
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf-8")) as { exports?: Record<string, unknown> };
+  return Object.keys(manifest.exports ?? {}).filter((subpath) => subpath !== "./package.json");
+}
+
+function publicSpecifier(subpath: string): string {
+  return subpath === "." ? PACKAGE_NAME : `${PACKAGE_NAME}/${subpath.slice(2)}`;
+}
+
+/** The source module a public subpath is compiled from (`dist/X.js` becomes `src/X.ts`). */
+function publicSources(): Record<string, string[]> {
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageRoot, "package.json"), "utf-8")) as {
+    exports?: Record<string, { default?: string } | string>;
+  };
+  const paths: Record<string, string[]> = {};
+  for (const subpath of publicSubpaths()) {
+    const entry = (manifest.exports ?? {})[subpath];
+    const target = typeof entry === "string" ? entry : entry?.default;
+    if (target === undefined) continue;
+    paths[publicSpecifier(subpath)] = [target.replace(/^\.\/dist\//, "src/").replace(/\.js$/, ".ts")];
+  }
+  return paths;
+}
+
+function publicModulesTable(): string[] {
+  return [
+    "| Module | Holds |",
+    "|---|---|",
+    ...publicSubpaths().map((subpath) => `| \`${publicSpecifier(subpath)}\` | ${PUBLIC_MODULE_CONTENTS[subpath] ?? ""} |`),
+  ];
 }
 
 function exitStatusTable(): string[] {
@@ -612,7 +676,7 @@ function checkApiExample(readme: string): string[] {
     sourceMap: false,
     outDir: undefined,
     baseUrl: packageRoot,
-    paths: { "@metaverse-systems/the-seed": ["src/index.ts"] },
+    paths: { [PACKAGE_NAME]: ["src/index.ts"], ...publicSources() },
   };
   const host = ts.createCompilerHost(options);
   const original = host.getSourceFile.bind(host);
@@ -630,6 +694,32 @@ function checkApiExample(readme: string): string[] {
     const where = diagnostic.start === undefined ? "" : `line ${source.getLineAndCharacterOfPosition(diagnostic.start).line + 1}: `;
     return `example, ${where}${ts.flattenDiagnosticMessageText(diagnostic.messageText, " ")}`;
   });
+}
+
+/** Check 8b: the Public modules table equals the exports map, and the closing sentence is present. */
+function checkPublicModules(readme: string): string[] {
+  const parsed = parseMarkdown(readme);
+  const problems: string[] = [];
+  const marker = parsed.markers.find((candidate) => candidate.key === "public-modules");
+  if (marker === undefined) problems.push("no <!-- public-modules --> table");
+  else if (marker.block === null) problems.push("<!-- public-modules --> is not followed by a table");
+  else {
+    const cells = (line: string): string[] => line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(stripBackticks);
+    const rows = blockText(parsed, marker).split("\n").slice(2).map(cells);
+    const expected = publicSubpaths();
+    if (rows.length !== expected.length) problems.push(`the table has ${rows.length} rows; exports has ${expected.length} public subpaths`);
+    expected.forEach((subpath, index) => {
+      const row = rows[index];
+      if (row === undefined) return;
+      const holds = stripBackticks(PUBLIC_MODULE_CONTENTS[subpath] ?? "");
+      if (row.length !== 2 || row[0] !== publicSpecifier(subpath) || row[1] !== holds) {
+        problems.push(`row ${index + 1} differs from the public module ${publicSpecifier(subpath)}`);
+      }
+    });
+  }
+  const outsideFences = parsed.lines.filter((_, index) => !parsed.fenced.has(index)).join(" ");
+  if (!outsideFences.replace(/\s+/g, " ").includes(PUBLIC_SENTENCE)) problems.push(`the sentence "${PUBLIC_SENTENCE}" is missing`);
+  return problems;
 }
 
 const PATH_PREFIXES = /^(src|test|native|scripts|templates|\.github)\//;
@@ -675,6 +765,7 @@ function generatedBlock(key: string): string[] | null {
     return command ? renderCommandHelp(command).replace(/\n+$/, "").split("\n") : null;
   }
   if (key === "exit-statuses") return exitStatusTable();
+  if (key === "public-modules") return publicModulesTable();
   if (key === "api-types") return declared().types.split("\n");
   return null;
 }
@@ -695,13 +786,13 @@ function expectedReadme(readme: string): string {
     if (block.info === "table") lines.splice(block.open, block.close - block.open + 1, ...content);
     else lines.splice(block.open + 1, block.close - block.open - 1, ...content);
   }
-  const missing = ["help", ...COMMANDS.map((command) => `help: ${command.name}`), "exit-statuses", "api-types"].filter((key) => !present.has(key));
+  const missing = ["help", ...COMMANDS.map((command) => `help: ${command.name}`), "exit-statuses", "api-types", "public-modules"].filter((key) => !present.has(key));
   if (missing.length > 0) {
     lines.push("", "<!-- Blocks whose marker the README does not have yet -->");
     for (const key of missing) {
       const content = generatedBlock(key) as string[];
       lines.push("", `<!-- ${key} -->`);
-      if (key === "exit-statuses") lines.push("", ...content);
+      if (key === "exit-statuses" || key === "public-modules") lines.push("", ...content);
       else lines.push("```text", ...content, "```");
     }
   }
@@ -767,6 +858,10 @@ describe("README check", () => {
 
   test("8: the api-example block type-checks against src/index.ts", () => {
     fail(8, "api example", checkApiExample(readme));
+  });
+
+  test("10: the Public modules table equals the exports map of package.json", () => {
+    fail(10, "public modules", checkPublicModules(readme));
   });
 
   test("9: repository paths and links in README.md and structure.md exist, and LICENSE and structure.md are linked", () => {
@@ -835,6 +930,10 @@ describe("README check: negative self-test", () => {
   test("check 2 reports a help block for a command that does not exist", () => {
     const damaged = sample() + "\n<!-- help: nothing -->\n```text\nx\n```\n";
     expect(run(damaged).get(2)?.length).toBeGreaterThan(0);
+  });
+
+  test("check 10 reports a README without the Public modules table and sentence", () => {
+    expect(checkPublicModules(sample()).length).toBeGreaterThan(0);
   });
 
   test("check 5 reports a changed exit-status row", () => {

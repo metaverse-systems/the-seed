@@ -1042,7 +1042,34 @@ Show help for the tool, a command or a subcommand.
 
 ## API Reference
 
-Everything below is exported from `@metaverse-systems/the-seed`, except `ConfigError`, `walkDependencies` and `NativeComponent`'s loader functions, which are imported from their modules under `dist/`. The tables list every public member of a class with its parameters (`?` marks an optional one); the README check compares them with the source.
+Everything below is exported from `@metaverse-systems/the-seed`, except a few names that are imported from a public module instead: `ConfigError` from `@metaverse-systems/the-seed/Config`, `walkDependencies` from `@metaverse-systems/the-seed/DependencyWalker` and the loader functions from `@metaverse-systems/the-seed/NativeComponent`. The tables list every public member of a class with its parameters (`?` marks an optional one); the README check compares them with the source.
+
+#### Public modules
+
+The package declares these modules as its public surface:
+
+<!-- public-modules -->
+
+| Module | Holds |
+|---|---|
+| `@metaverse-systems/the-seed` | The entry point: the classes, error types and type declarations listed in this reference |
+| `@metaverse-systems/the-seed/Build` | `Build`, the build target table and the strip-tool helpers |
+| `@metaverse-systems/the-seed/Config` | `Config` and `ConfigError` |
+| `@metaverse-systems/the-seed/Dependencies` | The dependency checks and installers for libecs-cpp and libthe-seed |
+| `@metaverse-systems/the-seed/DependencyWalker` | `walkDependencies` and the dependency discovery errors |
+| `@metaverse-systems/the-seed/Hints` | The hint texts that follow command-line messages |
+| `@metaverse-systems/the-seed/Installer` | `Installer` and its configuration and result types |
+| `@metaverse-systems/the-seed/NativeComponent` | The native component loader functions and `NativeComponentMissingError` |
+| `@metaverse-systems/the-seed/Package` | `Package` |
+| `@metaverse-systems/the-seed/ProjectError` | `ProjectError` and its error codes |
+| `@metaverse-systems/the-seed/RecursiveBuild` | `buildRecursive` and `getRecursiveBuildSteps` |
+| `@metaverse-systems/the-seed/ResourcePak` | `ResourcePak` |
+| `@metaverse-systems/the-seed/Scopes` | `Scopes`, `ScopeNameError` and `validateScopeName` |
+| `@metaverse-systems/the-seed/Signing` | `Signing`, `SigningError` and the signing constants |
+| `@metaverse-systems/the-seed/Template` | `Template` |
+| `@metaverse-systems/the-seed/types` | The shared type declarations |
+
+Nothing else in the package is public; other paths cannot be imported.
 
 ### Classes
 
@@ -1062,7 +1089,7 @@ Manages the-seed configuration file.
 | `getQuestions()` | `object[]` | Return inquirer prompt questions for configuration |
 | `parseAnswers(answers)` | `void` | Apply prompt answers (`{ prefix: string }`) to the configuration |
 
-`ConfigError` is a named export of the `Config` module (`import Config, { ConfigError } from "@metaverse-systems/the-seed/dist/Config"`). It extends `Error`; `path` is the configuration file the problem concerns and `message` is one line naming the file and the entry or cause. The command line reports it with status 2.
+`ConfigError` is a named export of the `Config` module (`import Config, { ConfigError } from "@metaverse-systems/the-seed/Config"`). It extends `Error`; `path` is the configuration file the problem concerns and `message` is one line naming the file and the entry or cause. The command line reports it with status 2.
 
 #### Scopes
 
@@ -1196,7 +1223,7 @@ Where it is thrown:
 
 #### Dependency discovery
 
-`walkDependencies(projectDir, options?)` (from `@metaverse-systems/the-seed/dist/DependencyWalker`) resolves the `DependencyGraph` of a project by the rule in [Recursive Builds](#recursive-builds). `options.signal` is an `AbortSignal`; aborting it rejects with `DiscoveryCancelledError`. It rejects with one of these error classes, all exported from the package:
+`walkDependencies(projectDir, options?)` (from `@metaverse-systems/the-seed/DependencyWalker`) resolves the `DependencyGraph` of a project by the rule in [Recursive Builds](#recursive-builds). `options.signal` is an `AbortSignal`; aborting it rejects with `DiscoveryCancelledError`. It rejects with one of these error classes, all exported from the package:
 
 | Class | Raised when |
 |-------|-------------|
