@@ -5,7 +5,7 @@ import Config from "./Config";
 import Scopes from "./Scopes";
 import { PackageAuthorType, PackageType } from "./types";
 import { ProjectError } from "./ProjectError";
-import { toIdentifier } from "./ProjectName";
+import { toIdentifier, validateProjectName } from "./ProjectName";
 import { REQUIRED_VERSIONS } from "./RequiredVersions";
 import { renderTemplate, TemplateValues } from "./TemplateEngine";
 import { editScopeHint } from "./cli/Hints";
@@ -51,14 +51,15 @@ class Template {
       },
       {
         "name": "templateName",
-        "message": "Choose name for " + this.type
+        "message": "Choose name for " + this.type,
+        "validate": (name: string): true | string => validateProjectName(name, this.type) ?? true
       }
     ];
   };
 
   /**
    * Creates the project <parentDir>/<name> from the template of this.type.
-   * Before anything is written it checks, in order, the scope, the author's name, the author's email and
+   * Before anything is written it checks, in order, the name, the scope, the author's name, the author's email and
    * web address, and the target; the project is rendered into a hidden sibling and renamed into place.
    * @param scope Scope the project belongs to, with its "@"
    * @param name Project name
@@ -68,6 +69,10 @@ class Template {
    * @throws ProjectError when the project cannot be created
    */
   createPackage = (scope: string, name: string, parentDir: string = process.cwd(), now: Date = new Date()): string => {
+    const invalid = validateProjectName(name, this.type);
+    if (invalid !== null) {
+      throw new ProjectError("invalid-name", invalid);
+    }
     const configured = this.config.config.scopes;
     if (!Object.prototype.hasOwnProperty.call(configured, scope)) {
       const names = Object.keys(configured);

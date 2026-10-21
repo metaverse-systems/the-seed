@@ -14,12 +14,22 @@
  *   program's `README.md` says "builds the program and installs it into the tool's prefix; `the-seed build
  *   windows` cross-compiles it for Windows." and its `configure.ac` keeps today's order and `windows.h` check.
  * - The creation message printed by the command is `Created <kind> <scope>/<name> in ./<name>`.
+ * - The name question of `askName()` carries `validate(input)`, which returns `true` for a usable
+ *   name and the reason (the text `validateProjectName` gives) otherwise, as inquirer expects. The
+ *   mocked prompt of the command-line helper does not run validators, so the interactive case
+ *   uses a prompt stand-in of its own that does what inquirer does: it runs `validate` on each
+ *   answer and, when it returns text, takes the next answer for that question instead.
+ * - A name refused on the command line is refused by the argument parser (status 3); the library
+ *   refuses it again with a `ProjectError` of code `invalid-name`, before the scope is looked at.
  */
 import fs from "fs";
 import path from "path";
 import os from "os";
 import Config from "../src/Config";
 import Template from "../src/Template";
+import { validateProjectName } from "../src/ProjectName";
+import inquirer from "inquirer";
+import { runCli } from "../src/scripts/Cli";
 import { runTheSeed, snapshotTree } from "./helpers/RunCli";
 
 interface ProjectErrorShape extends Error {
@@ -70,6 +80,31 @@ describe("test Template", () => {
       expect(questions[0].name).toBe("scopeName");
       expect(questions[0].choices).toContain("@test-scope");
       expect(questions[1].name).toBe("templateName");
+    });
+
+    it("gives the name question a validate that returns the reason for a refused name and true for a usable one", () => {
+      template.type = "component";
+      const question = template.askName()[1] as unknown as { validate?: (input: string) => string | boolean };
+
+      expect(typeof question.validate).toBe("function");
+      const validate = question.validate as (input: string) => string | boolean;
+      expect(validate("3d-mesh")).toBe(validateProjectName("3d-mesh", "component"));
+      expect(validate("3d-mesh")).toContain("A project name must start with a lowercase letter");
+      expect(validate("class")).toBe(
+        "\"class\" cannot be used as the name of a component: its C++ name \"class\" is a reserved word.");
+      expect(validate("")).toContain("A project name must start with a lowercase letter");
+      expect(validate("hello-world")).toBe(true);
+      expect(validate("mesh.loader")).toBe(true);
+    });
+
+    it("names the kind in the reason for each kind", () => {
+      for (const kind of kinds) {
+        template.type = kind;
+        const question = template.askName()[1] as unknown as { validate?: (input: string) => string | boolean };
+        const validate = question.validate as (input: string) => string | boolean;
+        expect(validate("ecs")).toBe(
+          `"ecs" cannot be used as the name of a ${kind}: the generated code already uses the name "ecs".`);
+      }
     });
   });
 
@@ -402,6 +437,79 @@ describe("createPackage", () => {
       expect(fs.lstatSync(target).isSymbolicLink()).toBe(true);
       expect(fs.readdirSync(elsewhere)).toEqual([]);
     });
+
+    for (const name of ["class", "3d-mesh", "a--b", "ecs", "Hello", ""]) {
+      it(`the name ${JSON.stringify(name)} is refused as invalid-name with nothing created`, () => {
+        const template = make({ "@acme": ada }, "component");
+        const snapshot = state();
+
+        const error = refusal(template, "@acme", name);
+
+        expect(error.code).toBe("invalid-name");
+        expect(error.message).toBe(validateProjectName(name, "component"));
+        expect(state()).toEqual(snapshot);
+        expect(fs.existsSync(path.join(prefix, "projects"))).toBe(false);
+      });
+    }
+
+    it("the reserved word class is refused with the kind named in the reason", () => {
+      const template = make({ "@acme": ada }, "system");
+
+      const error = refusal(template, "@acme", "class");
+
+      expect(error.message).toBe(
+        "\"class\" cannot be used as the name of a system: its C++ name \"class\" is a reserved word.");
+    });
+
+    it("a refused name is reported before a scope that is not configured", () => {
+      const template = make({ "@acme": ada }, "program");
+      const snapshot = state();
+
+      const error = refusal(template, "@nope", "class");
+
+      expect(error.code).toBe("invalid-name");
+      expect(state()).toEqual(snapshot);
+    });
+  });
+
+  describe("a name with a dot", () => {
+    const name = "mesh.loader";
+
+    for (const kind of kinds) {
+      it(`${kind} uses the file name as given and "_" in identifiers`, () => {
+        const template = make({ "@acme": ada }, kind);
+
+        const project = create(template, "@acme", name);
+
+        const header = fs.readFileSync(path.join(project, "src", "mesh.loader.hpp"), "utf8");
+        const source = fs.readFileSync(path.join(project, "src", "mesh.loader.cpp"), "utf8");
+        if (kind !== "program") {
+          expect(header).toContain("class mesh_loader");
+          expect(header).not.toContain("class mesh.loader");
+          expect(`${header}${source}`).not.toMatch(/mesh\.loader::|mesh\.loader\(/);
+          expect(source).toContain("mesh_loader::mesh_loader");
+        }
+        const automake = fs.readFileSync(path.join(project, "src", "Makefile.am"), "utf8");
+        if (kind === "program") {
+          expect(automake).toContain("bin_PROGRAMS = mesh.loader");
+          expect(automake).toContain("mesh_loader_SOURCES = mesh.loader.cpp");
+          expect(automake).not.toMatch(/mesh\.loader_/);
+        } else {
+          expect(automake).toContain("lib_LTLIBRARIES = libmesh.loader.la");
+          expect(automake).toContain("libmesh_loader_la_SOURCES = mesh.loader.cpp");
+          expect(automake).not.toMatch(/libmesh\.loader_la_/);
+        }
+      });
+    }
+
+    it("a component records the type string with the name as given", () => {
+      const template = make({ "@acme": ada }, "component");
+
+      const project = create(template, "@acme", name);
+
+      const source = fs.readFileSync(path.join(project, "src", "mesh.loader.cpp"), "utf8");
+      expect(source).toContain("\"@acme/mesh.loader\"");
+    });
   });
 });
 
@@ -730,6 +838,121 @@ describe("template command line", () => {
       expect(snapshotTree(root)).toEqual(before);
     });
   }
+
+  for (const [kind, name] of [
+    ["component", "3d-mesh"], ["component", "class"], ["component", "a--b"], ["component", "ecs"],
+    ["system", "class"], ["program", "main"], ["program", "Hello"]
+  ]) {
+    it(`${kind} @acme/${name} is a usage error before any prompt and changes nothing`, async () => {
+      const before = snapshotTree(root);
+
+      const result = await run(["template", kind, `@acme/${name}`]);
+
+      expect(result.status).toBe(3);
+      expect(result.stdout).toBe("");
+      const reason = validateProjectName(name, kind as Kind) as string;
+      const lines = result.stderr.split("\n");
+      expect(lines[0]).toBe(`Error: Invalid value "@acme/${name}" for <scope>/<name>; ${reason}`);
+      expect(lines[1]).toMatch(new RegExp(`^Usage: the-seed template ${kind} `));
+      expect(lines[2]).toBe(`Run "the-seed help template ${kind}" for details.`);
+      expect(result.stderr).not.toContain("Unexpected error");
+      expect(result.prompts).toEqual([]);
+      expect(snapshotTree(root)).toEqual(before);
+      expect(fs.existsSync(path.join(prefix, "projects"))).toBe(false);
+    });
+  }
+
+  it("a refused name is refused even when the scope is not configured", async () => {
+    const before = snapshotTree(root);
+
+    const result = await run(["template", "component", "@nope/class"]);
+
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain("Invalid value \"@nope/class\" for <scope>/<name>;");
+    expect(snapshotTree(root)).toEqual(before);
+  });
+
+  it("component @s/mesh.loader is created with the name as given", async () => {
+    const result = await run(["template", "component", "@s/mesh.loader"]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("Created component @s/mesh.loader in ./mesh.loader\n");
+    expect(fs.existsSync(path.join(cwd, "mesh.loader", "src", "mesh.loader.hpp"))).toBe(true);
+    expect(packageNameIn(path.join(cwd, "mesh.loader"))).toBe("@s/mesh.loader");
+  });
+
+  describe("at the prompt", () => {
+    /**
+     * Runs the command with a stand-in for inquirer that behaves as inquirer does for `validate`: an
+     * answer a question's validator refuses is not accepted and the next answer for that question is
+     * taken. `answers` maps a question name to the values it is given in order.
+     */
+    const runInteractive = async (
+      args: string[], answers: Record<string, string[]>
+    ): Promise<{ status: number; shown: string[]; asked: string[] }> => {
+      const queues: Record<string, string[]> = {};
+      for (const key of Object.keys(answers)) queues[key] = [...answers[key]];
+      const shown: string[] = [];
+      const asked: string[] = [];
+      const promptSpy = jest.spyOn(inquirer, "prompt").mockImplementation(((questions: unknown) => {
+        const given: Record<string, string> = {};
+        for (const question of questions as Array<{ name: string; validate?: (input: string) => string | boolean }>) {
+          asked.push(question.name);
+          for (;;) {
+            const next = queues[question.name]?.shift();
+            if (next === undefined) {
+              return Promise.reject(new Error(`no answer left for ${question.name}`));
+            }
+            const verdict = question.validate === undefined ? true : question.validate(next);
+            if (verdict === true) {
+              given[question.name] = next;
+              break;
+            }
+            shown.push(String(verdict));
+          }
+        }
+        return Promise.resolve(given);
+      }) as never);
+      const logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
+      const savedHome = process.env.HOME;
+      const savedCwd = process.cwd();
+      const savedExitCode = process.exitCode;
+      process.env.HOME = root;
+      process.exitCode = undefined;
+      process.chdir(cwd);
+      try {
+        await (runCli as unknown as (argv: string[], dir: string, context?: { interactive?: boolean }) => Promise<void>)(
+          args, configDir, { interactive: true });
+        return { status: typeof process.exitCode === "number" ? process.exitCode : 0, shown, asked };
+      } finally {
+        process.chdir(savedCwd);
+        logSpy.mockRestore();
+        promptSpy.mockRestore();
+        process.exitCode = savedExitCode;
+        if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+      }
+    };
+
+    it("template component repeats the name question with the reason and creates ./hello-world", async () => {
+      const result = await runInteractive(["template", "component"], { scopeName: ["@s"], templateName: ["3d-mesh", "hello-world"] });
+
+      expect(result.status).toBe(0);
+      expect(result.shown).toEqual([validateProjectName("3d-mesh", "component")]);
+      expect(fs.readdirSync(cwd)).toEqual(["hello-world"]);
+      expect(packageNameIn(path.join(cwd, "hello-world"))).toBe("@s/hello-world");
+      expect(fs.existsSync(path.join(cwd, "3d-mesh"))).toBe(false);
+    });
+
+    it("template system names the kind in the reason it shows", async () => {
+      const result = await runInteractive(["template", "system"], { scopeName: ["@s"], templateName: ["class", "mesh.loader"] });
+
+      expect(result.status).toBe(0);
+      expect(result.shown).toEqual([
+        "\"class\" cannot be used as the name of a system: its C++ name \"class\" is a reserved word."
+      ]);
+      expect(fs.readdirSync(cwd)).toEqual(["mesh.loader"]);
+    });
+  });
 
   it("component @nope/x with a scope that is not configured is refused before anything is written", async () => {
     const before = snapshotTree(root);

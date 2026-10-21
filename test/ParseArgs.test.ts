@@ -560,6 +560,71 @@ describe("parseCommandLine", () => {
     });
   });
 
+  describe("project names", () => {
+    const FORM =
+      "A project name must start with a lowercase letter and contain only lowercase letters, digits, " +
+      "\".\", \"_\" and \"-\" (such as hello-world).";
+    const KINDS = ["component", "system", "program"];
+
+    const formRefusals = ["3d-mesh", "-x", ".x", "_x", "Hello", "p\u00e4k"];
+    const reservedRefusals: Array<[string, string]> = [
+      ["class", "class"], ["and", "and"], ["co_await", "co_await"],
+    ];
+    const underscoreRefusals: Array<[string, string]> = [["a--b", "a__b"], ["a.-b", "a__b"], ["a__b", "a__b"]];
+    const generatedRefusals = ["ecs", "std", "main"];
+
+    function refused(kind: string, name: string, reason: string): void {
+      const word = `@s/${name}`;
+      const error = expectUsage(parse("template", kind, word));
+      expect(error.message).toBe(`Invalid value "${word}" for <scope>/<name>; ${reason}`);
+      expect(error.argument).toBe(word);
+      expect(error.command).toBe("template");
+      expect(error.subcommand).toBe(kind);
+    }
+
+    it.each(KINDS)("refuses a name with the wrong form for %s", (kind) => {
+      for (const name of formRefusals) {
+        refused(kind, name, FORM);
+      }
+    });
+
+    it.each(KINDS)("refuses a reserved word for %s, naming the kind", (kind) => {
+      for (const [name, identifier] of reservedRefusals) {
+        refused(kind, name,
+          `"${name}" cannot be used as the name of a ${kind}: its C++ name "${identifier}" is a reserved word.`);
+      }
+    });
+
+    it.each(KINDS)("refuses two underscores in a row for %s, naming the kind", (kind) => {
+      for (const [name, identifier] of underscoreRefusals) {
+        refused(kind, name,
+          `"${name}" cannot be used as the name of a ${kind}: its C++ name "${identifier}" has two underscores in a row.`);
+      }
+    });
+
+    it.each(KINDS)("refuses a name the generated code uses for %s, naming the kind", (kind) => {
+      for (const name of generatedRefusals) {
+        refused(kind, name,
+          `"${name}" cannot be used as the name of a ${kind}: the generated code already uses the name "${name}".`);
+      }
+    });
+
+    it.each(KINDS)("accepts hello-world, mesh.loader, a_b and x1 for %s with the name as given", (kind) => {
+      for (const name of ["hello-world", "mesh.loader", "a_b", "x1"]) {
+        const parsed = expectRun(parse("template", kind, `@s/${name}`));
+        expect(positionals(parsed).name).toEqual({ scope: "@s", name });
+      }
+    });
+
+    it("keeps the scope forms: a scope without its @ is accepted, an invalid scope is refused with the form message", () => {
+      expect(positionals(expectRun(parse("template", "system", "s/mesh.loader"))).name)
+        .toEqual({ scope: "@s", name: "mesh.loader" });
+      expect(expectUsage(parse("template", "system", "@a b/hello")).message).toBe(
+        "Invalid value \"@a b/hello\" for <scope>/<name>; expected a scope and a name such as @my-scope/hello."
+      );
+    });
+  });
+
   describe("targets", () => {
     it.each(["native", "windows"])("accepts %s for build and dependencies", (target) => {
       expect(positionals(expectRun(parse("build", target))).target).toBe(target);

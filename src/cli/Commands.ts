@@ -11,11 +11,12 @@ import {
   wholeNumber,
 } from "./CommandSpec";
 import { validateScopeName } from "../Scopes";
+import { ProjectKind, validateProjectName } from "../ProjectName";
 
 const TARGETS = ["native", "windows"];
 
 /** `<scope>/<name>` as typed for a new package: the scope with its "@" and the name. */
-const packageName: ValueParser = (raw, label) => {
+export const packageName = (kind: ProjectKind): ValueParser => (raw, label) => {
   const fail = {
     ok: false as const,
     message: `Invalid value "${raw}" for ${label}; expected a scope and a name such as @my-scope/hello.`,
@@ -24,6 +25,10 @@ const packageName: ValueParser = (raw, label) => {
   if (parts.length !== 2 || parts[1] === "" || /\s/.test(parts[1])) return fail;
   const scope = parts[0].startsWith("@") ? parts[0] : `@${parts[0]}`;
   if (validateScopeName(scope) !== null) return fail;
+  const reason = validateProjectName(parts[1], kind);
+  if (reason !== null) {
+    return { ok: false, message: `Invalid value "${raw}" for ${label}; ${reason}` };
+  }
   return { ok: true, value: { scope, name: parts[1] } };
 };
 
@@ -167,7 +172,7 @@ const templateSub = (kind: string, summary: string): SubcommandSpec =>
         name: "name",
         help: "The package, such as @my-scope/hello; asked for when not given",
         required: false,
-        parse: packageName,
+        parse: packageName(kind as ProjectKind),
         usage: "<scope>/<name>",
       },
     ],
