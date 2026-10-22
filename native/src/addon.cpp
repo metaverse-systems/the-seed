@@ -14,7 +14,7 @@
 #include <filesystem>
 #include <cstdint>
 
-Napi::Value ListDependencies(const Napi::CallbackInfo& info) {
+Napi::Value ListDependencies(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsArray()) {
@@ -91,7 +91,7 @@ bool InFile(std::uint64_t offset, std::uint64_t length, std::uint64_t size) {
 }
 
 // Reads length bytes at offset into buffer; false when the stream cannot supply them.
-bool ReadAt(std::istream& file, std::uint64_t offset, std::uint8_t* buffer, std::size_t length) {
+bool ReadAt(std::istream &file, std::uint64_t offset, std::uint8_t *buffer, std::size_t length) {
   file.clear();
   file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
   if (!file) {
@@ -101,18 +101,18 @@ bool ReadAt(std::istream& file, std::uint64_t offset, std::uint8_t* buffer, std:
   return file.gcount() == static_cast<std::streamsize>(length);
 }
 
-std::uint16_t Le16(const std::uint8_t* bytes) {
+std::uint16_t Le16(const std::uint8_t *bytes) {
   return static_cast<std::uint16_t>(bytes[0] | (bytes[1] << 8));
 }
 
-std::uint32_t Le32(const std::uint8_t* bytes) {
+std::uint32_t Le32(const std::uint8_t *bytes) {
   return static_cast<std::uint32_t>(bytes[0]) | (static_cast<std::uint32_t>(bytes[1]) << 8) |
          (static_cast<std::uint32_t>(bytes[2]) << 16) | (static_cast<std::uint32_t>(bytes[3]) << 24);
 }
 
 // Reads at most the DOS header, the PE header, two directory fields and the first WIN_CERTIFICATE
 // header: the checks of ParsePeLayout and ValidateCertificateTable in libthe-seed, in the same order.
-PeHeaders ReadPeHeaders(std::istream& file, std::uint64_t size) {
+PeHeaders ReadPeHeaders(std::istream &file, std::uint64_t size) {
   const PeHeaders invalid{false, false};
 
   // Checks 1 and 2: the DOS header, and a non-negative e_lfanew.
@@ -199,7 +199,7 @@ PeHeaders ReadPeHeaders(std::istream& file, std::uint64_t size) {
 
 }  // namespace
 
-Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
+Napi::Value DetectBinaryFormat(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -302,7 +302,7 @@ Napi::Value DetectBinaryFormat(const Napi::CallbackInfo& info) {
 
 // ── PE Signing Operations ───────────────────────────────────
 
-Napi::Value PeComputeDigest(const Napi::CallbackInfo& info) {
+Napi::Value PeComputeDigest(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -319,13 +319,13 @@ Napi::Value PeComputeDigest(const Napi::CallbackInfo& info) {
     jsResult.Set("digest", Napi::Buffer<uint8_t>::Copy(env, result.digest.data(), result.digest.size()));
     jsResult.Set("isPe32Plus", Napi::Boolean::New(env, result.is_pe32_plus));
     return jsResult;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value PeEmbedSignature(const Napi::CallbackInfo& info) {
+Napi::Value PeEmbedSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 2 || !info[0].IsString() || !info[1].IsBuffer()) {
@@ -341,13 +341,13 @@ Napi::Value PeEmbedSignature(const Napi::CallbackInfo& info) {
   try {
     the_seed::PeSigner::EmbedSignature(filePath, pkcs7Der);
     return env.Undefined();
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value PeExtractSignature(const Napi::CallbackInfo& info) {
+Napi::Value PeExtractSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -364,13 +364,13 @@ Napi::Value PeExtractSignature(const Napi::CallbackInfo& info) {
       return Napi::Buffer<uint8_t>::Copy(env, result->data(), result->size());
     }
     return env.Null();
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value PeHasEmbeddedSignature(const Napi::CallbackInfo& info) {
+Napi::Value PeHasEmbeddedSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -383,13 +383,13 @@ Napi::Value PeHasEmbeddedSignature(const Napi::CallbackInfo& info) {
 
   try {
     return Napi::Boolean::New(env, the_seed::PeSigner::HasEmbeddedSignature(filePath));
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value PeStripSignature(const Napi::CallbackInfo& info) {
+Napi::Value PeStripSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -402,7 +402,7 @@ Napi::Value PeStripSignature(const Napi::CallbackInfo& info) {
   try {
     the_seed::PeSigner::StripSignature(filePath);
     return env.Undefined();
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
@@ -412,7 +412,7 @@ Napi::Value PeStripSignature(const Napi::CallbackInfo& info) {
 
 // Reads the prepared-signature object that machoPrepareSignature returned.
 // Throws Napi::TypeError naming the first missing or mistyped field.
-static the_seed::MachOSigner::PreparedSignature ReadPreparedSignature(Napi::Env env, const Napi::Value& value) {
+static the_seed::MachOSigner::PreparedSignature ReadPreparedSignature(Napi::Env env, const Napi::Value &value) {
   if (!value.IsObject() || value.IsArray() || value.IsBuffer()) {
     throw Napi::TypeError::New(env, "prepared must be the object returned by machoPrepareSignature");
   }
@@ -477,7 +477,7 @@ static the_seed::MachOSigner::PreparedSignature ReadPreparedSignature(Napi::Env 
   return prepared;
 }
 
-Napi::Value MachOPrepareSignature(const Napi::CallbackInfo& info) {
+Napi::Value MachOPrepareSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 3 || !info[0].IsString() || !info[1].IsString() || !info[2].IsNumber()) {
@@ -502,7 +502,7 @@ Napi::Value MachOPrepareSignature(const Napi::CallbackInfo& info) {
     jsResult.Set("cmsCapacity", Napi::Number::New(env, static_cast<double>(prepared.cms_capacity)));
     Napi::Array slices = Napi::Array::New(env, prepared.slices.size());
     for (size_t i = 0; i < prepared.slices.size(); i++) {
-      const auto& slice = prepared.slices[i];
+      const auto &slice = prepared.slices[i];
       Napi::Object jsSlice = Napi::Object::New(env);
       jsSlice.Set("cpuType", Napi::Number::New(env, static_cast<double>(slice.cpu_type)));
       jsSlice.Set("cpuSubtype", Napi::Number::New(env, static_cast<double>(slice.cpu_subtype)));
@@ -512,13 +512,13 @@ Napi::Value MachOPrepareSignature(const Napi::CallbackInfo& info) {
     }
     jsResult.Set("slices", slices);
     return jsResult;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MachOCompleteSignature(const Napi::CallbackInfo& info) {
+Napi::Value MachOCompleteSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 3 || !info[0].IsString() || !info[2].IsArray()) {
@@ -532,7 +532,7 @@ Napi::Value MachOCompleteSignature(const Napi::CallbackInfo& info) {
   the_seed::MachOSigner::PreparedSignature prepared;
   try {
     prepared = ReadPreparedSignature(env, info[1]);
-  } catch (const Napi::Error& e) {
+  } catch (const Napi::Error &e) {
     e.ThrowAsJavaScriptException();
     return env.Null();
   }
@@ -553,13 +553,13 @@ Napi::Value MachOCompleteSignature(const Napi::CallbackInfo& info) {
   try {
     the_seed::MachOSigner::CompleteSignature(filePath, prepared, cmsSignatures);
     return env.Undefined();
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MachOStripSignature(const Napi::CallbackInfo& info) {
+Napi::Value MachOStripSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -572,13 +572,13 @@ Napi::Value MachOStripSignature(const Napi::CallbackInfo& info) {
   try {
     the_seed::MachOSigner::StripSignature(filePath);
     return env.Undefined();
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MachOExtractSignature(const Napi::CallbackInfo& info) {
+Napi::Value MachOExtractSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -595,13 +595,13 @@ Napi::Value MachOExtractSignature(const Napi::CallbackInfo& info) {
       return Napi::Buffer<uint8_t>::Copy(env, result->data(), result->size());
     }
     return env.Null();
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MachOHasEmbeddedSignature(const Napi::CallbackInfo& info) {
+Napi::Value MachOHasEmbeddedSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -614,13 +614,13 @@ Napi::Value MachOHasEmbeddedSignature(const Napi::CallbackInfo& info) {
 
   try {
     return Napi::Boolean::New(env, the_seed::MachOSigner::HasEmbeddedSignature(filePath));
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MachOListSlices(const Napi::CallbackInfo& info) {
+Napi::Value MachOListSlices(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -635,7 +635,7 @@ Napi::Value MachOListSlices(const Napi::CallbackInfo& info) {
     auto slices = the_seed::MachOParser::GetArchSlices(filePath);
     Napi::Array result = Napi::Array::New(env, slices.size());
     for (size_t i = 0; i < slices.size(); i++) {
-      const auto& slice = slices[i];
+      const auto &slice = slices[i];
       Napi::Object entry = Napi::Object::New(env);
       entry.Set("cpuType", Napi::Number::New(env, static_cast<double>(slice.cpu_type)));
       entry.Set("cpuSubtype", Napi::Number::New(env, static_cast<double>(slice.cpu_subtype)));
@@ -649,7 +649,7 @@ Napi::Value MachOListSlices(const Napi::CallbackInfo& info) {
       result.Set(static_cast<uint32_t>(i), entry);
     }
     return result;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
@@ -657,7 +657,7 @@ Napi::Value MachOListSlices(const Napi::CallbackInfo& info) {
 
 // ── MSI Signing Operations ──────────────────────────────────
 
-Napi::Value MsiComputeDigest(const Napi::CallbackInfo& info) {
+Napi::Value MsiComputeDigest(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -673,13 +673,13 @@ Napi::Value MsiComputeDigest(const Napi::CallbackInfo& info) {
     Napi::Object jsResult = Napi::Object::New(env);
     jsResult.Set("digest", Napi::Buffer<uint8_t>::Copy(env, result.digest.data(), result.digest.size()));
     return jsResult;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MsiEmbedSignature(const Napi::CallbackInfo& info) {
+Napi::Value MsiEmbedSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 2 || !info[0].IsString() || !info[1].IsBuffer()) {
@@ -705,13 +705,13 @@ Napi::Value MsiEmbedSignature(const Napi::CallbackInfo& info) {
   try {
     the_seed::MsiSigner::EmbedSignature(filePath, pkcs7Der, requireMatchingDigest);
     return env.Undefined();
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MsiCheckSignature(const Napi::CallbackInfo& info) {
+Napi::Value MsiCheckSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -724,7 +724,7 @@ Napi::Value MsiCheckSignature(const Napi::CallbackInfo& info) {
 
   try {
     auto check = the_seed::MsiSigner::CheckSignature(filePath);
-    const char* state = "none";
+    const char *state = "none";
     switch (check.state) {
       case the_seed::MsiSigner::SignatureState::None: state = "none"; break;
       case the_seed::MsiSigner::SignatureState::Matches: state = "matches"; break;
@@ -737,13 +737,13 @@ Napi::Value MsiCheckSignature(const Napi::CallbackInfo& info) {
     jsResult.Set("computedDigest", Napi::Buffer<uint8_t>::Copy(env, check.computed_digest.data(), check.computed_digest.size()));
     jsResult.Set("detail", Napi::String::New(env, check.detail));
     return jsResult;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MsiStripSignature(const Napi::CallbackInfo& info) {
+Napi::Value MsiStripSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -756,13 +756,13 @@ Napi::Value MsiStripSignature(const Napi::CallbackInfo& info) {
 
   try {
     return Napi::Boolean::New(env, the_seed::MsiSigner::StripSignature(filePath));
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MsiExtractSignature(const Napi::CallbackInfo& info) {
+Napi::Value MsiExtractSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -779,13 +779,13 @@ Napi::Value MsiExtractSignature(const Napi::CallbackInfo& info) {
       return Napi::Buffer<uint8_t>::Copy(env, result->data(), result->size());
     }
     return env.Null();
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
 }
 
-Napi::Value MsiHasEmbeddedSignature(const Napi::CallbackInfo& info) {
+Napi::Value MsiHasEmbeddedSignature(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -798,7 +798,7 @@ Napi::Value MsiHasEmbeddedSignature(const Napi::CallbackInfo& info) {
 
   try {
     return Napi::Boolean::New(env, the_seed::MsiSigner::HasEmbeddedSignature(filePath));
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
@@ -807,7 +807,7 @@ Napi::Value MsiHasEmbeddedSignature(const Napi::CallbackInfo& info) {
 // ── Resource Pak Reader ─────────────────────────────────────
 
 // Opens a pak with libthe-seed's own reader and returns { names, resources }.
-Napi::Value ReadResourcePak(const Napi::CallbackInfo& info) {
+Napi::Value ReadResourcePak(const Napi::CallbackInfo &info) {
   Napi::Env env = info.Env();
 
   if (info.Length() < 1 || !info[0].IsString()) {
@@ -833,7 +833,7 @@ Napi::Value ReadResourcePak(const Napi::CallbackInfo& info) {
     jsResult.Set("names", jsNames);
     jsResult.Set("resources", jsResources);
     return jsResult;
-  } catch (const std::exception& e) {
+  } catch (const std::exception &e) {
     Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
     return env.Null();
   }
