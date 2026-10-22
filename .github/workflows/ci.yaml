@@ -18,6 +18,7 @@ env:
   # Commits the parent repository's submodules point at; fetched anonymously.
   LIBECS_CPP_REF: 16a272ce17bf03369febf0796444a8df8cd1ffec # libecs-cpp 2.1.0
   LIBTHE_SEED_REF: 839bc62d3233e88347059942ce25e84da23b48ee # libthe-seed 0.8.0
+  THE_SEED_VSCODE_REF: a679f9fed775bd77575cfc41d50a3db037ff1b90 # the-seed-vscode 0.3.0
   THE_SEED_REQUIRE_TOOLS: "1"
 jobs:
   check:
@@ -54,6 +55,14 @@ jobs:
           cd "$GITHUB_WORKSPACE/../libthe-seed"
           git init
           git fetch --depth 1 https://github.com/metaverse-systems/libthe-seed.git "$LIBTHE_SEED_REF"
+          git checkout FETCH_HEAD
+
+      - name: Fetch the-seed-vscode
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/../the-seed-vscode"
+          cd "$GITHUB_WORKSPACE/../the-seed-vscode"
+          git init
+          git fetch --depth 1 https://github.com/metaverse-systems/the-seed-vscode.git "$THE_SEED_VSCODE_REF"
           git checkout FETCH_HEAD
 
       - name: Restore libraries
