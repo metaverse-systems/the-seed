@@ -6,7 +6,6 @@ import { execSync } from "child_process";
 import * as x509 from "@peculiar/x509";
 import Signing from "../src/Signing";
 import * as SigningModule from "../src/Signing";
-import Config from "../src/Config";
 import { expectPresent } from "./helpers/Assert";
 import { fileDigest, nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 import { signingErrorClass, signingErrorOf } from "./helpers/SigningErrors";
@@ -17,6 +16,9 @@ import {
   SigFileFormat,
   SigningManifestFormat,
 } from "../src/types";
+import { defined } from "./helpers/Defined";
+import { optionalExternalCheck } from "./helpers/ExternalTools";
+import { runTheSeed } from "./helpers/RunCli";
 
 /**
  * Create a temporary directory for test isolation.
@@ -147,7 +149,7 @@ describe("Signing", () => {
 
   describe("createCert", () => {
     it("creates cert.pem and key.pem", async () => {
-      const info = await signing.createCert({ scope: "@test" });
+      await signing.createCert({ scope: "@test" });
 
       expect(fs.existsSync(signing.scopeCertPath("@test"))).toBe(true);
       expect(fs.existsSync(signing.scopeKeyPath("@test"))).toBe(true);
@@ -324,8 +326,8 @@ describe("Signing", () => {
       expect(result.status).toBe("VALID");
       expect(result.filePath).toBe(path.resolve(binPath));
       expect(result.signer).toBeDefined();
-      expect(result.signer!.subject.commonName).toBe("Test User");
-      expect(result.signer!.fingerprint).toMatch(/^SHA256:/);
+      expect(defined(result.signer, "signer").subject.commonName).toBe("Test User");
+      expect(defined(result.signer, "signer").fingerprint).toMatch(/^SHA256:/);
       expect(result.trust.state).toBe("trusted");
       expect(result.integrity.state).toBe("intact");
     });
@@ -438,12 +440,12 @@ describe("Signing", () => {
 
     it("validates ECDSA P-256 key type", async () => {
       // Generate an RSA key pair (unsupported) and write it
-      const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", {
+      const { privateKey } = crypto.generateKeyPairSync("rsa", {
         modulusLength: 2048,
       });
 
       // Create a self-signed cert with RSA (we need to write PEM files)
-      const certPem = generateSelfSignedRSACert(publicKey, privateKey);
+      const certPem = generateSelfSignedRSACert(privateKey);
       const keyPem = privateKey.export({ type: "pkcs8", format: "pem" }) as string;
 
       const rsaCertPath = path.join(externalDir, "rsa-cert.pem");
@@ -492,11 +494,11 @@ describe("Signing", () => {
 /**
  * Helper: generate a self-signed RSA certificate using Node.js crypto.
  */
-function generateSelfSignedRSACert(publicKey: crypto.KeyObject, privateKey: crypto.KeyObject): string {
+function generateSelfSignedRSACert(privateKey: crypto.KeyObject): string {
   // Use crypto.X509Certificate isn't available for generation, so use a workaround:
   // create a CSR-like structure. Actually, Node doesn't have cert generation built-in for RSA.
   // We'll use @peculiar/x509 for this in the test.
-  const webcrypto = crypto.webcrypto as unknown as Crypto;
+  const webcrypto = crypto.webcrypto as unknown as crypto.webcrypto.Crypto;
   x509.cryptoProvider.set(webcrypto);
 
   // Export keys to JWK and re-import as CryptoKey
@@ -868,10 +870,10 @@ describe("SigningError", () => {
     });
 
     it("importCert with an RSA key", async () => {
-      const { publicKey, privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const { privateKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
       const rsaCert = path.join(external, "rsa-cert.pem");
       const rsaKey = path.join(external, "rsa-key.pem");
-      fs.writeFileSync(rsaCert, generateSelfSignedRSACert(publicKey, privateKey));
+      fs.writeFileSync(rsaCert, generateSelfSignedRSACert(privateKey));
       fs.writeFileSync(rsaKey, privateKey.export({ type: "pkcs8", format: "pem" }) as string);
       const error = await signingErrorOf(() => signing.importCert(rsaCert, rsaKey, "@test"));
       expect(error.code).toBe("unsupported-key");
@@ -977,5 +979,107 @@ describe("SigningError", () => {
       expect(error.code).toBe("wrong-target");
       expect(error.message).toContain("is a signature file;");
     });
+  });
+});
+
+// ── direct signing without a certificate ─────────────────────
+
+describe("direct signing without a certificate", () => {
+  const fixtures = path.join(__dirname, "fixtures", "binaries");
+  const scope = "@test";
+
+  type Method = "signFileAuthenticode" | "signFileMachO" | "signFileMsi";
+  const cases: Array<[Method, string]> = [
+    ["signFileAuthenticode", "tiny.exe"],
+    ["signFileMachO", "genuine/tiny-macho-x86_64"],
+    ["signFileMsi", "genuine/tiny.msi"],
+  ];
+
+  let home: string;
+  let configDir: string;
+  let workDir: string;
+  let signing: Signing;
+
+  function componentAvailable(): boolean {
+    let loaded = true;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- only the ability to load is of interest
+      require("../src/NativeComponent").loadNativeComponent();
+    } catch {
+      loaded = false;
+    }
+    return optionalExternalCheck("native component", loaded, "the native component is not built");
+  }
+
+  function copyOf(name: string): string {
+    const target = path.join(workDir, path.basename(name));
+    fs.copyFileSync(path.join(fixtures, name), target);
+    return target;
+  }
+
+  function expectCertificateMissing(error: { code: string; message: string; hint?: string }): void {
+    expect(error.code).toBe("certificate-missing");
+    expect(error.message).toBe(`No signing certificate found for scope '${scope}'.`);
+    expect(error.hint).toBe(createCertHint(scope));
+  }
+
+  beforeEach(() => {
+    home = createTempDir();
+    configDir = path.join(home, "the-seed");
+    fs.mkdirSync(configDir, { recursive: true });
+    writeConfig(configDir, { scope, name: "Test User", email: "test@example.com" });
+    workDir = createTempDir();
+    signing = new Signing(configDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(workDir, { recursive: true, force: true });
+  });
+
+  it.each(cases)("%s without the key argument rejects with certificate-missing and leaves %s unchanged", async (method, name) => {
+    if (!componentAvailable()) return;
+    const file = copyOf(name);
+    const before = fileDigest(file);
+
+    const error = await signingErrorOf(() => signing[method](file, scope));
+
+    expectCertificateMissing(error);
+    expect(fileDigest(file)).toBe(before);
+  });
+
+  it.each(cases)("%s with a key argument rejects with certificate-missing and leaves %s unchanged", async (method, name) => {
+    if (!componentAvailable()) return;
+    const file = copyOf(name);
+    const before = fileDigest(file);
+    const { privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+
+    const error = await signingErrorOf(() => signing[method](file, scope, privateKey));
+
+    expectCertificateMissing(error);
+    expect(fileDigest(file)).toBe(before);
+  });
+
+  it("signFile for the same scope rejects with the same error", async () => {
+    const file = copyOf("tiny.exe");
+    const before = fileDigest(file);
+
+    const error = await signingErrorOf(() => signing.signFile(file, { scope }));
+
+    expectCertificateMissing(error);
+    expect(fileDigest(file)).toBe(before);
+  });
+
+  it("signing sign through the command line ends with 2 and prints the error and the hint", async () => {
+    const file = copyOf("tiny.exe");
+    const before = fileDigest(file);
+
+    const run = await runTheSeed(["signing", "sign", file, "--scope", scope], { home, configDir });
+
+    expect(run.status).toBe(2);
+    expect(run.stdout).toBe("");
+    expect(run.stderr.split("\n")[0]).toBe(`Error: No signing certificate found for scope '${scope}'.`);
+    expect(run.stderr).toContain(createCertHint(scope));
+    expect(fileDigest(file)).toBe(before);
   });
 });

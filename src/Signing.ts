@@ -7,7 +7,7 @@ import { execSync } from "child_process";
 import { pipeline } from "stream/promises";
 import { isBinaryFile as isBinary } from "isbinaryfile";
 import * as x509 from "@peculiar/x509";
-import Config from "./Config";
+import Config, { defaultConfigDir } from "./Config";
 import { addScopeHint, createCertHint, editScopeHint, replaceCertHint } from "./cli/Hints";
 import { NativeComponentMissingError, loadNativeComponent, requireNativeComponent } from "./NativeComponent";
 import { buildSignatureContainer, containerCapacity } from "./CmsBuilder";
@@ -112,11 +112,9 @@ interface NativeAddon {
   machoPrepareSignature(filePath: string, identity: string, cmsCapacity: number): MachOPreparedSignature;
   machoCompleteSignature(filePath: string, prepared: MachOPreparedSignature, cmsSignatures: Buffer[]): void;
   machoStripSignature(filePath: string): void;
-  machoBuildSuperBlob(codeDirectory: Buffer, cmsSignature: Buffer): Buffer;
   machoExtractSignature(filePath: string): Buffer | null;
   machoHasEmbeddedSignature(filePath: string): boolean;
   machoListSlices(filePath: string): MachOSliceInfo[];
-  msiIsMsi(filePath: string): boolean;
   msiComputeDigest(filePath: string): { digest: Buffer };
   msiEmbedSignature(filePath: string, pkcs7Der: Buffer, requireMatchingDigest?: boolean): void;
   msiCheckSignature(filePath: string): MsiSignatureCheck;
@@ -130,7 +128,7 @@ class Signing {
   signingDir: string;
 
   constructor(configDir?: string) {
-    this.configDir = configDir || path.join(os.homedir(), "the-seed");
+    this.configDir = configDir || defaultConfigDir();
     this.signingDir = path.join(this.configDir, "signing");
   }
 
@@ -183,6 +181,18 @@ class Signing {
       }
     }
     return false;
+  }
+
+  /**
+   * Read a scope's certificate information, failing when the scope holds no certificate.
+   * @throws SigningError with code certificate-missing and a hint for creating one
+   */
+  private requireCertInfo(scope: string): CertInfo {
+    const certInfo = this.getCertInfo(scope);
+    if (!certInfo) {
+      throw new SigningError("certificate-missing", `No signing certificate found for scope '${scope}'.`, createCertHint(scope));
+    }
+    return certInfo;
   }
 
   /**
@@ -257,10 +267,16 @@ class Signing {
    * @returns "embedded" if PE/Mach-O/MSI and not --detached, otherwise "detached"
    */
   getSigningStrategy(filePath: string, options?: SignOptions): SignatureType {
+    return options?.detached ? "detached" : this.strategyFor(this.detectBinaryFormat(filePath), options);
+  }
+
+  /**
+   * The signing strategy for a file whose format has already been detected.
+   */
+  private strategyFor(detection: FormatDetectionResult, options?: SignOptions): SignatureType {
     if (options?.detached) {
       return "detached";
     }
-    const detection = this.detectBinaryFormat(filePath);
     if (detection.format === "pe" || detection.format === "macho" || detection.format === "msi") {
       return "embedded";
     }
@@ -413,11 +429,11 @@ class Signing {
     const validityDays = requested ?? DEFAULT_VALIDITY_DAYS;
 
     // Set the crypto provider for @peculiar/x509 to use Node.js webcrypto
-    const webcrypto = crypto.webcrypto as unknown as Crypto;
+    const webcrypto = crypto.webcrypto;
     x509.cryptoProvider.set(webcrypto);
 
     // Generate ECDSA P-256 key pair using WebCrypto (required by @peculiar/x509)
-    const algorithm: EcKeyGenParams = {
+    const algorithm: crypto.webcrypto.EcKeyGenParams = {
       name: "ECDSA",
       namedCurve: "P-256",
     };
@@ -459,7 +475,7 @@ class Signing {
 
     // Export private key to PEM
     const exportedKey = await webcrypto.subtle.exportKey("pkcs8", keys.privateKey);
-    const keyPem = `-----BEGIN PRIVATE KEY-----\n${Buffer.from(exportedKey).toString("base64").match(/.{1,64}/g)!.join("\n")}\n-----END PRIVATE KEY-----\n`;
+    const keyPem = `-----BEGIN PRIVATE KEY-----\n${(Buffer.from(exportedKey).toString("base64").match(/.{1,64}/g) ?? []).join("\n")}\n-----END PRIVATE KEY-----\n`;
 
     // Ensure scope signing directory exists
     const scopeDir = path.join(this.signingDir, scope);
@@ -474,7 +490,11 @@ class Signing {
     fs.writeFileSync(keyPath, keyPem, { mode: 0o600 });
     this._setOwnerOnly(keyPath);
 
-    return this.getCertInfo(scope)!;
+    const info = this.getCertInfo(scope);
+    if (info === null) {
+      throw new Error(`internal: certificate for ${scope} not found after writing it`);
+    }
+    return info;
   }
 
   /**
@@ -538,14 +558,14 @@ class Signing {
    * buildSignatureContainer; the native addon computes the digest and embeds the result, replacing any earlier
    * signature. Works for any certificate the scope holds.
    * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
-   * @throws if file is not a valid PE binary, or UnsupportedSigningKey before any change, or
+   * @throws if file is not a valid PE binary, or SigningError certificate-missing before any change, or
    * NativeComponentMissingError when the native component is not built
    */
   async signFileAuthenticode(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
+    const certInfo = this.requireCertInfo(scope);
     const privateKey = key ?? this.loadSigningKey(scope);
-    const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
     const addon = loadNativeComponent<NativeAddon>();
@@ -608,13 +628,13 @@ class Signing {
    * attributes over each slice's code directory, built by buildSignatureContainer. Handles single-arch and
    * universal (fat) binaries; each slice is signed on its own.
    * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
-   * @throws if file is not a valid Mach-O binary, or UnsupportedSigningKey before any change
+   * @throws if file is not a valid Mach-O binary, or SigningError certificate-missing before any change
    */
   async signFileMachO(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
+    const certInfo = this.requireCertInfo(scope);
     const privateKey = key ?? this.loadSigningKey(scope);
-    const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
     const addon = loadNativeComponent<NativeAddon>();
@@ -682,13 +702,13 @@ class Signing {
    * Document format; the signature is stored in the \x05DigitalSignature stream by the native addon, which also
    * computes the package fingerprint. The stored signature is read back and its fingerprint compared.
    * @param key - The scope's signing key when the caller already loaded it; otherwise loadSigningKey is used
-   * @throws if file is not a valid MSI/CFBF, or UnsupportedSigningKey before any change
+   * @throws if file is not a valid MSI/CFBF, or SigningError certificate-missing before any change
    */
   async signFileMsi(filePath: string, scope: string, key?: crypto.KeyObject): Promise<SignResult> {
     const resolvedPath = path.resolve(filePath);
     const certPath = this.scopeCertPath(scope);
+    const certInfo = this.requireCertInfo(scope);
     const privateKey = key ?? this.loadSigningKey(scope);
-    const certInfo = this.getCertInfo(scope)!;
     const warnings: string[] = [];
 
     const addon = loadNativeComponent<NativeAddon>();
@@ -768,10 +788,7 @@ class Signing {
     }
     const scope = options.scope;
     const certPath = this.scopeCertPath(scope);
-    const certInfo = this.getCertInfo(scope);
-    if (!certInfo) {
-      throw new SigningError("certificate-missing", `No signing certificate found for scope '${scope}'.`, createCertHint(scope));
-    }
+    const certInfo = this.requireCertInfo(scope);
     if (certInfo.isExpired && !options?.force) {
       throw new SigningError("certificate-expired", "Signing certificate is expired. Use --force to sign anyway.", replaceCertHint(scope));
     }
@@ -795,10 +812,10 @@ class Signing {
     }
 
     // Detect format and determine signing strategy
-    const strategy = this.getSigningStrategy(resolvedPath, options);
+    const detection = options?.detached ? undefined : this.detectBinaryFormat(resolvedPath);
+    const strategy = detection ? this.strategyFor(detection, options) : "detached";
 
-    if (strategy === "embedded") {
-      const detection = this.detectBinaryFormat(resolvedPath);
+    if (detection && strategy === "embedded") {
       if (detection.format === "pe") {
         return this.signFileAuthenticode(resolvedPath, scope, privateKey);
       } else if (detection.format === "macho") {
@@ -853,10 +870,7 @@ class Signing {
     }
     const scope = options.scope;
     const certPath = this.scopeCertPath(scope);
-    const certInfo = this.getCertInfo(scope);
-    if (!certInfo) {
-      throw new SigningError("certificate-missing", `No signing certificate found for scope '${scope}'.`, createCertHint(scope));
-    }
+    const certInfo = this.requireCertInfo(scope);
     if (certInfo.isExpired && !options?.force) {
       throw new SigningError("certificate-expired", "Signing certificate is expired. Use --force to sign anyway.", replaceCertHint(scope));
     }
@@ -924,10 +938,12 @@ class Signing {
         };
       } else {
         // Detached: read from .sig file
-        const sigData: SigFileFormat = JSON.parse(fs.readFileSync(s.signaturePath!, "utf-8"));
+        const sigPath = s.signaturePath;
+        if (sigPath === null) throw new Error("internal: detached signature without a path");
+        const sigData: SigFileFormat = JSON.parse(fs.readFileSync(sigPath, "utf-8"));
         return {
           path: path.relative(resolvedDir, s.filePath),
-          signatureFile: path.relative(resolvedDir, s.signaturePath!),
+          signatureFile: path.relative(resolvedDir, sigPath),
           algorithm: "SHA256" as const,
           signature: sigData.signature,
           signatureType: "detached" as const,
@@ -1035,7 +1051,11 @@ class Signing {
     fs.writeFileSync(keyPath, keyPem, { mode: 0o600 });
     this._setOwnerOnly(keyPath);
 
-    return this.getCertInfo(scope)!;
+    const info = this.getCertInfo(scope);
+    if (info === null) {
+      throw new Error(`internal: certificate for ${scope} not found after writing it`);
+    }
+    return info;
   }
 
   /**

@@ -61,11 +61,12 @@ const withCancellation = async (
   }
 };
 
-const runRecursiveBuild = (target: string, release: boolean, parallel: number, jobs: number | undefined) =>
+const runRecursiveBuild = (config: Config, target: string, release: boolean, parallel: number, jobs: number | undefined) =>
   withCancellation(async ({ signal, forceSignal }) => {
     let result;
     try {
       result = await buildRecursive({
+        config,
         target,
         fullReconfigure: true,
         projectDir: process.cwd(),
@@ -119,7 +120,7 @@ const BuildCLI = async (parsed: ParsedCommand, context: CliContext): Promise<Han
 
   if (parsed.options.recursive === true) {
     const parallel = (parsed.options.parallel as number | undefined) ?? 1;
-    return runRecursiveBuild(target, release, parallel, jobs);
+    return runRecursiveBuild(config, target, release, parallel, jobs);
   }
 
   return runProjectBuild(build, context.configDir, target, release, jobs);

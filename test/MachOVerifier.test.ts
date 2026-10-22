@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
 import { checkMachO } from "../src/MachOVerifier";
@@ -68,7 +69,7 @@ let counter = 0;
 /** The addon's slice table for a byte buffer (written to a scratch file for the call). */
 function tableOf(bytes: Buffer): MachOSliceInfo[] {
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-  const addon = require("../native/build/Release/dependency_lister.node");
+  const addon = require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH));
   const file = path.join(scratch, `table-${counter++}`);
   fs.writeFileSync(file, bytes);
   return addon.machoListSlices(file) as MachOSliceInfo[];
@@ -539,7 +540,7 @@ describe("standard signed-attribute signatures made by openssl", () => {
     const file = path.join(dir, "program");
     fs.copyFileSync(path.join(__dirname, "fixtures", "binaries", "genuine", "tiny-macho-arm64"), file);
     // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-    const addon = require("../native/build/Release/dependency_lister.node");
+    const addon = require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH));
     const prepared = addon.machoPrepareSignature(file, "openssl-test", 4096);
     const signatures = prepared.slices.map((slice: { codeDirectory: Buffer }, index: number) => {
       const content = path.join(dir, `cd-${index}`);

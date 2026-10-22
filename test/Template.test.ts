@@ -127,8 +127,6 @@ interface Author {
 
 const ada: Author = { name: "Ada Lovelace", email: "ada@example.com", url: "https://acme.example" };
 
-type CreatePackage = (scope: string, name: string, parentDir?: string, now?: Date) => string;
-
 /** Writes a configuration with the given scopes into a fresh configuration directory under root. */
 function writeConfig(root: string, scopes: Record<string, Author>): { configDir: string; prefix: string } {
   const configDir = path.join(root, "the-seed");
@@ -196,7 +194,7 @@ describe("createPackage", () => {
   };
 
   const create = (template: Template, scope: string, name: string, date: Date = now): string =>
-    (template.createPackage as unknown as CreatePackage)(scope, name, parentDir, date);
+    template.createPackage(scope, name, parentDir, date);
 
   beforeEach(() => {
     root = createTempDir();
@@ -548,7 +546,7 @@ describe("generated files", () => {
     const { configDir } = writeConfig(root, { "@acme": author });
     const template = new Template(new Config(configDir));
     template.type = kind;
-    return (template.createPackage as unknown as CreatePackage)("@acme", name, parentDir, new Date(2026, 5, 1));
+    return template.createPackage("@acme", name, parentDir, new Date(2026, 5, 1));
   };
 
   const expectedTree = (kind: Kind): string[] => {

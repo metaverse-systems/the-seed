@@ -1,4 +1,4 @@
-import Config from "./Config";
+import type Config from "./Config";
 import Build from "./Build";
 import { runInstallPhase } from "./InstallPhase";
 import { preloadNativeComponent, requireNativeComponent } from "./NativeComponent";
@@ -131,7 +131,7 @@ function printReport(result: RecursiveBuildResult, total: number): void {
 export async function buildRecursive(
   options: RecursiveBuildOptions
 ): Promise<RecursiveBuildResult> {
-  const { target, fullReconfigure, projectDir, signal, callbacks, release } = options;
+  const { config, target, fullReconfigure, projectDir, signal, callbacks, release } = options;
 
   validateParallel(options.parallel);
   validateJobs(options.jobs);
@@ -194,8 +194,6 @@ export async function buildRecursive(
     tierSizes.set(tier, (tierSizes.get(tier) ?? 0) + 1);
   }
 
-  const config = new Config();
-  config.loadConfig();
   const build = new Build(config);
 
   const runProject = async (
@@ -360,12 +358,14 @@ export async function buildRecursive(
  * Generate a flat list of all build steps across all projects, in dependency order.
  * Useful for dry-run / preview in VS Code progress UI.
  *
+ * @param config - The loaded configuration
  * @param projectDir - Absolute path of the root project
  * @param target - 'native' or 'windows'
  * @param fullReconfigure - Whether to include autogen/configure steps
  * @returns Array of { project, steps } tuples in build order
  */
 export async function getRecursiveBuildSteps(
+  config: Config,
   projectDir: string,
   target: string,
   fullReconfigure: boolean,
@@ -374,8 +374,6 @@ export async function getRecursiveBuildSteps(
   const graph = await walkDependencies(projectDir);
   const buildOrder = resolveBuildOrder(graph, projectDir);
 
-  const config = new Config();
-  config.loadConfig();
   const build = new Build(config);
 
   return buildOrder.map((project) => ({

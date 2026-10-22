@@ -1,9 +1,14 @@
+import fs from "fs";
+import os from "os";
 import path from "path";
+import { spawnSync } from "child_process";
+import { optionalExternalCheck } from "./helpers/ExternalTools";
 import { withoutNativeComponent, nativeComponentPath } from "./helpers/NativeAbsent";
 import { requiredLibTheSeedVersion } from "../src/Dependencies";
 
 interface NativeComponentModule {
   NATIVE_COMPONENT_STEP: string;
+  NATIVE_COMPONENT_PATH: string;
   packageRoot(): string;
   nativeComponentMessage(loadError?: string | null): string;
   NativeComponentMissingError: new (loadError?: string | null) => Error & { loadError: string | null };
@@ -92,7 +97,7 @@ describe("NativeComponent", () => {
     jest.isolateModules(() => {
       let real: unknown = null;
       try {
-        real = require("../native/build/Release/dependency_lister.node");
+        real = require(nativeComponentPath);
       } catch {
         // Where the component is not built, a stand-in module takes its place.
         const standIn = { listDependencies: () => [] };
@@ -169,6 +174,147 @@ describe("NativeComponent", () => {
       const reportStep = (stepLine as string).slice((stepLine as string).indexOf("then: ") + "then: ".length);
       expect(reportStep).toBe("cd \"" + mod.packageRoot() + "\" && " + mod.NATIVE_COMPONENT_STEP);
       expect(mod.nativeComponentMessage()).toContain(reportStep);
+    });
+  });
+
+  describe("the component's operations and name", () => {
+    const operations = [
+      "listDependencies",
+      "readResourcePak",
+      "detectBinaryFormat",
+      "peComputeDigest",
+      "peEmbedSignature",
+      "peExtractSignature",
+      "peHasEmbeddedSignature",
+      "peStripSignature",
+      "machoPrepareSignature",
+      "machoCompleteSignature",
+      "machoStripSignature",
+      "machoExtractSignature",
+      "machoHasEmbeddedSignature",
+      "machoListSlices",
+      "msiComputeDigest",
+      "msiEmbedSignature",
+      "msiCheckSignature",
+      "msiStripSignature",
+      "msiExtractSignature",
+      "msiHasEmbeddedSignature"
+    ];
+    const ownName = path.basename(__filename);
+
+    function componentFile(): string {
+      const relative = loadModule().NATIVE_COMPONENT_PATH;
+      if (typeof relative !== "string") {
+        throw new Error("NATIVE_COMPONENT_PATH is not exported by src/NativeComponent");
+      }
+      return path.resolve(root, relative);
+    }
+
+    function sourceFiles(directory: string): string[] {
+      const found: string[] = [];
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          found.push(...sourceFiles(full));
+        } else if (/\.(ts|js)$/.test(entry.name) && entry.name !== ownName) {
+          found.push(full);
+        }
+      }
+      return found;
+    }
+
+    function trackedFiles(): string[] {
+      const listed = spawnSync("git", ["ls-files", "-z"], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+      if (listed.status === 0 && listed.stdout.length > 0) {
+        return listed.stdout.split("\0").filter((name) => name.length > 0);
+      }
+      const walked: string[] = [];
+      const walk = (relative: string): void => {
+        const full = path.join(root, relative);
+        if (!fs.existsSync(full)) {
+          return;
+        }
+        if (fs.statSync(full).isDirectory()) {
+          for (const entry of fs.readdirSync(full)) {
+            if (entry !== "node_modules" && entry !== "build") {
+              walk(path.join(relative, entry));
+            }
+          }
+        } else {
+          walked.push(relative);
+        }
+      };
+      for (const top of ["src", "test", "scripts", "native", ".github", "README.md", "structure.md", "package.json"]) {
+        walk(top);
+      }
+      return walked;
+    }
+
+    it("exports exactly the twenty operations", () => {
+      const file = componentFile();
+      if (!optionalExternalCheck("native-component", fs.existsSync(file), "native component not built")) return;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native component has no type declarations
+      const component = require(file) as Record<string, unknown>;
+      expect(Object.keys(component).sort()).toEqual([...operations].sort());
+    });
+
+    it("uses every operation of the loaded component as a property in src or test, not only declares it", () => {
+      const file = componentFile();
+      if (!optionalExternalCheck("native-component", fs.existsSync(file), "native component not built")) return;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native component has no type declarations
+      const exported = Object.keys(require(file) as Record<string, unknown>).sort();
+      expect(exported.length).toBeGreaterThan(0);
+      const unused = exported.filter((name) => {
+        const pattern = new RegExp("\\." + name + "\\b|\\[\\s*[\"']" + name + "[\"']\\s*\\]");
+        return !["src", "test"].some((directory) =>
+          sourceFiles(path.join(root, directory)).some((file) => pattern.test(fs.readFileSync(file, "utf8")))
+        );
+      });
+      expect(unused).toEqual([]);
+    });
+
+    it("leaves no tracked file naming the old component", () => {
+      const oldName = ["dependency", "lister"].join("_");
+      const offenders = trackedFiles().filter((name) => {
+        if (name === path.join("test", ownName)) {
+          return false;
+        }
+        const full = path.join(root, name);
+        return fs.existsSync(full) && fs.statSync(full).isFile() && fs.readFileSync(full).includes(oldName);
+      });
+      expect(offenders).toEqual([]);
+    });
+
+    it("reports the component missing in a tree that holds only the old-named file", () => {
+      const built = fs.existsSync(path.join(root, "native", "build", "Release"))
+        ? fs.readdirSync(path.join(root, "native", "build", "Release")).filter((name) => name.endsWith(".node"))
+        : [];
+      if (!optionalExternalCheck("native-component", built.length > 0, "native component not built")) return;
+      const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "native-old-only-"));
+      try {
+        fs.cpSync(path.join(root, "dist"), path.join(scratch, "dist"), { recursive: true });
+        fs.symlinkSync(path.join(root, "node_modules"), path.join(scratch, "node_modules"));
+        fs.mkdirSync(path.join(scratch, "native", "build", "Release"), { recursive: true });
+        fs.copyFileSync(
+          path.join(root, "native", "build", "Release", built[0]),
+          path.join(scratch, "native", "build", "Release", ["dependency", "lister"].join("_") + ".node")
+        );
+        const script =
+          "const m = require(" + JSON.stringify(path.join(scratch, "dist", "NativeComponent.js")) + ");" +
+          "try { m.loadNativeComponent(); console.log(JSON.stringify({ threw: false })); }" +
+          "catch (e) { console.log(JSON.stringify({ threw: true, name: e.name, loadError: e.loadError, message: e.message, expected: new m.NativeComponentMissingError(null).message })); }";
+        const run = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
+        expect(run.status).toBe(0);
+        const outcome = JSON.parse(run.stdout) as { threw: boolean; name: string; loadError: string | null; message: string; expected: string };
+        expect(outcome.threw).toBe(true);
+        expect(outcome.name).toBe("NativeComponentMissingError");
+        expect(outcome.loadError).toBeNull();
+        expect(outcome.message).toBe(outcome.expected);
+        expect(outcome.message).toContain("The native component is not built");
+        expect(outcome.message).toContain("cd \"" + scratch + "\" && npm run build-addon");
+      } finally {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      }
     });
   });
 });

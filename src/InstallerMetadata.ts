@@ -130,7 +130,8 @@ const RESERVED_NAMES = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
  */
 export function checkFolderName(name: string): void {
   for (const char of name) {
-    const code = char.codePointAt(0)!;
+    // The fallback is never taken: iterating a string yields non-empty strings.
+    const code = char.codePointAt(0) ?? 0;
     if ("<>:\"/\\|?*".includes(char)) {
       throw new InstallerMetadataError(
         "The product name \"" + name + "\" contains \"" + char + "\", which a Windows folder name cannot contain."

@@ -41,7 +41,7 @@ class Template {
     this.scopes = new Scopes(config);
   }
 
-  askName = () => {
+  askName() {
     return [
       {
         "type": "list",
@@ -55,7 +55,7 @@ class Template {
         "validate": (name: string): true | string => validateProjectName(name, this.type) ?? true
       }
     ];
-  };
+  }
 
   /**
    * Creates the project <parentDir>/<name> from the template of this.type.
@@ -68,7 +68,7 @@ class Template {
    * @returns The absolute path of the new project
    * @throws ProjectError when the project cannot be created
    */
-  createPackage = (scope: string, name: string, parentDir: string = process.cwd(), now: Date = new Date()): string => {
+  createPackage(scope: string, name: string, parentDir: string = process.cwd(), now: Date = new Date()): string {
     const invalid = validateProjectName(name, this.type);
     if (invalid !== null) {
       throw new ProjectError("invalid-name", invalid);
@@ -131,9 +131,9 @@ class Template {
 
     this.packageDir = target;
     return target;
-  };
+  }
 
-  private describe = (values: TemplateValues, author: { name: string; email?: string; url?: string }): PackageType => {
+  private describe(values: TemplateValues, author: { name: string; email?: string; url?: string }): PackageType {
     const packageAuthor: PackageAuthorType = { name: author.name };
     if (values.author_email !== "") packageAuthor.email = values.author_email;
     if (values.author_url !== "") packageAuthor.url = values.author_url;
@@ -148,25 +148,25 @@ class Template {
         "build-win64": build_win64_command
       }
     };
-  };
+  }
 
-  private checkDetail = (scope: string, detail: string, value: string | undefined): void => {
+  private checkDetail(scope: string, detail: string, value: string | undefined): void {
     const character = Array.from(value ?? "").find((c) => unusableCharacters.includes(c) || isControl(c));
     if (character === undefined) return;
     const shown = isControl(character) ? "a control character" : `"${character}"`;
     throw new ProjectError("author-detail-unusable",
       `The author's ${detail} for scope ${scope} contains ${shown}, which the build configuration cannot hold.`,
       editScopeHint(scope));
-  };
+  }
 
-  private exists = (file: string): boolean => {
+  private exists(file: string): boolean {
     try {
       fs.lstatSync(file);
       return true;
     } catch {
       return false;
     }
-  };
+  }
 }
 
 export default Template;

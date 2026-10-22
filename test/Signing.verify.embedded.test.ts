@@ -8,6 +8,7 @@ import { EARLIER_FORM_NOTICE_MAC, EARLIER_FORM_NOTICE_WINDOWS } from "../src/Tru
 import { expectPresent } from "./helpers/Assert";
 import { checkMachO } from "./helpers/MachOChecker";
 import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
+import { defined } from "./helpers/Defined";
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "signing-verify-test-"));
@@ -311,13 +312,13 @@ describe("signDirectory with mixed formats", () => {
     // Check that PE and Mach-O entries have embedded signatureType
     const peEntry = manifest.files.find(e => e.path.includes("tiny.exe"));
     expect(peEntry).toBeDefined();
-    expect(peEntry!.signatureType).toBe("embedded");
-    expect(peEntry!.signatureFile).toBeNull();
+    expect(defined(peEntry, "PE entry").signatureType).toBe("embedded");
+    expect(defined(peEntry, "PE entry").signatureFile).toBeNull();
 
     const machoEntry = manifest.files.find(e => e.path.includes("tiny-macho-x86_64"));
     expect(machoEntry).toBeDefined();
-    expect(machoEntry!.signatureType).toBe("embedded");
-    expect(machoEntry!.signatureFile).toBeNull();
+    expect(defined(machoEntry, "Mach-O entry").signatureType).toBe("embedded");
+    expect(defined(machoEntry, "Mach-O entry").signatureFile).toBeNull();
 
     // The tool skips non-binary files in a directory: no manifest entry, listed as skipped
     expect(manifest.files.find(e => e.path.includes("readme.txt"))).toBeUndefined();

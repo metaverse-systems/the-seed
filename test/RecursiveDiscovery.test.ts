@@ -4,9 +4,10 @@ import path from "path";
 
 // The real dependency walker, recursive build and build command run here against scratch
 // project trees; RecursiveBuild.test.ts and BuildCLI.test.ts mock them module-wide. Nothing
-// that builds is real: the process runner, the build steps, the install phase and the
-// configuration are mocked as RecursiveBuild.test.ts sets them up, and every case asserts
-// that no step ran.
+// that builds is real: the process runner, the build steps and the install phase are mocked as
+// RecursiveBuild.test.ts sets them up, and every case asserts that no step ran. The configuration
+// is a real one, loaded from the case's scratch configuration directory (the same directory the
+// command line cases pass to `runCli`) and handed to the recursive build in its options.
 jest.mock("../src/ProcessRunner", () => ({
   ...jest.requireActual("../src/ProcessRunner"),
   runCommand: jest.fn(),
@@ -17,33 +18,17 @@ jest.mock("../src/BuildScheduler", () => ({
   processorCount: () => 4,
 }));
 
-// The mock keeps the real ConfigError, which the command dispatcher tests against.
-jest.mock("../src/Config", () => ({
-  __esModule: true,
-  ...jest.requireActual("../src/Config"),
-  default: jest.fn().mockImplementation((configDir?: string) => ({
-    config: { prefix: "/fake/prefix" },
-    configDir: configDir || "/fake/config",
-    loadConfig: jest.fn(),
-  })),
-}));
-
 const mockGetSteps = jest.fn((target: string, fullReconfigure: boolean, jobs?: number) => [
   { label: "compile", program: "make", args: [`-j${jobs ?? 4}`] },
   { label: "install", program: "make", args: ["install"] },
 ]);
-jest.mock("../src/Build", () => ({
-  __esModule: true,
-  default: jest.fn().mockImplementation(() => ({
-    getSteps: mockGetSteps,
-  })),
-}));
-
 jest.mock("../src/InstallPhase", () => ({
   ...jest.requireActual("../src/InstallPhase"),
   runInstallPhase: jest.fn(),
 }));
 
+import Build from "../src/Build";
+import Config from "../src/Config";
 import { ConflictingProjectError, CyclicDependencyError } from "../src/DependencyWalker";
 import { runCommand } from "../src/ProcessRunner";
 import { runInstallPhase } from "../src/InstallPhase";
@@ -67,8 +52,10 @@ describe("recursive discovery", () => {
   let originalHome: string | undefined;
   let originalExitCode: typeof process.exitCode;
   let logSpy: jest.SpyInstance;
+  let getStepsSpy: jest.SpyInstance;
   let errorSpy: jest.SpyInstance;
   let cwdSpy: jest.SpyInstance | undefined;
+  let homeSpy: jest.SpyInstance;
 
   const logged = () => logSpy.mock.calls.map((call) => call.map(String).join(" "));
   const errored = () => errorSpy.mock.calls.map((call) => call.map(String).join(" "));
@@ -176,14 +163,17 @@ describe("recursive discovery", () => {
     projectDir: string,
     extra: { signal?: AbortSignal; onProjectStart?: (project: BuildableProject) => void } = {}
   ): Promise<RecursiveBuildResult> {
-    return buildRecursive({
+    // Built in a variable so the options type-check whether or not `config` is a field of them.
+    const options = {
       target: "native",
       fullReconfigure: true,
       projectDir,
       jobs: 4,
       signal: extra.signal,
       callbacks: extra.onProjectStart ? { onProjectStart: extra.onProjectStart } : undefined,
-    });
+      config: new Config(configDir),
+    };
+    return buildRecursive(options);
   }
 
   function expectNothingBuilt(): void {
@@ -199,14 +189,18 @@ describe("recursive discovery", () => {
     originalHome = process.env.HOME;
     originalExitCode = process.exitCode;
     process.env.HOME = home;
+    homeSpy = jest.spyOn(os, "homedir").mockReturnValue(home);
     process.exitCode = undefined;
     mockedRunCommand.mockReset();
     mockedInstallPhase.mockReset();
+    getStepsSpy = jest.spyOn(Build.prototype, "getSteps").mockImplementation(mockGetSteps);
     logSpy = jest.spyOn(console, "log").mockImplementation(() => undefined);
     errorSpy = jest.spyOn(console, "error").mockImplementation(() => undefined);
   });
 
   afterEach(() => {
+    getStepsSpy.mockRestore();
+    homeSpy.mockRestore();
     cwdSpy?.mockRestore();
     cwdSpy = undefined;
     logSpy.mockRestore();

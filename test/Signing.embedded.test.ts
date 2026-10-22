@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { spawnSync } from "child_process";
 import Signing, { UnsupportedSigningKey } from "../src/Signing";
 import * as x509 from "@peculiar/x509";
@@ -14,6 +15,7 @@ import { makeUniversal } from "./helpers/Universal";
 import { ReplacementKey, replaceScopeKey } from "./helpers/IndependentCheck";
 import { signingErrorOf } from "./helpers/SigningErrors";
 import * as CmsBuilder from "../src/CmsBuilder";
+import { defined } from "./helpers/Defined";
 
 /**
  * Create a temporary directory for test isolation.
@@ -103,7 +105,7 @@ function copyMsi(name: string, destDir: string, as?: string): string {
  * Load the compiled addon directly, for the calls that have no wrapper.
  */
 function loadAddon(): Record<string, (...args: unknown[]) => unknown> {
-  return require("../native/build/Release/dependency_lister.node");
+  return require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH));
 }
 
 function sha256File(file: string): string {
@@ -468,22 +470,10 @@ describe("signFileMachO on genuine samples", () => {
   describe("removed addon exports", () => {
     // The real addon is loaded directly; there is no mock.
     // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-    const addon = require("../native/build/Release/dependency_lister.node") as Record<
+    const addon = require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH)) as Record<
       string,
       (...args: unknown[]) => unknown
     >;
-
-    it("machoComputeCodeDirectory throws and names the replacement", () => {
-      expect(() => addon.machoComputeCodeDirectory(copyGenuine("tiny-macho-arm64", tempDir), "id")).toThrow(
-        "machoComputeCodeDirectory was removed in libthe-seed 0.6.0: use machoPrepareSignature and machoCompleteSignature"
-      );
-    });
-
-    it("machoEmbedSignature throws and names the replacement", () => {
-      expect(() => addon.machoEmbedSignature(copyGenuine("tiny-macho-arm64", tempDir), Buffer.alloc(8))).toThrow(
-        "machoEmbedSignature was removed in libthe-seed 0.6.0: use machoPrepareSignature and machoCompleteSignature"
-      );
-    });
 
     it("exposes the three new calls", () => {
       expect(typeof addon.machoPrepareSignature).toBe("function");
@@ -643,7 +633,7 @@ describe("installer samples and the independent checker", () => {
     (name) => {
       const pkg = parsePackage(fs.readFileSync(genuinePath(name)));
       expect(pkg.fingerprint()).toBe(msiReference.fingerprint.get(name));
-      const entries = msiReference.entries.get(name)!;
+      const entries = defined(msiReference.entries.get(name), "reference entries for " + name);
       expect(pkg.countEntries()).toBe(entries.count);
       const found = pkg.findSignature();
       expect(found === null ? null : found.size).toBe(entries.signatureSize);
@@ -815,7 +805,7 @@ describe("signature sizes around the 4,096-byte threshold (real addon)", () => {
 
   /** A P-256 certificate with the fixed serial 01 followed by fifteen 0x11 bytes (no sign byte) and a common name of the given length. */
   async function makeSigner(nameLength: number): Promise<{ signing: Signing; scope: string; probe: number }> {
-    const webcrypto = crypto.webcrypto as unknown as Crypto;
+    const webcrypto = crypto.webcrypto as unknown as crypto.webcrypto.Crypto;
     x509.cryptoProvider.set(webcrypto);
     const keys = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
     const certificate = await x509.X509CertificateGenerator.createSelfSigned({

@@ -79,21 +79,21 @@ class Installer {
    * Check whether wixl is installed on the system.
    * Returns true if wixl is found on PATH.
    */
-  checkWixl = (): boolean => {
+  checkWixl(): boolean {
     try {
       execFileSync("which", ["wixl"], { stdio: "pipe" });
       return true;
     } catch {
       return false;
     }
-  };
+  }
 
   /**
    * Read project metadata from package.json and return an InstallerConfig with the notes to show the user.
    * Every check is made here, before anything is written, and nothing is printed: a refusal comes back as
    * `{ ok: false, message, status: 2 }`.
    */
-  readProjectMetadata = (projectDir: string): ProjectMetadataResult => {
+  readProjectMetadata(projectDir: string): ProjectMetadataResult {
     const refuse = (message: string): ProjectMetadataResult => ({ ok: false, message, status: 2 });
     const pkgPath = path.join(projectDir, "package.json");
     if (!fs.existsSync(pkgPath)) {
@@ -117,7 +117,7 @@ class Installer {
 
     // Strip npm scope prefix (e.g. "@metaverse-systems/client" → "client")
     const name = rawName.startsWith("@") && rawName.includes("/")
-      ? rawName.split("/").pop()!
+      ? rawName.slice(rawName.lastIndexOf("/") + 1)
       : rawName;
 
     const rawVersion = pkgData.version;
@@ -156,7 +156,7 @@ class Installer {
       }
       throw err;
     }
-  };
+  }
 
   /**
    * Ensure the dist/ directory of the project exists. If missing, packages the project into it
@@ -164,15 +164,15 @@ class Installer {
    * for example for a name collision, the refusal is printed and no installer is built.
    * Resolves true if dist/ exists and is non-empty after this call.
    */
-  ensureDist = async (projectDir: string): Promise<boolean> => {
+  async ensureDist(projectDir: string): Promise<boolean> {
     return (await this.prepareDist(projectDir)) === null;
-  };
+  }
 
   /**
    * Does the work of ensureDist, printing what it reports. Resolves null on success, otherwise the final
    * message it printed.
    */
-  private prepareDist = async (projectDir: string): Promise<string | null> => {
+  private async prepareDist(projectDir: string): Promise<string | null> {
     const distDir = path.join(projectDir, "dist");
     const fail = (message: string): string => {
       console.error("Error: " + message);
@@ -205,18 +205,18 @@ class Installer {
     }
 
     return null;
-  };
+  }
 
-  private listDistFiles = (projectDir: string): string[] => {
+  private listDistFiles(projectDir: string): string[] {
     const distDir = path.join(projectDir, "dist");
     return fs.readdirSync(distDir).filter(f => fs.statSync(path.join(distDir, f)).isFile());
-  };
+  }
 
   /**
    * Generate WiX XML content and write a .wxs file to the project directory.
    * Returns the path to the generated .wxs file.
    */
-  generateWxs = (projectDir: string, config: InstallerConfig, files: string[]): string => {
+  generateWxs(projectDir: string, config: InstallerConfig, files: string[]): string {
     const productName = xmlAttribute(config.productName);
     const manufacturer = xmlAttribute(config.manufacturer);
     const version = xmlAttribute(config.version);
@@ -284,18 +284,18 @@ ${componentRefs}
     const wxsPath = path.join(projectDir, wxsFilename);
     fs.writeFileSync(wxsPath, wxs, "utf-8");
     return wxsPath;
-  };
+  }
 
   /**
    * Invoke wixl to compile the .wxs file into an .msi.
    * Returns true on success.
    */
-  compileMsi = (projectDir: string, wxsPath: string, outputPath: string): boolean => {
+  compileMsi(projectDir: string, wxsPath: string, outputPath: string): boolean {
     return this.compile(projectDir, wxsPath, outputPath) === null;
-  };
+  }
 
   /** Does the work of compileMsi, printing what it reports. Resolves null on success, otherwise the message it printed. */
-  private compile = (projectDir: string, wxsPath: string, outputPath: string): string | null => {
+  private compile(projectDir: string, wxsPath: string, outputPath: string): string | null {
     try {
       execFileSync("wixl", ["-v", "-a", "x64", "-o", outputPath, wxsPath], {
         cwd: projectDir,
@@ -316,14 +316,14 @@ ${componentRefs}
       console.error(message);
       return message;
     }
-  };
+  }
 
   /**
    * Full pipeline: component check → wixl check → metadata → ensure dist → generate → compile.
    * Resolves the path of the installer, or the status and message of the failure; each message is printed
    * once, here. Status 2 is for something missing or unusable, 1 for packaging or compilation that failed.
    */
-  run = async (projectDir: string): Promise<InstallerRunResult> => {
+  async run(projectDir: string): Promise<InstallerRunResult> {
     const failure = (status: 1 | 2, message: string, printed = false): InstallerRunResult => {
       if (!printed) {
         console.error(message);
@@ -389,7 +389,7 @@ ${componentRefs}
     // Step 7: Success
     console.log("Installer created: " + msiFilename);
     return { ok: true, msiPath };
-  };
+  }
 }
 
 export default Installer;

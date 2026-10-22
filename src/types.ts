@@ -1,3 +1,4 @@
+import type Config from "./Config";
 import type { StepOutputMode } from "./StepRunner";
 
 export interface AuthorType {
@@ -373,6 +374,8 @@ export interface RecursiveBuildCallbacks {
 
 /** Configuration options for a recursive build execution. */
 export interface RecursiveBuildOptions {
+  /** The loaded configuration; the build does not load one itself */
+  config: Config;
   /** Build target: 'native' or 'windows' */
   target: string;
   /** If true, run full reconfigure (autogen + configure) for each project */

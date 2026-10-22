@@ -167,16 +167,6 @@ export const scopeName: ValueParser = (raw, label) => {
   return { ok: true, value: name };
 };
 
-/** One of a fixed set of words. */
-export function oneOf(values: string[]): ValueParser {
-  return (raw, label) => {
-    if (!values.includes(raw)) {
-      return { ok: false, message: `Invalid value "${raw}" for ${label}; expected ${listWords(values)}.` };
-    }
-    return { ok: true, value: raw };
-  };
-}
-
 /** Any non-empty text, such as a path. */
 export const nonEmpty: ValueParser = (raw) => ({ ok: true, value: raw });
 

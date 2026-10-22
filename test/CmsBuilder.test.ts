@@ -1,13 +1,14 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import * as asn1js from "asn1js";
 import * as x509 from "@peculiar/x509";
 import { BUILDER_OID, buildSignatureContainer, containerCapacity, spcIndirectDataContent, SignedContent } from "../src/CmsBuilder";
 import { OID, readSignedData, SignedDataInfo } from "../src/CmsReader";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-const addon = require("../native/build/Release/dependency_lister.node") as Record<string, (...args: unknown[]) => unknown>;
+const addon = require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH)) as Record<string, (...args: unknown[]) => unknown>;
 
 // Choices where the contracts leave the details open:
 // - spcIndirectDataContent returns the SpcIndirectDataContent element as encoded (tag, length and value), which is what
@@ -142,7 +143,7 @@ interface TestCertificate {
   key: crypto.KeyObject;
 }
 
-const webcrypto = crypto.webcrypto as unknown as Crypto;
+const webcrypto = crypto.webcrypto as unknown as crypto.webcrypto.Crypto;
 
 async function makeCertificate(options: { serialHex: string; name: string }): Promise<TestCertificate> {
   x509.cryptoProvider.set(webcrypto);

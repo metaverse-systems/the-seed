@@ -2,6 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import Config, { ConfigError } from "../src/Config";
+import Signing from "../src/Signing";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
 
 function createTempDir(): string {
@@ -284,5 +285,65 @@ describe("Config with a damaged file", () => {
       extra: { a: [1, 2] },
       note: "kept",
     });
+  });
+});
+
+describe("the default configuration directory", () => {
+  let home: string;
+  let originalHome: string | undefined;
+  let homeSpy: jest.SpyInstance;
+
+  /** `defaultConfigDir` is read from the module when the case runs, so this file compiles before it is exported. */
+  function defaultConfigDir(): string {
+    const loaded = jest.requireActual("../src/Config") as { defaultConfigDir?: () => string };
+    if (typeof loaded.defaultConfigDir !== "function") {
+      throw new Error("defaultConfigDir is not exported from src/Config");
+    }
+    return loaded.defaultConfigDir();
+  }
+
+  beforeEach(() => {
+    home = fs.realpathSync(createTempDir());
+    originalHome = process.env.HOME;
+    process.env.HOME = home;
+    // The home directory is read through os.homedir(), which does not follow a changed environment variable here.
+    homeSpy = jest.spyOn(os, "homedir").mockReturnValue(home);
+  });
+
+  afterEach(() => {
+    homeSpy.mockRestore();
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it("is, today, the directory a Config and a Signing use without being told (guard on the value)", () => {
+    expect(new Config().configDir).toBe(path.join(home, "the-seed"));
+    expect(new Signing().configDir).toBe(path.join(home, "the-seed"));
+  });
+
+  it("is the-seed in the home directory", () => {
+    expect(defaultConfigDir()).toBe(path.join(os.homedir(), "the-seed"));
+    expect(defaultConfigDir()).toBe(path.join(home, "the-seed"));
+  });
+
+  it("is the directory a Config uses when none is given", () => {
+    expect(new Config().configDir).toBe(defaultConfigDir());
+    expect(fs.existsSync(path.join(defaultConfigDir(), "config.json"))).toBe(true);
+  });
+
+  it("is the default prefix of a Config with no prefix in its file", () => {
+    const configDir = path.join(home, "other");
+    fs.mkdirSync(configDir);
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ scopes: {} }));
+    expect(new Config(configDir).config.prefix).toBe(defaultConfigDir());
+  });
+
+  it("is the directory a Signing uses when none is given", () => {
+    expect(new Signing().configDir).toBe(defaultConfigDir());
+    expect(new Signing().signingDir).toBe(path.join(defaultConfigDir(), "signing"));
   });
 });

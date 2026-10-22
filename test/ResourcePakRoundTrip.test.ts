@@ -50,7 +50,7 @@ describe("resource pak round trip", () => {
   let rp: ResourcePak;
 
   const buildPak = (dir: string): string => {
-    const built = (rp.build as unknown as (packageDir: string) => string | undefined)(dir);
+    const built = rp.build(dir);
     const name = (JSON.parse(fs.readFileSync(path.join(dir, "package.json")).toString()).name as string).split("/")[1];
     return built ?? path.join(dir, name + ".pak");
   };

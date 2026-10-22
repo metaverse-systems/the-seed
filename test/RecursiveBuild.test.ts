@@ -1,3 +1,23 @@
+/*
+ * The recursive build and its step listing, with the process runner, the build steps, the install
+ * phase and the dependency walker mocked and a real `Config` on a scratch configuration directory.
+ *
+ * Choices where the contracts leave a detail open:
+ * - The configuration is loaded once for the file from a scratch directory (`SCRATCH_CONFIG`); the
+ *   default configuration under the scratch `HOME` holds a different prefix, so a build that reads
+ *   its own configuration is told apart from one that uses the one it was given.
+ * - `buildRecursive` and `getRecursiveBuildSteps` here are small wrappers that hand the scratch
+ *   `Config` to the module's functions. The existing cases keep calling them without a
+ *   configuration.
+ * - The build reads no configuration of its own: no `config.json` is read while it runs.
+ * - The real `Build` module is used; `getSteps` is replaced by a spy on `Build.prototype`, installed
+ *   before and restored after every case. The prefix of the configure step is observed by letting
+ *   the next call run the real method.
+ */
+import fs from "fs";
+import os from "os";
+import path from "path";
+import Config from "../src/Config";
 import { ProjectType } from "../src/types";
 import type {
   BuildableProject,
@@ -19,15 +39,7 @@ jest.mock("../src/BuildScheduler", () => ({
   processorCount: () => mockProcessorCount(),
 }));
 
-// Mock Config and Build
-jest.mock("../src/Config", () => {
-  return jest.fn().mockImplementation(() => ({
-    config: { prefix: "/fake/prefix" },
-    configDir: "/fake/config",
-    loadConfig: jest.fn(),
-  }));
-});
-
+// The stand-in for `Build.prototype.getSteps`
 const mockGetSteps = jest.fn((target: string, fullReconfigure: boolean, jobs?: number) => {
   const steps = [];
   if (fullReconfigure) {
@@ -43,16 +55,6 @@ const mockGetSteps = jest.fn((target: string, fullReconfigure: boolean, jobs?: n
   steps.push({ label: "compile", program: "make", args: [`-j${jobs ?? mockProcessorCount()}`] });
   steps.push({ label: "install", program: "make", args: ["install"] });
   return steps;
-});
-
-jest.mock("../src/Build", () => {
-  const MockBuild = jest.fn().mockImplementation(() => ({
-    getSteps: mockGetSteps,
-  }));
-  return {
-    __esModule: true,
-    default: MockBuild,
-  };
 });
 
 // The install phase is mocked; each case sets what it does. The default
@@ -78,10 +80,93 @@ import {
   CyclicDependencyError,
 } from "../src/DependencyWalker";
 import { runCommand, formatCommand, formatFailureOutput, CommandResult } from "../src/ProcessRunner";
-import { buildRecursive, getRecursiveBuildSteps } from "../src/RecursiveBuild";
+import { defined } from "./helpers/Defined";
+import Build from "../src/Build";
+import { buildRecursive as buildRecursiveInModule, getRecursiveBuildSteps as getRecursiveBuildStepsInModule } from "../src/RecursiveBuild";
 import { runInstallPhase } from "../src/InstallPhase";
 import type { InstallPhaseOptions, InstallPhaseResult, InstallReport } from "../src/types";
 import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
+
+/** The scratch home, the default configuration under it and the configuration the builds are given. */
+let SCRATCH_ROOT: string;
+let SCRATCH_CONFIG: Config;
+let DEFAULT_CONFIG_PATH: string;
+let ORIGINAL_HOME: string | undefined;
+let HOME_SPY: jest.SpyInstance;
+
+beforeAll(() => {
+  SCRATCH_ROOT = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "recursive-build-test-")));
+  ORIGINAL_HOME = process.env.HOME;
+  process.env.HOME = path.join(SCRATCH_ROOT, "home");
+  // The home directory is read through os.homedir(), which does not follow a changed environment variable here.
+  HOME_SPY = jest.spyOn(os, "homedir").mockReturnValue(path.join(SCRATCH_ROOT, "home"));
+  const defaults = new Config();
+  DEFAULT_CONFIG_PATH = defaults.configPath;
+  const configDir = path.join(SCRATCH_ROOT, "config");
+  fs.mkdirSync(configDir);
+  fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(SCRATCH_ROOT, "prefix"), scopes: {} }));
+  SCRATCH_CONFIG = new Config(configDir);
+});
+
+afterAll(() => {
+  HOME_SPY.mockRestore();
+  if (ORIGINAL_HOME === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = ORIGINAL_HOME;
+  }
+  fs.rmSync(SCRATCH_ROOT, { recursive: true, force: true });
+});
+
+type RecursiveOptionsWithoutConfig = Omit<Parameters<typeof buildRecursiveInModule>[0], "config">;
+
+/** Runs the recursive build with the scratch configuration as its `config`. */
+function buildRecursive(options: RecursiveOptionsWithoutConfig): ReturnType<typeof buildRecursiveInModule> {
+  const withConfig = { ...options, config: SCRATCH_CONFIG };
+  return buildRecursiveInModule(withConfig);
+}
+
+/** Lists the recursive build's steps with the scratch configuration. */
+function getRecursiveBuildSteps(projectDir: string, target: string, fullReconfigure: boolean, jobs?: number): ReturnType<typeof getRecursiveBuildStepsInModule> {
+  return getRecursiveBuildStepsInModule(SCRATCH_CONFIG, projectDir, target, fullReconfigure, jobs);
+}
+
+/** The method on the prototype before any spy replaces it. */
+const realGetSteps = Build.prototype.getSteps;
+let getStepsSpy: jest.SpyInstance;
+
+beforeEach(() => {
+  getStepsSpy = jest.spyOn(Build.prototype, "getSteps").mockImplementation(mockGetSteps);
+});
+
+afterEach(() => {
+  getStepsSpy.mockRestore();
+});
+
+/** The next `getSteps` call runs the real method on the `Build` it is called on. */
+function nextBuildIsReal(): void {
+  getStepsSpy.mockImplementationOnce(function (this: Build, ...args: Parameters<Build["getSteps"]>) {
+    return realGetSteps.apply(this, args);
+  });
+}
+
+/** Runs body and returns the paths of the configuration files it read. */
+async function configFilesRead<T>(body: () => Promise<T>): Promise<string[]> {
+  const read: string[] = [];
+  const original = fs.readFileSync;
+  const spy = jest.spyOn(fs, "readFileSync").mockImplementation(((file: unknown, ...rest: unknown[]) => {
+    if (String(file).endsWith("config.json")) {
+      read.push(String(file));
+    }
+    return (original as unknown as (...args: unknown[]) => unknown)(file, ...rest);
+  }) as unknown as typeof fs.readFileSync);
+  try {
+    await body();
+  } finally {
+    spy.mockRestore();
+  }
+  return read;
+}
 
 const mockedRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
 const mockedInstallPhase = runInstallPhase as jest.MockedFunction<typeof runInstallPhase>;
@@ -149,7 +234,7 @@ function useGraph(order: BuildableProject[]): void {
   mockedWalkDependencies.mockResolvedValue({
     projects: new Map(order.map((p) => [p.path, p])),
     edges: new Map(
-      order.map((p) => [p.path, p.dependencies.map((d) => byName.get(d)!.path)])
+      order.map((p) => [p.path, p.dependencies.map((d) => defined(byName.get(d), "project " + d).path)])
     ),
   });
   mockedResolveBuildOrder.mockReturnValue(order);
@@ -573,6 +658,43 @@ describe("RecursiveBuild", () => {
     });
   });
 
+  describe("the configuration it is given", () => {
+    const configureArgs = () =>
+      mockedRunCommand.mock.calls.filter((call) => call[0] === "./configure").map((call) => call[1]);
+
+    it("builds with the prefix of the configuration it is given, not the default one", async () => {
+      useGraph([comp]);
+      nextBuildIsReal();
+
+      await buildRecursive({ target: "native", fullReconfigure: true, projectDir: comp.path });
+
+      expect(SCRATCH_CONFIG.config.prefix).not.toBe(new Config().config.prefix);
+      expect(configureArgs()).toEqual([["--prefix=" + path.join(SCRATCH_CONFIG.config.prefix, "x86_64-linux-gnu")]]);
+    });
+
+    it("lists steps with the prefix of the configuration it is given, not the default one", async () => {
+      nextBuildIsReal();
+
+      const listed = await getRecursiveBuildSteps(prog.path, "native", true);
+
+      const configure = listed[0].steps.find((step) => step.label === "configure");
+      expect(configure?.args).toEqual(["--prefix=" + path.join(SCRATCH_CONFIG.config.prefix, "x86_64-linux-gnu")]);
+    });
+
+    it("reads no configuration of its own while it builds", async () => {
+      const read = await configFilesRead(() => buildRecursive({ target: "native", fullReconfigure: true, projectDir: prog.path }));
+
+      expect(read).toEqual([]);
+      expect(read).not.toContain(DEFAULT_CONFIG_PATH);
+    });
+
+    it("reads no configuration of its own while it lists steps", async () => {
+      const read = await configFilesRead(() => getRecursiveBuildSteps(prog.path, "native", true));
+
+      expect(read).toEqual([]);
+    });
+  });
+
   describe("buildRecursive with release=true", () => {
     it("runs the install phase once per project with release as given", async () => {
       await buildRecursive({
@@ -588,8 +710,8 @@ describe("RecursiveBuild", () => {
         expect(call.release).toBe(true);
         expect(call.target).toBe("native");
         expect(call.installStep).toEqual({ label: "install", program: "make", args: ["install"] });
-        expect(call.configPrefix).toBe("/fake/prefix");
-        expect(call.configDir).toBe("/fake/config");
+        expect(call.configPrefix).toBe(SCRATCH_CONFIG.config.prefix);
+        expect(call.configDir).toBe(SCRATCH_CONFIG.configDir);
         expect(call.output).toEqual({ mode: "capture" });
       }
     });
@@ -1518,8 +1640,13 @@ describe("RecursiveBuild without the native component", () => {
   type ComponentModule = typeof import("../src/NativeComponent");
 
   const project = makeProject("only", "/fake/only", ProjectType.Program);
+  /** The options with the scratch configuration added, built in a variable so they type-check before and after `config` is a field. */
+  const withScratchConfig = (options: RecursiveOptionsWithoutConfig): Parameters<RecursiveModule["buildRecursive"]>[0] => {
+    const withConfig = { ...options, config: SCRATCH_CONFIG };
+    return withConfig;
+  };
   let isolated: {
-    buildRecursive: RecursiveModule["buildRecursive"];
+    buildRecursive: (options: Parameters<RecursiveModule["buildRecursive"]>[0]) => ReturnType<RecursiveModule["buildRecursive"]>;
     walk: jest.MockedFunction<WalkerModule["walkDependencies"]>;
     order: jest.MockedFunction<WalkerModule["resolveBuildOrder"]>;
     run: jest.MockedFunction<RunnerModule["runCommand"]>;
@@ -1571,7 +1698,7 @@ describe("RecursiveBuild without the native component", () => {
   ])("a %s Windows build rejects with the missing component error before discovery", async (_name, release) => {
     let thrown: unknown;
     try {
-      await isolated.buildRecursive({ target: "windows", fullReconfigure: true, projectDir: project.path, release });
+      await isolated.buildRecursive(withScratchConfig({ target: "windows", fullReconfigure: true, projectDir: project.path, release }));
     } catch (error) {
       thrown = error;
     }
@@ -1586,7 +1713,7 @@ describe("RecursiveBuild without the native component", () => {
     ["release", true],
     ["plain", false],
   ])("a %s native build is unaffected", async (_name, release) => {
-    const result = await isolated.buildRecursive({ target: "native", fullReconfigure: true, projectDir: project.path, release });
+    const result = await isolated.buildRecursive(withScratchConfig({ target: "native", fullReconfigure: true, projectDir: project.path, release }));
 
     expect(result.success).toBe(true);
     expect(result.completed).toEqual([project]);

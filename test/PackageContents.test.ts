@@ -9,6 +9,7 @@ const packageRoot = path.resolve(__dirname, "..");
 const allowedPatterns: RegExp[] = [
   /^package\.json$/,
   /^README\.md$/,
+  /^CHANGELOG\.md$/,
   /^LICENSE$/,
   /^dist\/.+\.js$/,
   /^dist\/.+\.d\.ts$/,
@@ -22,6 +23,7 @@ const allowedPatterns: RegExp[] = [
 const requiredEntries: string[] = [
   "package.json",
   "README.md",
+  "CHANGELOG.md",
   "LICENSE",
   "dist/index.js",
   "dist/scripts/the-seed.js",
@@ -34,7 +36,6 @@ const requiredEntries: string[] = [
 const requiredTemplates: string[] = ["templates/component", "templates/program", "templates/system"];
 
 const scratchDirs: string[] = [];
-const strayFiles: string[] = [];
 
 function scratch(label: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "package-contents-" + label + "-"));
@@ -47,9 +48,32 @@ function npmAvailable(): boolean {
   return !result.error && result.status === 0;
 }
 
-function listPackedEntries(): string[] {
+/**
+ * A scratch copy of the package, so that the pack's lifecycle scripts (which empty and rebuild `dist/`
+ * even with --ignore-scripts) never touch the tree other suites read. Dependencies are linked, not copied.
+ */
+function copyPackage(): string {
+  const copy = path.join(scratch("package"), "the-seed");
+  const skipped = new Set(["node_modules", ".git", "~", "test-results", "coverage"]);
+  fs.cpSync(packageRoot, copy, {
+    recursive: true,
+    filter: (source) => {
+      const relative = path.relative(packageRoot, source);
+      return !skipped.has(relative.split(path.sep)[0]) && relative !== path.join("native", "build");
+    },
+  });
+  fs.symlinkSync(path.join(packageRoot, "node_modules"), path.join(copy, "node_modules"), "dir");
+  return copy;
+}
+
+function listPackedEntries(strays: string[] = []): string[] {
   if (!fs.existsSync(path.join(packageRoot, "dist", "index.js"))) {
     throw new Error("dist/ is not built: run `npm run build` in the-seed/ before this test");
+  }
+  const copy = copyPackage();
+  for (const relative of strays) {
+    fs.mkdirSync(path.dirname(path.join(copy, relative)), { recursive: true });
+    fs.writeFileSync(path.join(copy, relative), "stray\n");
   }
   const home = scratch("home");
   const cache = scratch("cache");
@@ -61,7 +85,7 @@ function listPackedEntries(): string[] {
     npm_config_update_notifier: "false",
   };
   const result = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts", "--silent"], {
-    cwd: packageRoot,
+    cwd: copy,
     env,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
@@ -90,34 +114,7 @@ function listTemplateFiles(dir: string): string[] {
   return found.sort();
 }
 
-function createStray(relative: string): void {
-  const full = path.join(packageRoot, relative);
-  const created: string[] = [];
-  let dir = path.dirname(full);
-  while (!fs.existsSync(dir)) {
-    created.push(dir);
-    dir = path.dirname(dir);
-  }
-  fs.mkdirSync(path.dirname(full), { recursive: true });
-  fs.writeFileSync(full, "stray\n");
-  strayFiles.push(full);
-  strayFiles.push(...created);
-}
-
 afterEach(() => {
-  // Files first, then the directories created for them (deepest first).
-  for (const entry of strayFiles.splice(0)) {
-    try {
-      const stat = fs.statSync(entry);
-      if (stat.isDirectory()) {
-        fs.rmdirSync(entry);
-      } else {
-        fs.unlinkSync(entry);
-      }
-    } catch {
-      // already gone
-    }
-  }
   for (const dir of scratchDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -169,9 +166,7 @@ describe("package contents", () => {
     if (!optionalExternalCheck("npm", npmAvailable(), "npm is not installed")) {
       return;
     }
-    createStray("native/build/Release/x.node");
-    createStray("test-results/x");
-    const entries = listPackedEntries();
+    const entries = listPackedEntries(["native/build/Release/x.node", "test-results/x"]);
     expect(entries.filter((entry) => entry.startsWith("native/build/"))).toEqual([]);
     expect(entries.filter((entry) => entry.startsWith("test-results/"))).toEqual([]);
   });

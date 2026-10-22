@@ -301,7 +301,9 @@ const SigningCLI = async (parsed: ParsedCommand, context: CliContext): Promise<H
             if (signed.signatureType === "embedded") {
               console.log(`  Signed (embedded): ${relFile}`);
             } else {
-              const relSig = path.relative(resolvedPath, signed.signaturePath!);
+              const sigPath = signed.signaturePath;
+              if (sigPath === null) throw new Error("internal: detached signature without a path");
+              const relSig = path.relative(resolvedPath, sigPath);
               console.log(`  Signed (detached): ${relFile} → ${relSig}`);
             }
             for (const warning of signed.warnings) {

@@ -34,23 +34,30 @@ const describeError = (error: unknown): string => {
   return String((error as Error)?.message ?? error).split("\n")[0];
 };
 
+/**
+ * The directory the configuration lives in unless another is given: `the-seed` in the home directory.
+ */
+export function defaultConfigDir(): string {
+  return path.join(os.homedir(), "the-seed");
+}
+
 class Config {
   configDir: string;
   configFile: string;
   configPath: string;
   config: ConfigType = {
-    prefix: path.join(os.homedir(), "the-seed"),
+    prefix: defaultConfigDir(),
     scopes: {}
   };
 
   constructor(configDir?: string) {
-    this.configDir = configDir || path.join(os.homedir(), "the-seed");
+    this.configDir = configDir || defaultConfigDir();
     this.configFile = "config.json";
     this.configPath = path.join(this.configDir, this.configFile);
     this.loadConfig();
   }
 
-  loadConfig = () => {
+  loadConfig() {
     this.makeConfigDir();
     // if file does not exist, create it
     if (!fs.existsSync(this.configPath)) {
@@ -63,16 +70,16 @@ class Config {
       throw new ConfigError("Cannot read " + this.configPath + ": " + describeError(error), this.configPath);
     }
     this.config = this.parseConfig(text);
-  };
+  }
 
-  private typeName = (value: unknown): string => {
+  private typeName(value: unknown): string {
     if (value === null) {
       return "null";
     }
     return Array.isArray(value) ? "array" : typeof value;
-  };
+  }
 
-  private parseConfig = (text: string): ConfigType => {
+  private parseConfig(text: string): ConfigType {
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
@@ -100,12 +107,12 @@ class Config {
     }
     return {
       ...loaded,
-      prefix: (loaded.prefix as string | undefined) ?? path.join(os.homedir(), "the-seed"),
+      prefix: (loaded.prefix as string | undefined) ?? defaultConfigDir(),
       scopes: (loaded.scopes as ConfigType["scopes"] | undefined) ?? {}
     };
-  };
+  }
 
-  saveConfig = () => {
+  saveConfig() {
     this.makeConfigDir();
     const tempPath = path.join(this.configDir, "." + this.configFile + "." + process.pid + ".tmp");
     try {
@@ -115,17 +122,17 @@ class Config {
       fs.rmSync(tempPath, { force: true });
       throw new ConfigError("Cannot write " + this.configPath + ": " + describeError(error), this.configPath);
     }
-  };
+  }
 
-  private makeConfigDir = () => {
+  private makeConfigDir() {
     try {
       fs.mkdirSync(this.configDir, { recursive: true });
     } catch (error) {
       throw new ConfigError("Cannot create configuration directory " + this.configDir + ": " + describeError(error), this.configDir);
     }
-  };
+  }
 
-  getQuestions = () => {
+  getQuestions() {
     return [
       {
         name: "prefix",
@@ -133,11 +140,11 @@ class Config {
         default: this.config.prefix
       }
     ];
-  };
+  }
 
-  parseAnswers = (answers: { prefix: string }) => {
+  parseAnswers(answers: { prefix: string }) {
     this.config.prefix = answers.prefix;
-  };
+  }
 }
 
 export default Config;

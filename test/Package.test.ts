@@ -11,7 +11,7 @@ import { elfImage } from "./helpers/ElfImage";
 import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbsent";
 
 // Mock the native addon
-jest.mock("../native/build/Release/dependency_lister.node", () => ({
+jest.mock("../native/build/Release/the_seed_native.node", () => ({
   listDependencies: jest.fn()
 }), { virtual: true });
 
@@ -29,7 +29,7 @@ jest.mock("child_process", () => ({
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-const mockAddon = require("../native/build/Release/dependency_lister.node");
+const mockAddon = require("../native/build/Release/the_seed_native.node");
 const mockedListDependencies = mockAddon.listDependencies as jest.MockedFunction<
   (binaryPaths: string[], searchPaths: string[]) => DependencyResultType
 >;
@@ -355,7 +355,7 @@ describe("test Package", () => {
       }));
       const depDir = createNodeModuleDep(projectDir, "@org/libfoo",
         "lib_LTLIBRARIES = libfoo.la\nlibfoo_la_SOURCES = foo.cpp\n");
-      const depLib = installBuildOutput(depDir, "libfoo-0.dll", "dll-content");
+      installBuildOutput(depDir, "libfoo-0.dll", "dll-content");
 
       const outputDir = path.join(tempDir, "my-release");
 

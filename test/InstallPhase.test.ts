@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { buildTreeCopies, groupOutputs, notice, outputKind, placeStaged, readStage, runInstallPhase, signingOutcome, signOutputs, stripOutputs } from "../src/InstallPhase";
 import Signing from "../src/Signing";
 import { findOnPath } from "../src/ProcessRunner";
@@ -10,6 +11,7 @@ import { nativeComponentPath, withoutNativeComponent } from "./helpers/NativeAbs
 import { replaceScopeKey } from "./helpers/IndependentCheck";
 import { InstallPhaseOptions, InstallPhaseResult, OutputGroup } from "../src/types";
 import { createCertHint, fullBuildHint, replaceCertHint } from "../src/cli/Hints";
+import { defined } from "./helpers/Defined";
 
 // Choices made where the behaviour leaves a detail open (the implementation matches these):
 // - `readStage` and `placeStaged` are synchronous and throw; the two distinguishable errors have
@@ -1283,7 +1285,7 @@ describe("stripOutputs", () => {
 
     await stripOutputs(groupsOf(s, "native"), "native", undefined, log);
 
-    const recorded = readLines(calls).find((line) => line.startsWith("mode:"))!;
+    const recorded = defined(readLines(calls).find((line) => line.startsWith("mode:")), "mode line");
     expect(parseInt(recorded.slice(5), 8) & 0o200).not.toBe(0);
     expect(fs.statSync(file).mode & 0o7777).toBe(0o555);
   });
@@ -1437,7 +1439,7 @@ describe("with a scratch certificate", () => {
       expect(fs.readlinkSync(path.join(lib, "libx.so.0.sig"))).toBe("libx.so.0.0.0.sig");
       expect(fs.lstatSync(path.join(lib, "libx.so.sig")).isSymbolicLink()).toBe(true);
       expect(fs.readlinkSync(path.join(lib, "libx.so.sig"))).toBe("libx.so.0.sig");
-      const tool = groups.find((g) => g.hardLinks.length === 1)!;
+      const tool = defined(groups.find((g) => g.hardLinks.length === 1), "hard-linked group");
       const names = [path.join(bin, "tool"), path.join(bin, "tool-alias")];
       const ino = names.map((name) => fs.statSync(name + ".sig").ino);
       expect(ino[0]).toBe(ino[1]);
@@ -1521,9 +1523,9 @@ describe("with a scratch certificate", () => {
 
       await signOutputs(groups, scope, certDir, "native", undefined, log);
 
-      const display = (file: string) => groups.find((g) => g.file === file)!.display;
+      const display = (file: string) => defined(groups.find((g) => g.file === file), "group " + file).display;
       const lib = path.join(s.root, "lib", "libx.so.0.0.0");
-      const tool = groups.find((g) => g.hardLinks.length === 1)!.file;
+      const tool = defined(groups.find((g) => g.hardLinks.length === 1), "hard-linked group").file;
       expect(lines).toEqual([
         "Signed (detached): " + display(tool) + " → " + path.basename(tool) + ".sig",
         "Signed (detached): " + display(lib) + " → libx.so.0.0.0.sig",
@@ -2372,7 +2374,7 @@ describe("runInstallPhase", () => {
   // ── The stage as stripping and signing left it ───────────
 
   function loadAddon(): { peHasEmbeddedSignature(file: string): boolean } {
-    return require("../native/build/Release/dependency_lister.node");
+    return require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH));
   }
 
   it("installs a windows stage that holds a stray <name>.exe.sig, which embedded signing removes", async () => {
@@ -2942,8 +2944,9 @@ describe("signOutputs failures", () => {
     }
 
     expect(error).toBeDefined();
-    expect(error!.message.startsWith("signing failed on " + path.join(s.prefix, "bin", "tiny") + ": ")).toBe(true);
-    expect(error!.message.length).toBeGreaterThan(("signing failed on " + path.join(s.prefix, "bin", "tiny") + ": ").length);
+    const failure = defined(error, "signing error");
+    expect(failure.message.startsWith("signing failed on " + path.join(s.prefix, "bin", "tiny") + ": ")).toBe(true);
+    expect(failure.message.length).toBeGreaterThan(("signing failed on " + path.join(s.prefix, "bin", "tiny") + ": ").length);
     expect(fs.existsSync(file + ".sig")).toBe(false);
   });
 
@@ -2988,8 +2991,9 @@ describe("signOutputs failures", () => {
 
     expect(error).toBeDefined();
     const display = path.join(s.prefix, "bin", "tiny.exe");
-    expect(error!.message.startsWith("signing failed on " + display + ": expected an embedded signature, got detached")).toBe(true);
-    expect(error!.message).toContain("not recognised as a valid PE file");
-    expect(error!.message).toContain("a full build rebuilds it");
+    const failure = defined(error, "signing error");
+    expect(failure.message.startsWith("signing failed on " + display + ": expected an embedded signature, got detached")).toBe(true);
+    expect(failure.message).toContain("not recognised as a valid PE file");
+    expect(failure.message).toContain("a full build rebuilds it");
   });
 });

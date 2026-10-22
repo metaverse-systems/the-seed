@@ -348,7 +348,12 @@ async function walkProject(projectDir: string, walk: WalkState): Promise<void> {
     }
     if (!edgePaths.includes(depDir)) {
       edgePaths.push(depDir);
-      project.dependencies.push(walk.graph.projects.get(depDir)!.name);
+      const dep = walk.graph.projects.get(depDir);
+      if (dep === undefined) {
+        // Unreachable: the walk above stored this project.
+        throw new Error(`internal: project ${depDir} not in graph`);
+      }
+      project.dependencies.push(dep.name);
     }
   }
 
@@ -380,36 +385,10 @@ export function resolveBuildOrder(
     // keep the resolved path
   }
 
-  // Compute in-degrees
-  const inDegree = new Map<string, number>();
-  for (const projectPath of graph.projects.keys()) {
-    inDegree.set(projectPath, 0);
-  }
-  for (const [, depPaths] of graph.edges) {
-    for (const depPath of depPaths) {
-      if (inDegree.has(depPath)) {
-        inDegree.set(depPath, (inDegree.get(depPath) || 0) + 1);
-      }
-    }
-  }
-
-  // Reverse edges: for Kahn's, we need to know which projects depend on a given project
-  // Actually, Kahn's uses forward edges. Let me re-think.
-  // In our graph, edges[A] = [B, C] means "A depends on B and C" (B and C must be built before A).
-  // For Kahn's: in-degree of a node = number of projects that must be built before it.
-  // Wait no — in-degree = number of edges pointing TO a node.
-  // If A depends on B, then there's an edge A -> B (A depends on B).
-  // For build ordering, B must come before A.
-  // In Kahn's for topological sort on a DAG:
-  //   - We want to produce an order where dependencies come first
-  //   - The edge "A depends on B" means B -> A in build order
-  //   - In-degree: count how many prerequisites each node has
-  //   - A node with in-degree 0 has no prerequisites → can be built first
-
-  // Recompute in-degrees correctly:
-  // edges[A] = [B, C] means A depends on B and C
-  // So A's in-degree should count its dependencies (B and C are prerequisites of A)
-  // In-degree of A = number of dependencies of A = edges[A].length
+  // Kahn's algorithm over "depends on" edges: edges[A] lists what A depends on, so
+  // a project's in-degree is the number of its dependencies that are in the graph.
+  // Projects with none are ready first; building a project releases its dependents.
+  // Ready projects are taken by type tier, then by name.
   const correctInDegree = new Map<string, number>();
   for (const projectPath of graph.projects.keys()) {
     const deps = graph.edges.get(projectPath) || [];
@@ -426,10 +405,19 @@ export function resolveBuildOrder(
   }
 
   // Sort ready queue by tier priority (lowest ProjectType first), then by name for stability
+  const projectOf = (key: string): BuildableProject => {
+    const found = graph.projects.get(key);
+    if (found === undefined) {
+      // Unreachable: the queue holds only keys of the graph.
+      throw new Error(`internal: project ${key} not in graph`);
+    }
+    return found;
+  };
+
   const sortReady = (queue: string[]): string[] => {
     return queue.sort((a, b) => {
-      const projA = graph.projects.get(a)!;
-      const projB = graph.projects.get(b)!;
+      const projA = projectOf(a);
+      const projB = projectOf(b);
       if (projA.type !== projB.type) {
         return projA.type - projB.type;
       }
@@ -444,10 +432,11 @@ export function resolveBuildOrder(
 
   while (readyQueue.length > 0) {
     // Dequeue the highest priority (first in sorted queue)
-    const current = readyQueue.shift()!;
+    const current = readyQueue.shift();
+    if (current === undefined) break;
     processed.add(current);
 
-    const project = graph.projects.get(current)!;
+    const project = projectOf(current);
 
     // Don't add root to result yet — it goes last
     if (current !== resolvedRoot) {

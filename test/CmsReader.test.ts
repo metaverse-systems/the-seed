@@ -2,6 +2,7 @@ import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { spawnSync } from "child_process";
 import Signing from "../src/Signing";
 import { CmsDamaged, CmsUnsupported, findSignerCertificate, OID, readSignedData, readSpcDigest, verifySignerSignature } from "../src/CmsReader";
@@ -14,7 +15,7 @@ let signing: Signing;
 let scopeCertDer: Buffer;
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-const addon = require("../native/build/Release/dependency_lister.node") as Record<string, (...args: unknown[]) => unknown>;
+const addon = require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH)) as Record<string, (...args: unknown[]) => unknown>;
 
 function tempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));

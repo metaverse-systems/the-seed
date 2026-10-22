@@ -12,7 +12,7 @@ const { spawnSync } = require("child_process");
 const packageRoot = path.resolve(__dirname, "..");
 const STAGES = ["typecheck", "lint", "unit", "install"];
 const DEFAULT_STAGES = ["typecheck", "lint", "unit"];
-const ADDON_PATH = path.join("native", "build", "Release", "dependency_lister.node");
+const ADDON_PATH = path.join("native", "build", "Release", "the_seed_native.node");
 const RESULTS_PATH = path.join("test-results", "jest.json");
 
 function localBin(...parts) {
@@ -366,8 +366,12 @@ function typecheckStage() {
   return runNode([localBin("typescript", "bin", "tsc"), "-p", "tsconfig.test.json"]);
 }
 
+function lintArguments(targets = ["src", "test"]) {
+  return ["--ext", ".ts", "--max-warnings", "0", ...targets];
+}
+
 function lintStage() {
-  return runNode([localBin("eslint", "bin", "eslint.js"), "--ext", ".ts", "src", "test"]);
+  return runNode([localBin("eslint", "bin", "eslint.js"), ...lintArguments()]);
 }
 
 function isolatedEnvironment(base, scratchHome, scratchTmp) {
@@ -606,6 +610,9 @@ function installStage() {
       let output = combined(installed.result);
       if (installed.result.status !== 0) problems.push("install exited " + installed.result.status);
       if (output.indexOf("native component built against libthe-seed") === -1) problems.push("no built report in the install output");
+      // The compiler is a development dependency: the installed package must not carry it.
+      const installedCompiler = path.join(path.dirname(path.dirname(installed.tool)), "lib", "node_modules", "@metaverse-systems", "the-seed", "node_modules", "typescript");
+      if (fs.existsSync(installedCompiler)) problems.push("the installed package's node_modules holds typescript: " + installedCompiler);
       if (problems.length === 0) {
         const help = runCommand(installed.tool, ["help"], { env: installed.env, cwd: root });
         output = combined(help);
@@ -766,7 +773,7 @@ function main(argv) {
   return outcomes.every((o) => o.passed) ? 0 : 1;
 }
 
-module.exports = { parseArguments, STAGES, summariseStages, installEnvironment, summariseResults, validateKnownGaps, validateKnownGapFiles, findLeftovers, snapshotRealHome, compareRealHome, isolatedEnvironment };
+module.exports = { parseArguments, STAGES, summariseStages, installEnvironment, summariseResults, validateKnownGaps, validateKnownGapFiles, findLeftovers, snapshotRealHome, compareRealHome, isolatedEnvironment, lintArguments };
 
 if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));

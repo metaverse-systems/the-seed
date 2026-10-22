@@ -46,8 +46,6 @@ import { ProjectErrorCode } from "../src/ProjectError";
 import { snapshotTree } from "./helpers/RunCli";
 import { fileDigest } from "./helpers/NativeAbsent";
 
-type CreatePackage = (scope: string, name: string, parentDir?: string) => string;
-
 interface ProjectErrorShape extends Error {
   code: string;
   hint?: string;
@@ -77,7 +75,7 @@ describe("ResourcePak", () => {
   };
 
   const create = (scope: string, name: string, dir: string = parentDir): string =>
-    (rp.createPackage as unknown as CreatePackage)(scope, name, dir);
+    rp.createPackage(scope, name, dir);
 
   /** Creates the project and returns its path, with the configured scope `@test`. */
   const createPak = (name: string): string => create("@test", name);
@@ -255,9 +253,8 @@ describe("ResourcePak", () => {
   describe("addResource", () => {
     type Entry = { name: string; filename: string; size: number; attributes?: Record<string, string> };
     type AddOptions = { force?: boolean; attributes?: Array<[string, string]> };
-    type AddResource = (name: string, filename: string, packageDir: string, options?: AddOptions) => Entry;
     const add = (name: string, filename: string, dir: string, options?: AddOptions): Entry =>
-      (rp.addResource as unknown as AddResource)(name, filename, dir, options);
+      rp.addResource(name, filename, dir, options);
     const descriptionText = (dir: string): string => fs.readFileSync(path.join(dir, "package.json"), "utf-8");
     const tmpFiles = (dir: string): string[] => fs.readdirSync(dir).filter((entry) => entry.endsWith(".tmp"));
 
@@ -414,7 +411,7 @@ describe("ResourcePak", () => {
       fs.writeFileSync(path.join(dir, "a.ogg"), "ogg");
       add("theme", "a.ogg", dir, { attributes: [["type", "audio"], ["loop", "true"]] });
 
-      const pak = (rp.build as unknown as (dir: string) => string)(dir);
+      const pak = rp.build(dir);
 
       const bytes = fs.readFileSync(pak);
       const line = bytes.subarray(0, bytes.indexOf(0x0a)).toString("utf8");
@@ -692,9 +689,8 @@ describe("ResourcePak", () => {
   });
 
   describe("build", () => {
-    type Build = (dir: string) => string;
     type Spied = Record<"openSync" | "readSync", (...args: unknown[]) => unknown>;
-    const build = (dir: string): string => (rp.build as unknown as Build)(dir);
+    const build = (dir: string): string => rp.build(dir);
     const pakPath = (dir: string, name = "my-pak"): string => path.join(dir, name + ".pak");
     const tmpFiles = (dir: string): string[] => fs.readdirSync(dir).filter((entry) => entry.endsWith(".tmp"));
     const modules = (): Spied[] => [fs as unknown as Spied, fsExtra as unknown as Spied];

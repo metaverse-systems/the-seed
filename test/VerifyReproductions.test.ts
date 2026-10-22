@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import Signing from "../src/Signing";
 import { expectPresent } from "./helpers/Assert";
 import { runTheSeed } from "./helpers/RunCli";
@@ -49,7 +50,7 @@ async function makeConfiguration(prefix: string, scope: string): Promise<{ signi
 /** The addon's slice table of a file, for placing a change inside one slice. */
 function sliceTable(file: string): Array<{ cpuType: number; offset: number; size: number }> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native addon has no type declarations
-  const addon = require("../native/build/Release/dependency_lister.node");
+  const addon = require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH));
   return addon.machoListSlices(file);
 }
 

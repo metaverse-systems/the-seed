@@ -10,6 +10,7 @@ import {
   killRegisteredGroups,
   capturedText,
 } from "../src/ProcessRunner";
+import { defined } from "./helpers/Defined";
 
 const describePosix = process.platform === "win32" ? describe.skip : describe;
 
@@ -392,8 +393,8 @@ describe("capture guard", () => {
 
     const match = noticePattern.exec(result);
     expect(match).not.toBeNull();
-    const omitted = Number(match![1]);
-    const kept = result.slice(match![0].length);
+    const omitted = Number(defined(match, "notice match")[1]);
+    const kept = result.slice(defined(match, "notice match")[0].length);
     expect(kept.length).toBeGreaterThan(0);
     expect(kept.length).toBeLessThanOrEqual(256);
     expect(text.endsWith(kept)).toBe(true);
@@ -404,7 +405,7 @@ describe("capture guard", () => {
   it("handles one chunk much longer than the limit", () => {
     const text = "a".repeat(10_000) + "THE END";
     const result = capturedText([Buffer.from(text)], 100);
-    const match = noticePattern.exec(result)!;
+    const match = defined(noticePattern.exec(result), "notice match");
     expect(match).not.toBeNull();
     expect(result.endsWith("THE END")).toBe(true);
     expect(Number(match[1]) + (result.length - match[0].length)).toBe(text.length);

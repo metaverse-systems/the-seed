@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-import os from "os";
 import { runCli } from "./Cli";
+import { defaultConfigDir } from "../Config";
 
-const configDir = os.homedir() + "/the-seed";
+const configDir = defaultConfigDir();
 
 runCli(process.argv.slice(2), configDir);

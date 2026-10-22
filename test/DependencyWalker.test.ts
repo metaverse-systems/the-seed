@@ -16,6 +16,7 @@ import {
 } from "../src/DependencyWalker";
 import type { DependencyGraph, BuildableProject } from "../src/types";
 import { writeProject, linkModule, readBound, onRead } from "./helpers/ScratchProjects";
+import { defined } from "./helpers/Defined";
 
 /** Jest time limit of every case that walks a tree holding a cycle or a link. */
 const BOUND_TIMEOUT = 5000;
@@ -211,8 +212,8 @@ describe("DependencyWalker", () => {
 
       const graph = await walkDependencies(projDir);
       expect(graph.projects.size).toBe(1);
-      expect(graph.projects.get(projDir)!.name).toBe("solo-component");
-      expect(graph.projects.get(projDir)!.type).toBe(ProjectType.Component);
+      expect(defined(graph.projects.get(projDir), "project").name).toBe("solo-component");
+      expect(defined(graph.projects.get(projDir), "project").type).toBe(ProjectType.Component);
       expect(graph.edges.get(projDir)).toEqual([]);
     });
 
@@ -323,7 +324,7 @@ describe("DependencyWalker", () => {
       expect(graph.projects.size).toBe(4);
       const sharedProject = graph.projects.get(sharedDir);
       expect(sharedProject).toBeDefined();
-      expect(sharedProject!.name).toBe("shared-component");
+      expect(defined(sharedProject, "shared project").name).toBe("shared-component");
     });
 
     it("throws ProjectManifestError naming the file when root project has no package.json", async () => {

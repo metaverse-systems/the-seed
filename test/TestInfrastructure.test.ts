@@ -2,6 +2,7 @@ import fs from "fs";
 import crypto from "crypto";
 import os from "os";
 import path from "path";
+import { NATIVE_COMPONENT_PATH } from "../src/NativeComponent";
 import { spawnSync } from "child_process";
 import * as runChecks from "../scripts/run-checks";
 import { KnownGapEntry, runKnownGap, itKnownGap, staleMessage } from "./helpers/KnownGap";
@@ -1123,7 +1124,7 @@ describe("native absence helper", () => {
   });
 
   function loadComponent(): unknown {
-    return require("../native/build/Release/dependency_lister.node");
+    return require(path.join(__dirname, "..", NATIVE_COMPONENT_PATH));
   }
 
   function thrownBy(action: () => unknown): NodeJS.ErrnoException {
@@ -1147,7 +1148,7 @@ describe("native absence helper", () => {
   });
 
   it("names the component path the source modules resolve", () => {
-    expect(nativeComponentPath).toBe(rel("native", "build", "Release", "dependency_lister.node"));
+    expect(nativeComponentPath).toBe(rel(NATIVE_COMPONENT_PATH));
   });
 
   it("throws MODULE_NOT_FOUND for the component in absent mode", () => {
@@ -1187,7 +1188,7 @@ describe("native absence helper", () => {
       expect(real).toBeTruthy();
     } else {
       expect(failure.message).not.toBe("libthe-seed.so.1: cannot open shared object file: No such file or directory");
-      expect(failure.message).toContain("dependency_lister.node");
+      expect(failure.message).toContain(path.basename(NATIVE_COMPONENT_PATH));
     }
   });
 
@@ -1350,5 +1351,57 @@ describe("pak fixture", () => {
     const resources = readResources();
     expect(resources.some((r) => r.attributes !== undefined && Object.keys(r.attributes).length > 0)).toBe(true);
     expect(resources.some((r) => fs.statSync(path.join(projectDir, r.filename)).size === 0)).toBe(true);
+  });
+});
+
+describe("lint gate", () => {
+  type LintArguments = (targets?: string[]) => string[];
+  const lintArguments = (runChecks as unknown as { lintArguments?: LintArguments }).lintArguments;
+  let directory: string;
+
+  beforeEach(() => {
+    directory = fs.mkdtempSync(path.join(os.tmpdir(), "lint-gate-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  it("builds the ESLint arguments with --max-warnings 0 and the given targets", () => {
+    expect(typeof lintArguments).toBe("function");
+    const defaults = (lintArguments as LintArguments)();
+    expect(defaults[defaults.indexOf("--max-warnings") + 1]).toBe("0");
+    expect(defaults).toContain("--ext");
+    expect(defaults).toContain(".ts");
+    expect(defaults.slice(-2)).toEqual(["src", "test"]);
+    expect((lintArguments as LintArguments)(["elsewhere"]).slice(-1)).toEqual(["elsewhere"]);
+  });
+
+  it("fails on a single warning when run with the stage's arguments", () => {
+    expect(typeof lintArguments).toBe("function");
+    fs.copyFileSync(rel(".eslintrc.json"), path.join(directory, ".eslintrc.json"));
+    fs.symlinkSync(rel("node_modules"), path.join(directory, "node_modules"), "dir");
+    fs.writeFileSync(path.join(directory, "probe.ts"), "export function probe(): number {\n  const unused = 1;\n  return 2;\n}\n");
+    const args = (lintArguments as LintArguments)(["."]);
+    const run = spawnSync(process.execPath, [rel("node_modules", "eslint", "bin", "eslint.js"), ...args], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, DISABLE_V8_COMPILE_CACHE: "1" },
+    });
+    expect(run.stdout).toContain("'unused' is assigned a value but never used");
+    expect(run.status).not.toBe(0);
+  });
+
+  it("exits 0 with the same file and no warning limit (the warning alone does not fail)", () => {
+    fs.copyFileSync(rel(".eslintrc.json"), path.join(directory, ".eslintrc.json"));
+    fs.symlinkSync(rel("node_modules"), path.join(directory, "node_modules"), "dir");
+    fs.writeFileSync(path.join(directory, "probe.ts"), "export function probe(): number {\n  const unused = 1;\n  return 2;\n}\n");
+    const run = spawnSync(process.execPath, [rel("node_modules", "eslint", "bin", "eslint.js"), "--ext", ".ts", "."], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, DISABLE_V8_COMPILE_CACHE: "1" },
+    });
+    expect(run.stdout).toContain("never used");
+    expect(run.status).toBe(0);
   });
 });
