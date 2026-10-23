@@ -4,7 +4,7 @@ import os from "os";
 import Config from "../src/Config";
 import Package from "../src/Package";
 import { targets } from "../src/Build";
-import { DependencyResultType, PackagePlan } from "../src/types";
+import { DependencyResultType, PackageCopyEvent, PackagePlan, PackageRunOptions, ToolLogLevel } from "../src/types";
 import { runTheSeed } from "./helpers/RunCli";
 import fse from "fs-extra";
 import { elfImage } from "./helpers/ElfImage";
@@ -1054,6 +1054,215 @@ describe("test Package", () => {
       expect(result.success).toBe(false);
       expect(result.message).toMatch(/^Copying libfoo\.so failed: .*disk full/);
       expect(fs.existsSync(outputDir)).toBe(false);
+    });
+  });
+
+  // Package.run and plan given a caller's log and onCopy. Choices where the contract is open:
+  // - "What the console received" is recorded by spying on console.log, console.warn and
+  //   console.error together, in call order, each call joined into one line with the level of its
+  //   method ("info" for console.log); the same project is then run again with the options into the
+  //   same output directory, so the two runs print the same paths.
+  // - A refusal is compared with the console text of the same refusal made without options.
+  describe("run - reporting to a caller's log and onCopy", () => {
+    type Line = { line: string; level: ToolLogLevel };
+    let printed: Line[];
+    let spies: jest.SpyInstance[];
+
+    beforeEach(() => {
+      printed = [];
+      const record = (level: ToolLogLevel) => (...parts: unknown[]) => {
+        printed.push({ line: parts.map(String).join(" "), level });
+      };
+      spies = [
+        jest.spyOn(console, "log").mockImplementation(record("info")),
+        jest.spyOn(console, "warn").mockImplementation(record("warn")),
+        jest.spyOn(console, "error").mockImplementation(record("error")),
+      ];
+    });
+
+    afterEach(() => {
+      for (const spy of spies) {
+        spy.mockRestore();
+      }
+    });
+
+    /** A log and onCopy that keep what they receive. */
+    function sink(): { lines: Line[]; copies: PackageCopyEvent[]; options: PackageRunOptions } {
+      const lines: Line[] = [];
+      const copies: PackageCopyEvent[] = [];
+      return {
+        lines,
+        copies,
+        options: {
+          log: (line, level) => {
+            lines.push({ line, level });
+          },
+          onCopy: (event) => {
+            copies.push({ ...event });
+          },
+        },
+      };
+    }
+
+    /** Runs without options and returns what the console received, then clears the console record. */
+    async function consoleRun(outputDir: string, projectDirs: string[]): Promise<{ success: boolean; lines: Line[] }> {
+      printed.length = 0;
+      const result = await pkg.run(outputDir, projectDirs);
+      const lines = printed.slice();
+      printed.length = 0;
+      for (const spy of spies) {
+        spy.mockClear();
+      }
+      return { success: result.success, lines };
+    }
+
+    function signedProgram(): { projectDir: string; binary: string; outputDir: string } {
+      const projectDir = createProjectDir(tempDir, "myapp",
+        "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      fs.writeFileSync(binary + ".sig", "signature-data");
+      return { projectDir, binary, outputDir: path.join(tempDir, "my-release") };
+    }
+
+    it("sends every line to log with its console level, reports each copy and calls no console method", async () => {
+      const { projectDir, binary, outputDir } = signedProgram();
+      mockedListDependencies.mockImplementation((inputs: string[]) => ({
+        dependencies: { "libc.so.6": inputs },
+        errors: {},
+      }));
+
+      const before = await consoleRun(outputDir, [projectDir]);
+      expect(before.success).toBe(true);
+      fs.rmSync(outputDir, { recursive: true, force: true });
+
+      const { lines, copies, options } = sink();
+      const result = await pkg.run(outputDir, [projectDir], options);
+
+      expect(result.success).toBe(true);
+      expect(printed).toEqual([]);
+      for (const spy of spies) {
+        expect(spy).not.toHaveBeenCalled();
+      }
+      expect(lines).toEqual(before.lines);
+      expect(lines).toEqual([
+        { line: "Copying myapp...", level: "info" },
+        { line: "Copying myapp.sig...", level: "info" },
+        { line: "Packaged 2 files into " + outputDir + "/ (1 signature included)", level: "info" },
+        { line: "Not packaged (expected on the target system):", level: "info" },
+        { line: "  libc.so.6 (needed by myapp)", level: "info" },
+      ]);
+      expect(copies).toEqual([
+        { name: "myapp", source: fs.realpathSync(binary), index: 1, total: 2 },
+        { name: "myapp.sig", source: fs.realpathSync(binary + ".sig"), index: 2, total: 2 },
+      ]);
+      expect(fs.readdirSync(outputDir).sort()).toEqual(["myapp", "myapp.sig"]);
+    });
+
+    it("reports a copy only after the file is written", async () => {
+      const { projectDir, outputDir } = signedProgram();
+      mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
+      const present: boolean[] = [];
+
+      await pkg.run(outputDir, [projectDir], {
+        log: () => undefined,
+        onCopy: (event) => {
+          present.push(fs.existsSync(path.join(outputDir, event.name)));
+        },
+      });
+
+      expect(present).toEqual([true, true]);
+    });
+
+    const refusals: Array<[string, () => { outputDir: string; projectDirs: string[]; text: string }]> = [
+      ["an existing output directory", () => {
+        const { projectDir, outputDir } = signedProgram();
+        fs.mkdirSync(outputDir);
+        return { outputDir, projectDirs: [projectDir], text: "Error: Output directory already exists: " + outputDir };
+      }],
+      ["a project without binaries", () => {
+        const projectDir = createProjectDir(tempDir, "myapp", "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+        return { outputDir: path.join(tempDir, "my-release"), projectDirs: [projectDir], text: "Error: No installed binaries found for " + projectDir };
+      }],
+      ["two different files under one name", () => {
+        const projectDirs = ["one", "two"].map(name => {
+          const projectDir = createProjectDir(tempDir, name, "bin_PROGRAMS = app\napp_SOURCES = app.cpp\n");
+          fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({ name: "@t/" + name, version: "1.0.0" }));
+          installBuildOutput(projectDir, "app", "content of " + name);
+          return projectDir;
+        });
+        return { outputDir: path.join(tempDir, "my-release"), projectDirs, text: "Error: Two different files would be packaged as app:" };
+      }],
+    ];
+
+    it.each(refusals)("refuses %s with one error line equal to the console text and no console call", async (_label, setup) => {
+      const { outputDir, projectDirs, text } = setup();
+      mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
+
+      const before = await consoleRun(outputDir, projectDirs);
+      expect(before.success).toBe(false);
+      expect(before.lines).toHaveLength(1);
+      expect(before.lines[0].level).toBe("error");
+      expect(before.lines[0].line.startsWith(text)).toBe(true);
+
+      const { lines, copies, options } = sink();
+      const result = await pkg.run(outputDir, projectDirs, options);
+
+      expect(result.success).toBe(false);
+      expect(lines).toEqual(before.lines);
+      expect(lines).toEqual([{ line: "Error: " + result.message, level: "error" }]);
+      expect(copies).toEqual([]);
+      expect(printed).toEqual([]);
+      for (const spy of spies) {
+        expect(spy).not.toHaveBeenCalled();
+      }
+    });
+
+    it("plan sends the three warning lines of an unreadable library to log, not the console", async () => {
+      const projectDir = createProjectDir(tempDir, "myapp", "bin_PROGRAMS = myapp\nmyapp_SOURCES = myapp.cpp\n");
+      const binary = installBuildOutput(projectDir, "myapp", "binary-content");
+      const libBroken = installBuildOutput(projectDir, "libbroken.so", "not a library");
+      mockedListDependencies
+        .mockReturnValueOnce({
+          dependencies: { [libBroken]: [binary] },
+          errors: {},
+          libraryErrors: { [libBroken]: { reason: "Not a recognized library format", inputs: [binary] } },
+        })
+        .mockReturnValue({ dependencies: {}, errors: {}, libraryErrors: {} });
+      const { lines, options } = sink();
+
+      const plan = await pkg.plan([projectDir], { log: options.log });
+
+      expect(plan.ok).toBe(true);
+      expect(lines).toEqual([
+        { line: "Warning: Library could not be read: " + libBroken, level: "warn" },
+        { line: "  Not a recognized library format", level: "warn" },
+        { line: "  Needed by: " + binary, level: "warn" },
+      ]);
+      expect(printed).toEqual([]);
+    });
+
+    it("parseMakefileAm sends its error line to the given log", () => {
+      const emptyDir = path.join(tempDir, "empty");
+      fs.mkdirSync(emptyDir);
+      const { lines, options } = sink();
+
+      expect(pkg.parseMakefileAm(emptyDir, options.log)).toBeNull();
+      expect(lines).toEqual([{ line: "Error: src/Makefile.am not found in " + emptyDir, level: "error" }]);
+      expect(printed).toEqual([]);
+    });
+
+    it("without options prints to the console as before", async () => {
+      const { projectDir, outputDir } = signedProgram();
+      mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
+
+      const result = await pkg.run(outputDir, [projectDir]);
+
+      expect(result.success).toBe(true);
+      expect(printed).toEqual([
+        { line: "Copying myapp...", level: "info" },
+        { line: "Copying myapp.sig...", level: "info" },
+        { line: "Packaged 2 files into " + outputDir + "/ (1 signature included)", level: "info" },
+      ]);
     });
   });
 

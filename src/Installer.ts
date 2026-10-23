@@ -5,6 +5,8 @@ import { createHash } from "crypto";
 import Config from "./Config";
 import { buildWindowsHint } from "./cli/Hints";
 import Package from "./Package";
+import { consoleLog } from "./ToolLog";
+import { InstallerRunOptions, ToolLog } from "./types";
 import { NativeComponentMissingError, requireNativeComponent } from "./NativeComponent";
 import {
   InstallerMetadataError,
@@ -165,28 +167,29 @@ class Installer {
    * Resolves true if dist/ exists and is non-empty after this call.
    */
   async ensureDist(projectDir: string): Promise<boolean> {
-    return (await this.prepareDist(projectDir)) === null;
+    return (await this.prepareDist(projectDir, {})) === null;
   }
 
   /**
-   * Does the work of ensureDist, printing what it reports. Resolves null on success, otherwise the final
-   * message it printed.
+   * Does the work of ensureDist, reporting through `options.log` (the console when omitted) and passing
+   * `options` to the packaging step. Resolves null on success, otherwise the final message it reported.
    */
-  private async prepareDist(projectDir: string): Promise<string | null> {
+  private async prepareDist(projectDir: string, options: InstallerRunOptions): Promise<string | null> {
+    const log = options.log ?? consoleLog;
     const distDir = path.join(projectDir, "dist");
     const fail = (message: string): string => {
-      console.error("Error: " + message);
+      log("Error: " + message, "error");
       return message;
     };
 
     if (!fs.existsSync(distDir)) {
-      console.log("dist/ not found, running package step...");
+      log("dist/ not found, running package step...", "info");
       try {
         const pkg = new Package(this.config);
-        const result = await pkg.run(distDir, [projectDir]);
+        const result = await pkg.run(distDir, [projectDir], options);
         if (!result.success) {
           if (result.message !== null && result.message.startsWith("No installed binaries found for")) {
-            console.error(buildWindowsHint());
+            log(buildWindowsHint(), "error");
           }
           return fail("Packaging failed; no installer was built.");
         }
@@ -291,11 +294,11 @@ ${componentRefs}
    * Returns true on success.
    */
   compileMsi(projectDir: string, wxsPath: string, outputPath: string): boolean {
-    return this.compile(projectDir, wxsPath, outputPath) === null;
+    return this.compile(projectDir, wxsPath, outputPath, consoleLog) === null;
   }
 
-  /** Does the work of compileMsi, printing what it reports. Resolves null on success, otherwise the message it printed. */
-  private compile(projectDir: string, wxsPath: string, outputPath: string): string | null {
+  /** Does the work of compileMsi, reporting through `log`. Resolves null on success, otherwise the message it reported. */
+  private compile(projectDir: string, wxsPath: string, outputPath: string, log: ToolLog): string | null {
     try {
       execFileSync("wixl", ["-v", "-a", "x64", "-o", outputPath, wxsPath], {
         cwd: projectDir,
@@ -313,7 +316,7 @@ ${componentRefs}
       } else {
         message = "Error: wixl compilation failed: " + (err instanceof Error ? err.message : String(err));
       }
-      console.error(message);
+      log(message, "error");
       return message;
     }
   }
@@ -322,11 +325,14 @@ ${componentRefs}
    * Full pipeline: component check → wixl check → metadata → ensure dist → generate → compile.
    * Resolves the path of the installer, or the status and message of the failure; each message is printed
    * once, here. Status 2 is for something missing or unusable, 1 for packaging or compilation that failed.
+   * Every line goes to `options.log` with the level of the console method it would use, and the packaging
+   * step gets the same options; without options everything goes to the console as before.
    */
-  async run(projectDir: string): Promise<InstallerRunResult> {
+  async run(projectDir: string, options: InstallerRunOptions = {}): Promise<InstallerRunResult> {
+    const log = options.log ?? consoleLog;
     const failure = (status: 1 | 2, message: string, printed = false): InstallerRunResult => {
       if (!printed) {
-        console.error(message);
+        log(message, "error");
       }
       return { ok: false, status, message };
     };
@@ -352,11 +358,11 @@ ${componentRefs}
       return failure(2, "Error: " + metadata.message);
     }
     for (const note of metadata.notes) {
-      console.log(note);
+      log(note, "info");
     }
 
     // Step 3: Ensure dist/ directory
-    const distFailure = await this.prepareDist(projectDir);
+    const distFailure = await this.prepareDist(projectDir, options);
     if (distFailure !== null) {
       return failure(1, distFailure, true);
     }
@@ -365,7 +371,7 @@ ${componentRefs}
     const files = this.listDistFiles(projectDir);
 
     // Step 5: Generate .wxs file
-    console.log("Generating WiX XML source...");
+    log("Generating WiX XML source...", "info");
     let wxsPath: string;
     try {
       wxsPath = this.generateWxs(projectDir, metadata.config, files);
@@ -375,19 +381,19 @@ ${componentRefs}
       }
       throw err;
     }
-    console.log("Generated: " + path.basename(wxsPath));
+    log("Generated: " + path.basename(wxsPath), "info");
 
     // Step 6: Invoke wixl
     const msiFilename = `${metadata.config.productName}-${metadata.config.packageVersion}.msi`;
     const msiPath = path.join(projectDir, msiFilename);
-    console.log("Compiling MSI installer...");
-    const compileError = this.compile(projectDir, wxsPath, msiPath);
+    log("Compiling MSI installer...", "info");
+    const compileError = this.compile(projectDir, wxsPath, msiPath, log);
     if (compileError !== null) {
       return failure(1, compileError, true);
     }
 
     // Step 7: Success
-    console.log("Installer created: " + msiFilename);
+    log("Installer created: " + msiFilename, "info");
     return { ok: true, msiPath };
   }
 }

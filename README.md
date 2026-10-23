@@ -1059,7 +1059,7 @@ The package declares these modules as its public surface:
 | `@metaverse-systems/the-seed` | The entry point: the classes, error types and type declarations listed in this reference |
 | `@metaverse-systems/the-seed/Build` | `Build`, the build target table and the strip-tool helpers |
 | `@metaverse-systems/the-seed/Config` | `Config` and `ConfigError` |
-| `@metaverse-systems/the-seed/Dependencies` | The dependency checks and installers for libecs-cpp and libthe-seed |
+| `@metaverse-systems/the-seed/Dependencies` | The dependency checks and installers for libecs-cpp and libthe-seed, and `runInstallSteps` |
 | `@metaverse-systems/the-seed/DependencyWalker` | `walkDependencies` and the dependency discovery errors |
 | `@metaverse-systems/the-seed/Hints` | The hint texts that follow command-line messages |
 | `@metaverse-systems/the-seed/Installer` | `Installer` and its configuration and result types |
@@ -1121,11 +1121,11 @@ Resolves project binaries and their shared library dependencies for packaging.
 | `constructor(config)` | | `config` supplies the prefix and target paths |
 | `config` | `Config` | The Config instance |
 | `getSearchPaths()` | `string[]` | Return library search paths for the current target |
-| `parseMakefileAm(projectDir)` | `{ type: "program" \| "library"; name: string } \| null` | Parse the project's src/Makefile.am for binary type and name |
-| `resolveBinaryPaths(projectDir)` | `string[]` | Resolve compiled binary paths from src/.libs/; a native library is the real file behind `<name>.so`, which packaging writes under its soname |
+| `parseMakefileAm(projectDir, log?)` | `{ type: "program" \| "library"; name: string } \| null` | Parse the project's src/Makefile.am for binary type and name; its error lines go to `log`, the console when omitted |
+| `resolveBinaryPaths(projectDir, log?)` | `string[]` | Resolve compiled binary paths from src/.libs/; a native library is the real file behind `<name>.so`, which packaging writes under its soname |
 | `resolveDependencies(binaryPaths, searchPaths)` | `DependencyResultType` | Analyze shared library dependencies using the native component |
-| `plan(projectDirs)` | `Promise<PackagePlan>` | Decide what packaging would write, naming each file, its source, its signature and its origin, without writing anything; a refusal is `{ ok: false, message }` |
-| `run(outputDir, projectDirs)` | `Promise<PackageResult>` | Execute the full packaging workflow; a refusal or failure is printed, writes nothing and resolves `success: false` |
+| `plan(projectDirs, options?)` | `Promise<PackagePlan>` | Decide what packaging would write, naming each file, its source, its signature and its origin, without writing anything; a refusal is `{ ok: false, message }`; its warnings go to `options.log`, the console when omitted |
+| `run(outputDir, projectDirs, options?)` | `Promise<PackageResult>` | Execute the full packaging workflow; a refusal or failure is printed, writes nothing and resolves `success: false` |
 
 #### Build
 
@@ -1152,7 +1152,9 @@ Builds a Windows installer from a project's `dist/` directory.
 | `ensureDist(projectDir)` | `Promise<boolean>` | Create `dist/` by packaging when it does not exist; false when packaging was refused |
 | `generateWxs(projectDir, config, files)` | `string` | The WiX description for the given files, every value escaped |
 | `compileMsi(projectDir, wxsPath, outputPath)` | `boolean` | Compile the description with `wixl` |
-| `run(projectDir)` | `Promise<InstallerRunResult>` | The whole workflow: `{ ok: true, msiPath }`, or `{ ok: false, status, message }` where `status` is 2 for something missing or unusable and 1 for a packaging or compilation failure; the message has been printed |
+| `run(projectDir, options?)` | `Promise<InstallerRunResult>` | The whole workflow: `{ ok: true, msiPath }`, or `{ ok: false, status, message }` where `status` is 2 for something missing or unusable and 1 for a packaging or compilation failure; the message has been printed |
+
+`run` and `Package.run` take an optional `{ log, onCopy }` that receives every line they print, and each file they write, instead of the console.
 
 `InstallerMetadataError` (thrown by the metadata functions, whose message names the value) extends `Error`.
 
@@ -1605,6 +1607,24 @@ interface SignOptions {
     scope?: string;
     detached?: boolean;
 }
+
+type ToolLogLevel = "info" | "warn" | "error";
+
+type ToolLog = (line: string, level: ToolLogLevel) => void;
+
+interface PackageCopyEvent {
+    name: string;
+    source: string;
+    index: number;
+    total: number;
+}
+
+interface PackageRunOptions {
+    log?: ToolLog;
+    onCopy?: (event: PackageCopyEvent) => void;
+}
+
+type InstallerRunOptions = PackageRunOptions;
 ```
 
 ### Import Example

@@ -2,6 +2,25 @@
 
 Versions before 2.0.0 have no release notes.
 
+## 2.1.0 — 2026-10-23
+
+This release adds to the library interface only; the command line is unchanged. It requires libecs-cpp 2.1.0 and libthe-seed 0.8.0 or later, as 2.0.0 did.
+
+### Actions required
+
+None.
+
+### Command-line changes
+
+None. Every command prints the same text to the same streams, with the same exit status, as in 2.0.0.
+
+### Library and extension interface changes
+
+- `Package.run(outputDir, projectDirs, options?)` and `Installer.run(projectDir, options?)` take an optional `PackageRunOptions` (`InstallerRunOptions` for the installer, the same shape). Its `log` (a `ToolLog`, called with each line and its `ToolLogLevel`: `"info"`, `"warn"` or `"error"`) receives every line they print, at the level of the console method they would use, and its `onCopy` receives a `PackageCopyEvent` (`name`, `source`, `index`, `total`) after each file and each signature is written. The installer passes the same options to the packaging it runs when `dist/` is missing. Without options both print to the console as before.
+- `Package.plan(projectDirs, options?)`, `Package.parseMakefileAm(projectDir, log?)` and `Package.resolveBinaryPaths(projectDir, log?)` send their warning and error lines to the given log.
+- `@metaverse-systems/the-seed/Dependencies` exports `runInstallSteps`. Called as `runInstallSteps(steps, options)`, it runs install steps in order from `options.baseDir`, passes their output to `options.output` as it arrives, sends progress lines to `options.log`, stops the running step and its process group when `options.signal` is aborted, and calls `options.onStepStart` before each step. Its options are `InstallStepsOptions`, and it resolves an `InstallStepsResult`: `completed`, `failed` with the step and message, or `cancelled`. `the-seed dependencies install` uses it, with unchanged output.
+- The new types are exported from the entry point and from `@metaverse-systems/the-seed/types` (`InstallStepsOptions` and `InstallStepsResult` from the entry point and `@metaverse-systems/the-seed/Dependencies`).
+
 ## 2.0.0 — 2026-10-21
 
 This release changes exit statuses, removes a command and removes or reshapes library interfaces, so its major version changes. It requires libecs-cpp 2.1.0 and libthe-seed 0.8.0 or later, as 1.12.0 did.

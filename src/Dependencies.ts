@@ -91,6 +91,82 @@ const getLibrarySteps = (name: string, repo: string, installDir: string, prefix:
   ];
 };
 
+/** How runInstallSteps runs its steps and where it reports. */
+export interface InstallStepsOptions {
+  /** The directory the steps' relative working directories resolve against */
+  baseDir: string;
+  /** Receives each step's output as it arrives; the tool's own streams when omitted */
+  output?: { stdout(chunk: Buffer): void; stderr(chunk: Buffer): void };
+  /** Receives each progress line; console.log when omitted */
+  log?: (line: string) => void;
+  /** Stops the running step and starts no other */
+  signal?: AbortSignal;
+  /** Called before each step; `index` is 0-based */
+  onStepStart?(step: BuildStep, index: number, total: number): void;
+}
+
+/** How runInstallSteps ended. */
+export type InstallStepsResult =
+  | { status: "completed" }
+  | { status: "failed"; step: string; message: string }
+  | { status: "cancelled" };
+
+/** The tool's own standard output and standard error. */
+const ownOutput = {
+  stdout: (chunk: Buffer) => {
+    process.stdout.write(chunk);
+  },
+  stderr: (chunk: Buffer) => {
+    process.stderr.write(chunk);
+  },
+};
+
+/**
+ * Runs install steps in order, each preceded by `==> <label>: <command>`, passing their output on as it
+ * arrives without keeping it. Stops at the first step that fails, naming it; an aborted signal stops the
+ * running step (and its process group) and starts no other. A failing step marked ignoreExitCode is
+ * logged as ignored and the run carries on.
+ */
+export const runInstallSteps = async (steps: BuildStep[], options: InstallStepsOptions): Promise<InstallStepsResult> => {
+  const log = options.log ?? ((line: string) => console.log(line));
+  const output = options.output ?? ownOutput;
+
+  for (let index = 0; index < steps.length; index++) {
+    if (options.signal?.aborted) {
+      return { status: "cancelled" };
+    }
+    const step = steps[index];
+    options.onStepStart?.(step, index, steps.length);
+    const text = stepText(step);
+    log(`==> ${step.label}: ${text}`);
+
+    const outcome = await runStep(step, {
+      baseDir: options.baseDir,
+      signal: options.signal,
+      output: { mode: "stream", output },
+    });
+
+    switch (outcome.status) {
+      case "interrupted":
+        return { status: "cancelled" };
+      case "notFound":
+        return { status: "failed", step: step.label, message: outcome.message };
+      case "failed":
+        return {
+          status: "failed",
+          step: step.label,
+          message: outcome.exitCode === null ? `${text} was ended by ${outcome.signal}` : `${text} exited with status ${outcome.exitCode}`,
+        };
+      case "ignored":
+        log(`${step.label} exited with status ${outcome.exitCode}; ignored.`);
+        break;
+      case "completed":
+        break;
+    }
+  }
+  return { status: "completed" };
+};
+
 /**
  * Fetches, builds and installs one library into the target's prefix, showing
  * its output as it arrives. Stops at the first step that does not complete and
@@ -104,42 +180,32 @@ export const installLib = async (
   options: { jobs?: number } = {}
 ) => {
   const prefix = config.config.prefix + "/" + targets[target];
-  const output = {
-    stdout: (chunk: Buffer) => {
-      process.stdout.write(chunk);
+  const steps = getLibrarySteps(installDir, repo, installDir, prefix, target, options.jobs ?? processorCount(), librarySearchEnv(config.config.prefix, target, process.env));
+
+  let current: BuildStep | null = null;
+  const result = await runInstallSteps(steps, {
+    baseDir: process.cwd(),
+    output: ownOutput,
+    onStepStart: (step) => {
+      current = step;
     },
-    stderr: (chunk: Buffer) => {
-      process.stderr.write(chunk);
-    },
-  };
+  });
 
-  for (const step of getLibrarySteps(installDir, repo, installDir, prefix, target, options.jobs ?? processorCount(), librarySearchEnv(config.config.prefix, target, process.env))) {
-    const text = stepText(step);
-    console.log(`==> ${step.label}: ${text}`);
-
-    const outcome = await runStep(step, {
-      baseDir: process.cwd(),
-      output: { mode: "stream", output },
-    });
-
-    let message: string | undefined;
-    switch (outcome.status) {
-      case "failed":
-        message = outcome.exitCode === null ? `${text} was ended by ${outcome.signal}` : `${text} exited with status ${outcome.exitCode}`;
-        break;
-      case "notFound":
-        message = outcome.message;
-        break;
-      case "interrupted":
-        message = `${text} was interrupted`;
-        break;
-    }
-    if (message !== undefined) {
-      console.error(`Failed at ${step.label}: ${message}`);
+  switch (result.status) {
+    case "completed":
+      return true;
+    case "failed":
+      console.error(`Failed at ${result.step}: ${result.message}`);
+      return false;
+    case "cancelled": {
+      // No signal is passed, so this only arises when the step runner reports the step as interrupted
+      const step = current as BuildStep | null;
+      if (step !== null) {
+        console.error(`Failed at ${step.label}: ${stepText(step)} was interrupted`);
+      }
       return false;
     }
   }
-  return true;
 };
 
 /**
