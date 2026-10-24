@@ -14,8 +14,9 @@
  * - The library lists run with `pkg-config` answering "not found" (the one `spawnSync` of
  *   `child_process` is replaced), so both libraries are missing whatever is installed on the
  *   machine.
- * - The clone directories are relative names, so the cases that need an existing one run inside a
- *   scratch working directory and restore the previous one afterwards.
+ * - The clone directories are relative names resolved against the configured prefix, where the
+ *   install steps run. The cases run inside a scratch working directory that is not the prefix, so
+ *   a directory there and not in the prefix counts as absent.
  * - In the unit cases the label of a step with a prefix is `<prefix> <label>`, including the
  *   `distclean` step; the environment goes on the configure step only.
  */
@@ -126,6 +127,7 @@ describe("step lists (guard)", () => {
           ? { label: `update ${name}`, program: "git", args: ["-C", dir, "pull", "--ff-only"] }
           : { label: `clone ${name}`, program: "git", args: ["clone", repo, dir] },
         { label: `${name} autogen`, program: "./autogen.sh", args: [], cwd: dir },
+        ...(existing ? [{ label: `${name} distclean`, program: "make", args: ["distclean"], cwd: dir, ignoreExitCode: true }] : []),
         {
           label: `${name} configure`,
           program: "./configure",
@@ -145,14 +147,22 @@ describe("step lists (guard)", () => {
 
     it.each(["native", "windows"] as const)("%s, with both clone directories present", (target) => {
       for (const lib of libraries) {
-        fs.mkdirSync(path.join(process.cwd(), lib.name));
+        fs.mkdirSync(path.join(prefix, lib.name), { recursive: true });
       }
       const expected = libraries.flatMap((lib) => library(lib.name, lib.repo, target, true));
       expect(getInstallSteps(config, target, 3, inherited)).toEqual(expected);
     });
 
+    it.each(["native", "windows"] as const)("%s, with both clone directories in the working directory only", (target) => {
+      for (const lib of libraries) {
+        fs.mkdirSync(path.join(process.cwd(), lib.name));
+      }
+      const expected = libraries.flatMap((lib) => library(lib.name, lib.repo, target, false));
+      expect(getInstallSteps(config, target, 3, inherited)).toEqual(expected);
+    });
+
     it.each(["native", "windows"] as const)("%s, with only the first clone directory present", (target) => {
-      fs.mkdirSync(path.join(process.cwd(), libraries[0].name));
+      fs.mkdirSync(path.join(prefix, libraries[0].name), { recursive: true });
       const expected = [
         ...library(libraries[0].name, libraries[0].repo, target, true),
         ...library(libraries[1].name, libraries[1].repo, target, false),

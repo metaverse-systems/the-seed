@@ -742,6 +742,59 @@ describe("test Dependencies", () => {
     });
   });
 
+  describe("plan computed outside the prefix", () => {
+    let scratch: string;
+    let prefixed: Config;
+    let originalCwd: string;
+
+    beforeEach(() => {
+      // No library is installed: every pkg-config query fails
+      mockedSpawnSync.mockReturnValue(ran(1, ""));
+      scratch = fs.realpathSync(createTempDir());
+      const configDir = path.join(scratch, "config");
+      fs.mkdirSync(configDir);
+      fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(scratch, "prefix"), scopes: {} }));
+      prefixed = new Config(configDir);
+      fs.mkdirSync(path.join(scratch, "elsewhere"));
+      originalCwd = process.cwd();
+      process.chdir(path.join(scratch, "elsewhere"));
+    });
+
+    afterEach(() => {
+      process.chdir(originalCwd);
+      fs.rmSync(scratch, { recursive: true, force: true });
+    });
+
+    const labels = (target: string) => getInstallSteps(prefixed, target).map((step) => step.label);
+
+    it.each(["native", "windows"])("%s: pulls and cleans a clone present in the prefix", (target) => {
+      fs.mkdirSync(path.join(prefixed.config.prefix, "libecs-cpp"), { recursive: true });
+      const steps = getInstallSteps(prefixed, target);
+      expect(steps.map((step) => step.label)).toEqual([
+        "update libecs-cpp", "libecs-cpp autogen", "libecs-cpp distclean", "libecs-cpp configure", "libecs-cpp compile", "libecs-cpp install",
+        "clone libthe-seed", "libthe-seed autogen", "libthe-seed configure", "libthe-seed compile", "libthe-seed install",
+      ]);
+      expect(steps[0]).toEqual({ label: "update libecs-cpp", program: "git", args: ["-C", "libecs-cpp", "pull", "--ff-only"] });
+      expect(steps[2]).toEqual({ label: "libecs-cpp distclean", program: "make", args: ["distclean"], cwd: "libecs-cpp", ignoreExitCode: true });
+    });
+
+    it("clones a library absent from the prefix even when the working directory holds it", () => {
+      fs.mkdirSync(path.join(process.cwd(), "libecs-cpp"));
+      fs.mkdirSync(path.join(process.cwd(), "libthe-seed"));
+      expect(labels("windows")).toEqual([
+        "clone libecs-cpp", "libecs-cpp autogen", "libecs-cpp configure", "libecs-cpp compile", "libecs-cpp install",
+        "clone libthe-seed", "libthe-seed autogen", "libthe-seed configure", "libthe-seed compile", "libthe-seed install",
+      ]);
+    });
+
+    it("gives the same plan from the prefix as from elsewhere", () => {
+      fs.mkdirSync(path.join(prefixed.config.prefix, "libthe-seed"), { recursive: true });
+      const fromElsewhere = getInstallSteps(prefixed, "windows");
+      process.chdir(prefixed.config.prefix);
+      expect(getInstallSteps(prefixed, "windows")).toEqual(fromElsewhere);
+    });
+  });
+
   describe("existing clone directory", () => {
     let existsSpy: jest.SpyInstance;
     let errorSpy: jest.SpyInstance;
@@ -777,8 +830,11 @@ describe("test Dependencies", () => {
       const steps = mockedRunStep.mock.calls.map((call) => call[0]);
       const pull = steps.findIndex((step) => step.program === "git" && step.args.join(" ") === "-C test-dir pull --ff-only");
       const build = steps.findIndex((step) => step.program === "./configure");
+      const distclean = steps.findIndex((step) => step.label === "test-dir distclean");
       expect(pull).toBe(0);
-      expect(build).toBeGreaterThan(pull);
+      expect(distclean).toBeGreaterThan(pull);
+      expect(steps[distclean]).toMatchObject({ program: "make", args: ["distclean"], cwd: "test-dir", ignoreExitCode: true });
+      expect(build).toBeGreaterThan(distclean);
       expect(steps.some((step) => step.args[0] === "clone")).toBe(false);
     });
 

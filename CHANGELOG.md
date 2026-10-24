@@ -4,7 +4,7 @@ Versions before 2.0.0 have no release notes.
 
 ## 2.1.0 — 2026-10-23
 
-This release adds to the library interface only; the command line is unchanged. It requires libecs-cpp 2.1.0 and libthe-seed 0.8.0 or later, as 2.0.0 did.
+This release adds to the library interface and fixes the dependency install; the command line is otherwise unchanged. It requires libecs-cpp 2.1.0 and libthe-seed 0.8.0 or later, as 2.0.0 did.
 
 ### Actions required
 
@@ -12,13 +12,16 @@ None.
 
 ### Command-line changes
 
-None. Every command prints the same text to the same streams, with the same exit status, as in 2.0.0.
+Every command prints the same text to the same streams, with the same exit status, as in 2.0.0, except for this fix:
+
+- Fix: `dependencies install` cleans a library's existing clone with `make distclean` (exit status ignored, printed as `==> <library> distclean: make distclean`) before configuring it, so installing one target after the other no longer reuses the first target's objects.
 
 ### Library and extension interface changes
 
 - `Package.run(outputDir, projectDirs, options?)` and `Installer.run(projectDir, options?)` take an optional `PackageRunOptions` (`InstallerRunOptions` for the installer, the same shape). Its `log` (a `ToolLog`, called with each line and its `ToolLogLevel`: `"info"`, `"warn"` or `"error"`) receives every line they print, at the level of the console method they would use, and its `onCopy` receives a `PackageCopyEvent` (`name`, `source`, `index`, `total`) after each file and each signature is written. The installer passes the same options to the packaging it runs when `dist/` is missing. Without options both print to the console as before.
 - `Package.plan(projectDirs, options?)`, `Package.parseMakefileAm(projectDir, log?)` and `Package.resolveBinaryPaths(projectDir, log?)` send their warning and error lines to the given log.
 - `@metaverse-systems/the-seed/Dependencies` exports `runInstallSteps`. Called as `runInstallSteps(steps, options)`, it runs install steps in order from `options.baseDir`, passes their output to `options.output` as it arrives, sends progress lines to `options.log`, stops the running step and its process group when `options.signal` is aborted, and calls `options.onStepStart` before each step. Its options are `InstallStepsOptions`, and it resolves an `InstallStepsResult`: `completed`, `failed` with the step and message, or `cancelled`. `the-seed dependencies install` uses it, with unchanged output.
+- Fix: `getInstallSteps(config, target)` decides whether a library's clone exists in the configured prefix, where its steps run, instead of in the caller's working directory, so a caller running elsewhere (the editor extension) gets `git pull` for an existing clone instead of a `git clone` that fails. An existing clone gets a `<library> distclean` step (exit status ignored) before its configure step.
 - `Signing.formatSubject(subject)` is public: `formatSubject` gives the subject text the command line prints. `_formatSubject` is deprecated and returns the same text.
 - The prompt methods (`Config.getQuestions`, `Scopes.askWhichScope`, `askNewScope`, `askEditScope`, `getQuestions`, `ResourcePak.askName`, `Template.askName`) return `PromptQuestion[]`; `PromptQuestion` is a type exported from the entry point and `@metaverse-systems/the-seed/types`. Their prompts are unchanged.
 - `@metaverse-systems/the-seed/Config` (and the entry point) exports `configFilePath`: `configFilePath(configDir?)` returns the configuration file's location, without reading or creating it. `Config.configPath` has the same value.

@@ -1,4 +1,5 @@
 import fs from "fs";
+import path from "path";
 import Config from "./Config";
 import { spawnSync } from "child_process";
 import { targets } from "./Build";
@@ -72,10 +73,15 @@ export const installLibTheSeed = async (config: Config, target: string) => {
 /**
  * The steps that fetch and install one library: clone it, or update the
  * existing clone, then autogen, configure, compile and install inside it.
+ * Whether the clone exists is decided in `baseDir`, the directory the steps
+ * run from, so the plan does not depend on the caller's working directory.
+ * An existing clone may hold another target's build, so it is cleaned with
+ * `make distclean` (exit status ignored) before it is configured.
  */
-const getLibrarySteps = (name: string, repo: string, installDir: string, prefix: string, target: string, jobs: number, search: Record<string, string>): BuildStep[] => {
+const getLibrarySteps = (name: string, repo: string, installDir: string, baseDir: string, prefix: string, target: string, jobs: number, search: Record<string, string>): BuildStep[] => {
+  const existing = fs.existsSync(path.resolve(baseDir, installDir));
   return [
-    fs.existsSync(installDir)
+    existing
       ? { label: `update ${name}`, program: "git", args: ["-C", installDir, "pull", "--ff-only"] }
       : { label: `clone ${name}`, program: "git", args: ["clone", repo, installDir] },
     ...autotoolsSteps({
@@ -84,7 +90,7 @@ const getLibrarySteps = (name: string, repo: string, installDir: string, prefix:
       jobs,
       env: search,
       reconfigure: true,
-      distclean: false,
+      distclean: existing,
       cwd: installDir,
       labelPrefix: name,
     }),
@@ -180,11 +186,12 @@ export const installLib = async (
   options: { jobs?: number } = {}
 ) => {
   const prefix = config.config.prefix + "/" + targets[target];
-  const steps = getLibrarySteps(installDir, repo, installDir, prefix, target, options.jobs ?? processorCount(), librarySearchEnv(config.config.prefix, target, process.env));
+  const baseDir = process.cwd();
+  const steps = getLibrarySteps(installDir, repo, installDir, baseDir, prefix, target, options.jobs ?? processorCount(), librarySearchEnv(config.config.prefix, target, process.env));
 
   let current: BuildStep | null = null;
   const result = await runInstallSteps(steps, {
-    baseDir: process.cwd(),
+    baseDir,
     output: ownOutput,
     onStepStart: (step) => {
       current = step;
@@ -212,6 +219,10 @@ export const installLib = async (
  * Returns an ordered array of BuildStep objects for installing missing libraries.
  * Checks which libraries are missing and generates clone + build steps for each.
  * Order: libecs-cpp first, then libthe-seed (compile-time dependency).
+ * The steps' working directories are relative to the configured prefix
+ * (`config.config.prefix`), so they are run with that as `baseDir`; whether a
+ * library's clone already exists is decided there too, whatever the caller's
+ * working directory.
  */
 export const getInstallSteps = (config: Config, target: string, jobs: number = processorCount(), inherited: NodeJS.ProcessEnv = process.env): BuildStep[] => {
   const targetDir = targets[target];
@@ -229,7 +240,7 @@ export const getInstallSteps = (config: Config, target: string, jobs: number = p
       continue;
     }
 
-    steps.push(...getLibrarySteps(lib.name, lib.repo, lib.installDir, prefix, target, jobs, librarySearchEnv(config.config.prefix, target, inherited)));
+    steps.push(...getLibrarySteps(lib.name, lib.repo, lib.installDir, config.config.prefix, prefix, target, jobs, librarySearchEnv(config.config.prefix, target, inherited)));
   }
 
   return steps;
