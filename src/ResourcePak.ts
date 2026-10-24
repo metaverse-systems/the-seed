@@ -3,7 +3,7 @@ import fs from "fs-extra";
 import path from "path";
 import Config from "./Config";
 import Scopes from "./Scopes";
-import { PackageAuthorType, PackageType, PakProjectType, ResourceType } from "./types";
+import { PackageAuthorType, PackageType, PakProjectType, PromptQuestion, ResourceType } from "./types";
 import { ProjectError } from "./ProjectError";
 import { validateProjectName } from "./ProjectName";
 import { createPakHint, editScopeHint, replaceResourceHint } from "./cli/Hints";
@@ -17,7 +17,7 @@ class ResourcePak {
     this.scopes = new Scopes(config);
   }
 
-  askName() {
+  askName(): PromptQuestion[] {
     return [
       {
         "type": "list",

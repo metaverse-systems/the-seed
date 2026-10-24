@@ -1,4 +1,4 @@
-import Config from "./Config";
+import Config, { configFilePath } from "./Config";
 import Scopes, { ScopeNameError, validateScopeName } from "./Scopes";
 import Package from "./Package";
 import Build from "./Build";
@@ -14,13 +14,14 @@ import { NativeComponentMissingError, nativeComponentMessage } from "./NativeCom
 import { readElfNames } from "./ElfNames";
 import type { ElfNames } from "./ElfNames";
 import { InstallerConfig } from "./Installer";
-import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, PackageAuthorType, PakProjectType, DependencyResultType, BuildStep, CertSubject, CertOptions, CertInfo, SignResult, DirectorySignResult, VerifyStatus, VerifyResult, DirectoryVerifyResult, SigFileFormat, SigningManifestFormat, SigningManifestEntry, SignatureForm, IntegrityState, IntegrityResult, TrustAnchor, TrustedCertificates, TrustState, UntrustedReason, TrustResult, MachOSliceResult, VerifyOptions, DirectoryFileResult, PlannedFile, UnpackagedLibrary, PackagePlan, PackageResult, SignatureType, BinaryFormat, FormatDetectionResult, SignOptions, ToolLogLevel, ToolLog, PackageCopyEvent, PackageRunOptions, InstallerRunOptions } from "./types";
+import { AuthorType, ConfigType, ScopeType, ScopesType, ScopeAnswersType, ScopeDefaultsType, ResourceType, PackageType, PackageAuthorType, PakProjectType, DependencyResultType, BuildStep, CertSubject, CertOptions, CertInfo, SignResult, DirectorySignResult, VerifyStatus, VerifyResult, DirectoryVerifyResult, SigFileFormat, SigningManifestFormat, SigningManifestEntry, SignatureForm, IntegrityState, IntegrityResult, TrustAnchor, TrustedCertificates, TrustState, UntrustedReason, TrustResult, MachOSliceResult, VerifyOptions, DirectoryFileResult, PlannedFile, UnpackagedLibrary, PackagePlan, PackageResult, SignatureType, BinaryFormat, FormatDetectionResult, SignOptions, ToolLogLevel, ToolLog, PackageCopyEvent, PackageRunOptions, InstallerRunOptions, PromptQuestion } from "./types";
 import type { InstallStepsOptions, InstallStepsResult } from "./Dependencies";
 import { DependencyDiscoveryError, CyclicDependencyError, ConflictingProjectError, ProjectManifestError, DiscoveryCancelledError } from "./DependencyWalker";
 
 export {
   SigningError,
   Config,
+  configFilePath,
   Scopes,
   ScopeNameError,
   validateScopeName,
@@ -89,6 +90,7 @@ export {
   PackageCopyEvent,
   PackageRunOptions,
   InstallerRunOptions,
+  PromptQuestion,
   InstallStepsOptions,
   InstallStepsResult,
   DependencyDiscoveryError,

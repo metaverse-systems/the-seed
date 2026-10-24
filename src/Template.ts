@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import Config from "./Config";
 import Scopes from "./Scopes";
-import { PackageAuthorType, PackageType } from "./types";
+import { PackageAuthorType, PackageType, PromptQuestion } from "./types";
 import { ProjectError } from "./ProjectError";
 import { toIdentifier, validateProjectName } from "./ProjectName";
 import { REQUIRED_VERSIONS } from "./RequiredVersions";
@@ -41,7 +41,7 @@ class Template {
     this.scopes = new Scopes(config);
   }
 
-  askName() {
+  askName(): PromptQuestion[] {
     return [
       {
         "type": "list",

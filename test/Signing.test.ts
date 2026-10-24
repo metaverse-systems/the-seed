@@ -13,6 +13,7 @@ import * as Index from "../src/index";
 import { addScopeHint, createCertHint, editScopeHint, replaceCertHint } from "../src/cli/Hints";
 import {
   CertInfo,
+  CertSubject,
   SigFileFormat,
   SigningManifestFormat,
 } from "../src/types";
@@ -487,6 +488,36 @@ describe("Signing", () => {
     it("formats subject without optional fields", () => {
       const result = signing._formatSubject({ commonName: "Jane" });
       expect(result).toBe("CN=Jane");
+    });
+  });
+
+  // ── formatSubject ──────────────────────────────────────────
+
+  describe("formatSubject", () => {
+    /** `formatSubject` is looked up when the case runs, so this file compiles before the method is public. */
+    function formatSubject(subject: CertSubject): string {
+      const method = (signing as unknown as { formatSubject?: (subject: CertSubject) => string }).formatSubject;
+      if (typeof method !== "function") {
+        throw new Error("Signing.formatSubject is not defined");
+      }
+      return method.call(signing, subject);
+    }
+
+    const cases: [string, CertSubject, string][] = [
+      ["all three fields", { commonName: "a", email: "b", organization: "c" }, "CN=a, EMAIL=b, O=c"],
+      ["the common name only", { commonName: "a" }, "CN=a"],
+      ["the email only", { commonName: "", email: "b" }, "EMAIL=b"],
+      ["the organization only", { commonName: "", organization: "c" }, "O=c"],
+      ["no fields", { commonName: "" }, ""],
+    ];
+
+    it.each(cases)("formats a subject with %s", (_title, subject, expected) => {
+      expect(formatSubject(subject)).toBe(expected);
+    });
+
+    it.each(cases)("gives the same text through the deprecated _formatSubject for a subject with %s", (_title, subject, expected) => {
+      expect(signing._formatSubject(subject)).toBe(expected);
+      expect(signing._formatSubject(subject)).toBe(formatSubject(subject));
     });
   });
 });

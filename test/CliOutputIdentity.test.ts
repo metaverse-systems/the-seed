@@ -3,6 +3,11 @@
  * 2.0.0 sources; the other command-line cases for `package` and `installer windows` keep pinning their
  * own texts.
  *
+ * `the-seed signing cert-info` and `the-seed signing verify` print exactly what they printed before the
+ * subject formatter became public. Their expected texts were recorded with the sources of f62b796; the
+ * fingerprint, the validity dates and the scratch paths change with every run and are filled in from the
+ * certificate and the scratch directory, while every other character is written out.
+ *
  * Choices where the contract is open:
  * - The command runs in-process through runTheSeed with a scratch home and configuration, and the
  *   native component's dependency lister is replaced, as in Package.test.ts.
@@ -14,6 +19,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { targets } from "../src/Build";
+import Signing from "../src/Signing";
 import { DependencyResultType } from "../src/types";
 import { elfImage } from "./helpers/ElfImage";
 import { runTheSeed } from "./helpers/RunCli";
@@ -75,5 +81,79 @@ describe("the-seed package output", () => {
       "  libc.so.6 (needed by hello)\n"
     );
     expect(fs.readdirSync(outputDir).sort()).toEqual(["hello", "hello.sig", "libbar.so.2"]);
+  });
+});
+
+describe("the-seed signing output", () => {
+  let root: string;
+  let configDir: string;
+  let signing: Signing;
+
+  /** The day of a date as the command line prints it. */
+  function day(date: Date): string {
+    return date.toISOString().slice(0, 10);
+  }
+
+  beforeEach(async () => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cli-output-identity-")));
+    configDir = path.join(root, "config");
+    fs.mkdirSync(configDir);
+    const scopes = { "@ident": { author: { name: "Ida Entity", email: "ida@example.com", url: "" } } };
+    fs.writeFileSync(path.join(configDir, "config.json"), JSON.stringify({ prefix: path.join(root, "prefix"), scopes }));
+    signing = new Signing(configDir);
+    await signing.createCert({ scope: "@ident", validityDays: 365 });
+  });
+
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("prints the earlier text for cert-info, with status 0 and nothing on standard error", async () => {
+    const info = signing.getCertInfo("@ident");
+    if (!info) {
+      throw new Error("the scratch certificate was not created");
+    }
+
+    const run = await runTheSeed(["signing", "cert-info", "--scope", "@ident"], { home: root, configDir, cwd: root });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(run.stdout).toBe(
+      "Signing Certificate:\n" +
+      "  Subject:     CN=Ida Entity, EMAIL=ida@example.com, O=@ident\n" +
+      "  Issuer:      self-signed\n" +
+      "  Fingerprint: " + info.fingerprint + "\n" +
+      "  Key Type:    ECDSA P-256\n" +
+      "  Valid:        " + day(info.notBefore) + " to " + day(info.notAfter) + "\n" +
+      "  Status:      Active\n" +
+      "  Location:    " + path.join(configDir, "signing", "@ident", "cert.pem") + "\n"
+    );
+  });
+
+  it("prints the earlier text for verify of a signed file, with status 0 and nothing on standard error", async () => {
+    const info = signing.getCertInfo("@ident");
+    if (!info) {
+      throw new Error("the scratch certificate was not created");
+    }
+    const file = path.join(root, "program.bin");
+    fs.writeFileSync(file, Buffer.from([0x7f, 0x00, 0x01, 0x02, 0xff, 0xfe, 0x00, 0x10]));
+    await signing.signFile(file, { scope: "@ident" });
+
+    const run = await runTheSeed(["signing", "verify", file], { home: root, configDir, cwd: root });
+
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe("");
+    expect(run.stdout).toBe(
+      "Verification: VALID \u2713\n" +
+      "  File:        " + file + "\n" +
+      "  Form:        detached (program.bin.sig)\n" +
+      "  Integrity:   intact (signature over the whole file)\n" +
+      "  Trust:       trusted: certificate of scope @ident\n" +
+      "  Signer:      CN=Ida Entity, EMAIL=ida@example.com, O=@ident\n" +
+      "  Issuer:      self-signed\n" +
+      "  Fingerprint: " + info.fingerprint + "\n" +
+      "  Valid:       " + day(info.notBefore) + " to " + day(info.notAfter) + "\n" +
+      "  Not checked: certificate chains, revocation, signing time, acceptance by the platform's own verifier\n"
+    );
   });
 });

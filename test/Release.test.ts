@@ -219,6 +219,9 @@ const RELEASE_2_1_0_NAMES = [
   "runInstallSteps",
   "InstallStepsOptions",
   "InstallStepsResult",
+  "formatSubject",
+  "PromptQuestion",
+  "configFilePath",
 ];
 
 describe("release 2.1.0", () => {

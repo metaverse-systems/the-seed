@@ -324,14 +324,20 @@ class Signing {
   }
 
   /**
-   * Format CertSubject as a string for display.
+   * Format a certificate subject for display, as the command line prints it: the fields present,
+   * in the order CN, EMAIL, O, joined by ", " (for example `CN=a, EMAIL=b, O=c`).
    */
-  _formatSubject(subject: CertSubject): string {
+  formatSubject(subject: CertSubject): string {
     const parts: string[] = [];
     if (subject.commonName) parts.push(`CN=${subject.commonName}`);
     if (subject.email) parts.push(`EMAIL=${subject.email}`);
     if (subject.organization) parts.push(`O=${subject.organization}`);
     return parts.join(", ");
+  }
+
+  /** @deprecated Use formatSubject. */
+  _formatSubject(subject: CertSubject): string {
+    return this.formatSubject(subject);
   }
 
   /**
