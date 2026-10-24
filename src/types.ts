@@ -619,3 +619,21 @@ export interface PackageRunOptions {
 
 /** Where Installer.run reports; the packaging step it may run reports through the same options. */
 export type InstallerRunOptions = PackageRunOptions;
+
+/**
+ * One prompt of the command line's questions, in the shape the prompt methods return.
+ */
+export interface PromptQuestion {
+  /** "list" for a choice among `choices`; absent for a line of text. */
+  type?: "list";
+  /** The answer's key. */
+  name: string;
+  /** The question shown. */
+  message: string;
+  /** The answer offered when the user enters nothing. */
+  default?: string | null;
+  /** The choices of a "list" prompt. */
+  choices?: string[];
+  /** Checks an answer: true when it is accepted, otherwise the reason it is not. */
+  validate?: (input: string) => true | string;
+}

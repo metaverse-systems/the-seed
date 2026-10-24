@@ -347,3 +347,59 @@ describe("the default configuration directory", () => {
     expect(new Signing().signingDir).toBe(path.join(defaultConfigDir(), "signing"));
   });
 });
+
+describe("the configuration file's location", () => {
+  let home: string;
+  let originalHome: string | undefined;
+  let homeSpy: jest.SpyInstance;
+
+  /** `configFilePath` is read from the module when the case runs, so this file compiles before it is exported. */
+  function configFilePath(configDir?: string): string {
+    const loaded = jest.requireActual("../src/Config") as { configFilePath?: (configDir?: string) => string };
+    if (typeof loaded.configFilePath !== "function") {
+      throw new Error("configFilePath is not exported from src/Config");
+    }
+    return loaded.configFilePath(configDir);
+  }
+
+  beforeEach(() => {
+    home = fs.realpathSync(createTempDir());
+    originalHome = process.env.HOME;
+    process.env.HOME = home;
+    // The home directory is read through os.homedir(), which does not follow a changed environment variable here.
+    homeSpy = jest.spyOn(os, "homedir").mockReturnValue(home);
+  });
+
+  afterEach(() => {
+    homeSpy.mockRestore();
+    if (originalHome === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = originalHome;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it("is config.json in the-seed in the home directory by default, and nothing is created", () => {
+    expect(configFilePath()).toBe(path.join(home, "the-seed", "config.json"));
+    expect(fs.existsSync(path.join(home, "the-seed"))).toBe(false);
+    expect(fs.existsSync(path.join(home, "the-seed", "config.json"))).toBe(false);
+    expect(fs.readdirSync(home)).toEqual([]);
+  });
+
+  it("is config.json in the directory given, and nothing is created", () => {
+    const configDir = path.join(home, "elsewhere");
+    expect(configFilePath(configDir)).toBe(path.join(configDir, "config.json"));
+    expect(fs.existsSync(configDir)).toBe(false);
+    expect(fs.readdirSync(home)).toEqual([]);
+  });
+
+  it("is the path a Config given that directory uses", () => {
+    const configDir = path.join(home, "elsewhere");
+    expect(new Config(configDir).configPath).toBe(configFilePath(configDir));
+  });
+
+  it("is the path a Config uses when none is given", () => {
+    expect(new Config().configPath).toBe(configFilePath());
+  });
+});

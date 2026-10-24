@@ -1058,7 +1058,7 @@ The package declares these modules as its public surface:
 |---|---|
 | `@metaverse-systems/the-seed` | The entry point: the classes, error types and type declarations listed in this reference |
 | `@metaverse-systems/the-seed/Build` | `Build`, the build target table and the strip-tool helpers |
-| `@metaverse-systems/the-seed/Config` | `Config` and `ConfigError` |
+| `@metaverse-systems/the-seed/Config` | `Config`, `ConfigError` and `configFilePath` |
 | `@metaverse-systems/the-seed/Dependencies` | The dependency checks and installers for libecs-cpp and libthe-seed, and `runInstallSteps` |
 | `@metaverse-systems/the-seed/DependencyWalker` | `walkDependencies` and the dependency discovery errors |
 | `@metaverse-systems/the-seed/Hints` | The hint texts that follow command-line messages |
@@ -1090,10 +1090,12 @@ Manages the-seed configuration file.
 | `config` | `ConfigType` | The loaded configuration object |
 | `loadConfig()` | `void` | Load configuration from disk. Creates the directory and a default file when missing, fills missing entries in memory, and throws `ConfigError` for a malformed file |
 | `saveConfig()` | `void` | Write the configuration to disk atomically (creating the directory if needed); throws `ConfigError` when it cannot |
-| `getQuestions()` | `object[]` | Return inquirer prompt questions for configuration |
+| `getQuestions()` | `PromptQuestion[]` | Return inquirer prompt questions for configuration |
 | `parseAnswers(answers)` | `void` | Apply prompt answers (`{ prefix: string }`) to the configuration |
 
 `ConfigError` is a named export of the `Config` module (`import Config, { ConfigError } from "@metaverse-systems/the-seed/Config"`). It extends `Error`; `path` is the configuration file the problem concerns and `message` is one line naming the file and the entry or cause. The command line reports it with status 2.
+
+`configFilePath(configDir?)` returns where the configuration file is (default `~/the-seed/config.json`) without reading or creating it; `new Config()` creates a default file there when none exists.
 
 #### Scopes
 
@@ -1103,14 +1105,14 @@ Manages project scopes within the configuration. `validateScopeName(name)` retur
 |--------|------|-------------|
 | `constructor(config)` | | `config` is the `Config` to read and write scopes from |
 | `config` | `Config` | The Config instance |
-| `askWhichScope()` | `object[]` | Return the inquirer prompt to select an existing scope |
-| `askNewScope()` | `object[]` | Return the inquirer prompts for creating a new scope; the name prompt validates the name |
-| `askEditScope(defaults?)` | `object[]` | Return the inquirer prompts for editing a scope |
+| `askWhichScope()` | `PromptQuestion[]` | Return the inquirer prompt to select an existing scope |
+| `askNewScope()` | `PromptQuestion[]` | Return the inquirer prompts for creating a new scope; the name prompt validates the name |
+| `askEditScope(defaults?)` | `PromptQuestion[]` | Return the inquirer prompts for editing a scope |
 | `createOrEditScope(answers)` | `void` | Save a scope from prompt answers (`ScopeAnswersType`) |
 | `deleteScope(scope)` | `void` | Remove a scope from the configuration |
 | `getScopes()` | `string[]` | Return the scope names |
 | `getScope(scope)` | `ScopeType` | Return a scope by name |
-| `getQuestions(defaults)` | `object[]` | Return the inquirer prompts with optional defaults |
+| `getQuestions(defaults)` | `PromptQuestion[]` | Return the inquirer prompts with optional defaults |
 
 #### Package
 
@@ -1175,6 +1177,7 @@ Sign and verify files using ECDSA P-256 certificates with support for embedded (
 | `exportCert(outputPath, scope?)` | `Promise<void>` | Write the scope's public certificate to a file |
 | `hasCert(scope?)` | `boolean` | Check if a certificate exists |
 | `getCertInfo(scope)` | `CertInfo \| null` | Return certificate details |
+| `formatSubject(subject)` | `string` | Format a certificate subject for display (`CN=…, EMAIL=…, O=…`) |
 | `loadSigningKey(scope)` | `crypto.KeyObject` | Load and check the scope's private key (ECDSA P-256 matching the certificate); throws `UnsupportedSigningKey` before any file is changed |
 | `isBinaryFile(filePath)` | `Promise<boolean>` | True when the file is a binary the tool signs |
 | `detectBinaryFormat(filePath)` | `FormatDetectionResult` | Detect PE, Mach-O, installer or other format via magic bytes |
@@ -1625,6 +1628,15 @@ interface PackageRunOptions {
 }
 
 type InstallerRunOptions = PackageRunOptions;
+
+interface PromptQuestion {
+    type?: "list";
+    name: string;
+    message: string;
+    default?: string | null;
+    choices?: string[];
+    validate?: (input: string) => true | string;
+}
 ```
 
 ### Import Example

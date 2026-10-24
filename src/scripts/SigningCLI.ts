@@ -80,7 +80,7 @@ function signatureLines(signing: Signing, result: VerifyResult, indent: string):
   const lines = [`${indent}Integrity:   ${describeIntegrity(result.integrity)}`, `${indent}Trust:       ${describeTrust(result.trust)}`];
   if (result.signer) {
     const day = (date: Date): string => date.toISOString().slice(0, 10);
-    lines.push(`${indent}Signer:      ${signing._formatSubject(result.signer.subject)}`);
+    lines.push(`${indent}Signer:      ${signing.formatSubject(result.signer.subject)}`);
     lines.push(`${indent}Issuer:      ${result.signer.issuer || "Unknown"}`);
     lines.push(`${indent}Fingerprint: ${result.signer.fingerprint}`);
     lines.push(`${indent}Valid:       ${day(result.signer.notBefore)} to ${day(result.signer.notAfter)}`);
@@ -146,7 +146,7 @@ function printStored(signing: Signing, heading: string, certInfo: CertInfo, with
   const validFrom = certInfo.notBefore.toISOString().split("T")[0];
   const validTo = certInfo.notAfter.toISOString().split("T")[0];
   console.log(heading);
-  console.log(`  Subject:     ${signing._formatSubject(certInfo.subject)}`);
+  console.log(`  Subject:     ${signing.formatSubject(certInfo.subject)}`);
   if (withIssuer) {
     console.log(`  Issuer:      ${certInfo.issuer}`);
   }
@@ -200,7 +200,7 @@ async function verifyCommand(signing: Signing, parsed: ParsedCommand): Promise<H
       const consistency = manifest.fingerprintConsistent
         ? "fingerprint matches the manifest"
         : `fingerprint does NOT match the manifest's recorded fingerprint ${manifest.recordedFingerprint}`;
-      console.log(`  Certificate: ${signing._formatSubject(manifest.certificate.subject)}  ${manifest.certificate.fingerprint}  (${consistency})`);
+      console.log(`  Certificate: ${signing.formatSubject(manifest.certificate.subject)}  ${manifest.certificate.fingerprint}  (${consistency})`);
       console.log(`  Trust:       ${describeTrust(manifest.trust)}`);
       for (const r of result.results) {
         const word = headlines[r.status] ?? r.status;
@@ -345,7 +345,7 @@ const SigningCLI = async (parsed: ParsedCommand, context: CliContext): Promise<H
         });
       }
 
-      const subjectStr = signing._formatSubject(certInfo.subject);
+      const subjectStr = signing.formatSubject(certInfo.subject);
       const validFrom = certInfo.notBefore.toISOString().split("T")[0];
       const validTo = certInfo.notAfter.toISOString().split("T")[0];
       const status = certInfo.isExpired ? "Expired" : "Active";

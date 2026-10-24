@@ -1,7 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { ConfigType } from "./types";
+import { ConfigType, PromptQuestion } from "./types";
 
 export class ConfigError extends Error {
   readonly path: string;
@@ -41,6 +41,14 @@ export function defaultConfigDir(): string {
   return path.join(os.homedir(), "the-seed");
 }
 
+/**
+ * Where the configuration file is: `config.json` in `configDir`, by default in `~/the-seed`.
+ * Nothing is read or created; `new Config()` creates a default file there when none exists.
+ */
+export function configFilePath(configDir?: string): string {
+  return path.join(configDir ?? defaultConfigDir(), "config.json");
+}
+
 class Config {
   configDir: string;
   configFile: string;
@@ -53,7 +61,7 @@ class Config {
   constructor(configDir?: string) {
     this.configDir = configDir || defaultConfigDir();
     this.configFile = "config.json";
-    this.configPath = path.join(this.configDir, this.configFile);
+    this.configPath = configFilePath(this.configDir);
     this.loadConfig();
   }
 
@@ -132,7 +140,7 @@ class Config {
     }
   }
 
-  getQuestions() {
+  getQuestions(): PromptQuestion[] {
     return [
       {
         name: "prefix",

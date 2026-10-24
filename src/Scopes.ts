@@ -1,4 +1,4 @@
-import { ScopeAnswersType, ScopeDefaultsType } from "./types";
+import { PromptQuestion, ScopeAnswersType, ScopeDefaultsType } from "./types";
 import Config from "./Config";
 
 /**
@@ -34,7 +34,7 @@ class Scopes {
     this.config = config;
   }
 
-  askWhichScope() {
+  askWhichScope(): PromptQuestion[] {
     return [
       {
         "type": "list",
@@ -45,18 +45,18 @@ class Scopes {
     ];
   }
 
-  askNewScope() {
+  askNewScope(): PromptQuestion[] {
     return [
       {
         "name": "scopeName",
         "message": "Name for scope?",
-        "validate": (input: string): string | boolean => validateScopeName(input) ?? true,
+        "validate": (input: string): true | string => validateScopeName(input) ?? true,
       },
       ...this.askEditScope()
     ];
   }
 
-  askEditScope(defaults?: ScopeDefaultsType) {
+  askEditScope(defaults?: ScopeDefaultsType): PromptQuestion[] {
     return [
       {
         "name": "authorName",
@@ -121,7 +121,7 @@ class Scopes {
     return this.config.config.scopes[scope];
   }
 
-  getQuestions(defaults: { scopeName?: string }) {
+  getQuestions(defaults: { scopeName?: string }): PromptQuestion[] {
     return [
       {
         name: "scopeName",
