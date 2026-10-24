@@ -2,7 +2,7 @@
 
 Versions before 2.0.0 have no release notes.
 
-## 2.1.0 — 2026-10-23
+## 2.1.0 — 2026-10-24
 
 This release adds to the library interface and fixes the dependency install; the command line is otherwise unchanged. It requires libecs-cpp 2.1.0 and libthe-seed 0.8.0 or later, as 2.0.0 did.
 
