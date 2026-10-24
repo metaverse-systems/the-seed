@@ -16,9 +16,12 @@ import {
   DependencyResultType,
   PackagePlan,
   PackageResult,
+  PackageRunOptions,
   PlannedFile,
+  ToolLog,
   UnpackagedLibrary,
 } from "./types";
+import { consoleLog } from "./ToolLog";
 
 preloadNativeComponent();
 
@@ -91,11 +94,12 @@ class Package {
   /**
    * Parse src/Makefile.am in a project directory to determine the binary type and name.
    * Returns { type, name } for programs (bin_PROGRAMS) or libraries (lib_LTLIBRARIES), or null on error.
+   * The error lines go to `log`, the console when omitted.
    */
-  parseMakefileAm(projectDir: string): { type: "program" | "library"; name: string } | null {
+  parseMakefileAm(projectDir: string, log: ToolLog = consoleLog): { type: "program" | "library"; name: string } | null {
     const makefileAmPath = path.join(projectDir, "src", "Makefile.am");
     if (!fs.existsSync(makefileAmPath)) {
-      console.error("Error: src/Makefile.am not found in " + projectDir);
+      log("Error: src/Makefile.am not found in " + projectDir, "error");
       return null;
     }
 
@@ -113,7 +117,7 @@ class Package {
       return { type: "library", name: libraryMatch[1] };
     }
 
-    console.error("Error: Could not determine binary type from " + makefileAmPath);
+    log("Error: Could not determine binary type from " + makefileAmPath, "error");
     return null;
   }
 
@@ -123,9 +127,10 @@ class Package {
    * For programs: looks for {name} (native) or {name}.exe (cross-compiled for Windows).
    * For libraries: looks for {name}.so (native) or {name}*.dll (cross-compiled for Windows).
    * A native library is returned as the real file the development link {name}.so leads to.
+   * What parseMakefileAm reports goes to `log`, the console when omitted.
    */
-  resolveBinaryPaths(projectDir: string): string[] {
-    const parsed = this.parseMakefileAm(projectDir);
+  resolveBinaryPaths(projectDir: string, log: ToolLog = consoleLog): string[] {
+    const parsed = this.parseMakefileAm(projectDir, log);
     if (!parsed) return [];
 
     const binaryPaths: string[] = [];
@@ -196,9 +201,11 @@ class Package {
    * not a project contributes itself alone. Resolves a refusal (not a rejection) for a dependency
    * cycle, two different directories with one package name, an unreadable package.json, a malformed
    * ELF file, or two different files that would be written under one name. It also resolves a refusal, naming the
-   * step that builds it, when the native component is not built.
+   * step that builds it, when the native component is not built. Its warnings go to `options.log`, the
+   * console when omitted.
    */
-  async plan(projectDirs: string[]): Promise<PackagePlan> {
+  async plan(projectDirs: string[], options: { log?: ToolLog } = {}): Promise<PackagePlan> {
+    const log = options.log ?? consoleLog;
     const refuse = (message: string): PackagePlan => ({ ok: false, message });
 
     // Packaging needs the native component: refuse before discovery or any output
@@ -271,7 +278,7 @@ class Package {
     }
     const outputsByLocation = new Map<string, string[]>();
     for (const location of projectNames.keys()) {
-      const outputs = this.resolveBinaryPaths(location);
+      const outputs = this.resolveBinaryPaths(location, log);
       if (outputs.length === 0 && given.has(location)) {
         return refuse("No installed binaries found for " + (givenByLocation.get(location) ?? location));
       }
@@ -283,7 +290,7 @@ class Package {
       if (outputs.length === 0) {
         continue;
       }
-      const isLibrary = this.parseMakefileAm(location)?.type === "library";
+      const isLibrary = this.parseMakefileAm(location, log)?.type === "library";
       const libsDir = path.join(location, "src", ".libs");
       for (const output of outputs) {
         let source = fs.realpathSync(output);
@@ -291,7 +298,7 @@ class Package {
         let signatureDir = path.dirname(output);
         if (isLibrary && !output.endsWith(".dll")) {
           // A native library goes out under the name programs load it by, with the content that name leads to
-          const base = this.parseMakefileAm(location)?.name ?? packagedName;
+          const base = this.parseMakefileAm(location, log)?.name ?? packagedName;
           let soname: string | null;
           try {
             soname = readElfNames(source)?.soname ?? null;
@@ -348,9 +355,9 @@ class Package {
           continue;
         }
         warnedLibraries.add(libPath);
-        console.warn("Warning: Library could not be read: " + libPath);
-        console.warn("  " + libraryErrors[libPath].reason);
-        console.warn("  Needed by: " + libraryErrors[libPath].inputs.join(", "));
+        log("Warning: Library could not be read: " + libPath, "warn");
+        log("  " + libraryErrors[libPath].reason, "warn");
+        log("  Needed by: " + libraryErrors[libPath].inputs.join(", "), "warn");
       }
 
       for (const p of toAnalyze) {
@@ -487,11 +494,14 @@ class Package {
    * Main entry point: validate inputs, decide what to package, create the directory, copy files.
    * Resolves a PackageResult (it no longer returns a boolean); a refusal or failure is printed once
    * as "Error: <message>", `success` is false and nothing is left written. Without the native component the
-   * refusal names the step that builds it, and nothing is read or written.
+   * refusal names the step that builds it, and nothing is read or written. Every line goes to
+   * `options.log` with the level of the console method it would use, and `options.onCopy` hears of each
+   * file and signature once it is written; without options both go to the console as before.
    */
-  async run(outputDir: string, projectDirs: string[]): Promise<PackageResult> {
+  async run(outputDir: string, projectDirs: string[], options: PackageRunOptions = {}): Promise<PackageResult> {
+    const log = options.log ?? consoleLog;
     const failed = (message: string): PackageResult => {
-      console.error("Error: " + message);
+      log("Error: " + message, "error");
       return {
         success: false,
         message,
@@ -519,7 +529,7 @@ class Package {
       }
     }
 
-    const plan = await this.plan(projectDirs);
+    const plan = await this.plan(projectDirs, { log });
     if (!plan.ok) {
       return failed(plan.message);
     }
@@ -527,15 +537,23 @@ class Package {
     // Create output directory and copy files (and their .sig signature files)
     fs.mkdirSync(outputDir, { recursive: true });
     let signatures = 0;
+    const total = plan.files.length + plan.files.filter((file) => file.signature !== null).length;
+    let written = 0;
+    const copied = (name: string, source: string): void => {
+      written++;
+      options.onCopy?.({ name, source, index: written, total });
+    };
     for (const file of plan.files) {
       try {
         const from = file.name === path.basename(file.source) ? "" : " (from " + file.source + ")";
-        console.log("Copying " + file.name + from + "...");
+        log("Copying " + file.name + from + "...", "info");
         fs.copyFileSync(file.source, path.join(outputDir, file.name));
+        copied(file.name, file.source);
         if (file.signature !== null) {
-          console.log("Copying " + file.name + ".sig...");
+          log("Copying " + file.name + ".sig...", "info");
           fs.copyFileSync(file.signature, path.join(outputDir, file.name + ".sig"));
           signatures++;
+          copied(file.name + ".sig", fs.realpathSync(file.signature));
         }
       } catch (error) {
         fs.rmSync(outputDir, { recursive: true, force: true });
@@ -549,11 +567,11 @@ class Package {
     if (signatures > 0) {
       summary += " (" + signatures + " signature" + (signatures > 1 ? "s" : "") + " included)";
     }
-    console.log(summary);
+    log(summary, "info");
     if (plan.notPackaged.length > 0) {
-      console.log("Not packaged (expected on the target system):");
+      log("Not packaged (expected on the target system):", "info");
       for (const library of plan.notPackaged) {
-        console.log("  " + library.name + " (needed by " + library.neededBy + ")");
+        log("  " + library.name + " (needed by " + library.neededBy + ")", "info");
       }
     }
 

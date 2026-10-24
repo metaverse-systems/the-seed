@@ -1,5 +1,6 @@
 /*
- * The release: version 2.0.0, the release notes in CHANGELOG.md, and the places that record them.
+ * The releases: version 2.1.0 and the 2.0.0 notes before it, the release notes in CHANGELOG.md, and
+ * the places that record them.
  *
  * Interfaces fixed here where the contracts leave them open:
  * - The notes are read from `CHANGELOG.md` at the package root as plain text. The `## 2.0.0`
@@ -14,8 +15,11 @@
  *   appear in the line of the notes that states the scheme (the line starting `**Exit statuses.**`).
  * - Each recorded release note is represented by distinctive terms listed as literals with the
  *   source named beside them; a term counts when the notes contain it as written.
- * - The editor extension's lock file is read from the sibling checkout `../the-seed-vscode`; the
- *   case runs only when that checkout is present (`optionalExternalCheck`).
+ * - The editor extension's manifest is read from the sibling checkout `../the-seed-vscode`; the
+ *   case runs only when that checkout is present (`optionalExternalCheck`). It names the tool as an
+ *   exact devDependency of this major version, no newer than this package.
+ * - A `## X.Y.Z` section runs to the next `## ` heading; the 2.1.0 section must name each interface
+ *   it adds as a code span.
  * - Cases that must fail on the tree before the release: version, notes file and everything read
  *   from it, the package file list entry in package.json, the lock files, the README links. The
  *   required-versions case is a guard.
@@ -50,12 +54,13 @@ function changelogText(): string {
   return fs.readFileSync(file, "utf8");
 }
 
-/** The text of the `## 2.0.0` section, heading line included. */
-function releaseSection(): string {
+/** The text of the `## <version>` section (2.0.0 when omitted), heading line included. */
+function releaseSection(version = "2.0.0"): string {
   const lines = changelogText().split("\n");
-  const start = lines.findIndex((line) => /^## 2\.0\.0(\s|$)/.test(line));
+  const heading = "## " + version;
+  const start = lines.findIndex((line) => line === heading || line.startsWith(heading + " "));
   if (start < 0) {
-    throw new Error("CHANGELOG.md has no `## 2.0.0` section");
+    throw new Error("CHANGELOG.md has no `" + heading + "` section");
   }
   let end = lines.length;
   for (let index = start + 1; index < lines.length; index++) {
@@ -189,14 +194,70 @@ const INTERFACE_TERMS = [
   "node-addon-api",
 ];
 
-describe("release 2.0.0", () => {
-  test("package.json and package-lock.json state version 2.0.0", () => {
+/** The three numbers of an exact `X.Y.Z` version, or null for anything else. */
+function exactVersion(text: string | undefined): [number, number, number] | null {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(text ?? "");
+  return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersions(a: [number, number, number], b: [number, number, number]): number {
+  for (let index = 0; index < 3; index++) {
+    if (a[index] !== b[index]) {
+      return a[index] - b[index];
+    }
+  }
+  return 0;
+}
+
+// The interfaces 2.1.0 adds, each named in its notes as a code span.
+const RELEASE_2_1_0_NAMES = [
+  "PackageRunOptions",
+  "InstallerRunOptions",
+  "PackageCopyEvent",
+  "ToolLog",
+  "ToolLogLevel",
+  "runInstallSteps",
+  "InstallStepsOptions",
+  "InstallStepsResult",
+];
+
+describe("release 2.1.0", () => {
+  test("package.json and package-lock.json state version 2.1.0", () => {
     const manifest = readJson<Manifest>(path.join(packageRoot, "package.json"));
-    expect(manifest.version).toBe("2.0.0");
+    expect(manifest.version).toBe("2.1.0");
     const lock = readJson<{ version: string; packages: Record<string, { version: string }> }>(
       path.join(packageRoot, "package-lock.json"));
-    expect(lock.version).toBe("2.0.0");
-    expect(lock.packages[""].version).toBe("2.0.0");
+    expect(lock.version).toBe("2.1.0");
+    expect(lock.packages[""].version).toBe("2.1.0");
+  });
+
+  test("CHANGELOG.md has a dated 2.1.0 heading above the 2.0.0 heading", () => {
+    const lines = changelogText().split("\n");
+    const newer = lines.findIndex((line) => /^## 2\.1\.0 — \d{4}-\d{2}-\d{2}$/.test(line));
+    const older = lines.findIndex((line) => /^## 2\.0\.0(\s|$)/.test(line));
+    expect(newer).toBeGreaterThanOrEqual(0);
+    expect(older).toBeGreaterThan(newer);
+    const firstRelease = lines.findIndex((line) => /^## /.test(line));
+    expect(firstRelease).toBe(newer);
+  });
+
+  test("the 2.1.0 section has exactly the three groups, in order", () => {
+    const headings = releaseSection("2.1.0")
+      .split("\n")
+      .filter((line) => /^###\s/.test(line))
+      .map((line) => line.replace(/^###\s+/, ""));
+    expect(headings).toEqual(HEADINGS);
+  });
+
+  test("the 2.1.0 section names every interface it adds as a code span", () => {
+    const text = releaseSection("2.1.0");
+    expect(RELEASE_2_1_0_NAMES.filter((name) => !text.includes("`" + name + "`"))).toEqual([]);
+  });
+});
+
+describe("release 2.0.0", () => {
+  test("the 2.0.0 section is still present", () => {
+    expect(changelogText().split("\n").some((line) => /^## 2\.0\.0 — \d{4}-\d{2}-\d{2}$/.test(line))).toBe(true);
   });
 
   test("the required library versions are unchanged", () => {
@@ -219,22 +280,23 @@ describe("release 2.0.0", () => {
     expect(linked.some((entry) => entry.number > apiHeading)).toBe(true);
   });
 
-  test("the editor extension's lock file records the tool at 2.0.0 with its current dependencies", () => {
-    const lockFile = path.join(extensionRoot, "package-lock.json");
-    if (!optionalExternalCheck("the-seed-vscode", fs.existsSync(lockFile), "the editor extension checkout is absent")) {
+  test("the editor extension names the tool as an exact devDependency of this major version, no newer than this package", () => {
+    const extensionManifest = path.join(extensionRoot, "package.json");
+    if (!optionalExternalCheck("the-seed-vscode", fs.existsSync(extensionManifest), "the editor extension checkout is absent")) {
       return;
     }
     const manifest = readJson<Manifest>(path.join(packageRoot, "package.json"));
-    const lock = readJson<{ packages: Record<string, Manifest | undefined> }>(lockFile);
-    const entry = lock.packages["../the-seed"];
-    expect(entry).toBeDefined();
-    expect(entry?.version).toBe("2.0.0");
-    expect(entry?.dependencies).toEqual(manifest.dependencies);
-    expect(entry?.devDependencies).toEqual(manifest.devDependencies);
-    // The extension's own version and its link to the tool do not change.
-    const extension = readJson<Manifest>(path.join(extensionRoot, "package.json"));
-    expect(extension.version).toBe("0.3.0");
-    expect(extension.dependencies?.[PACKAGE_NAME]).toBe("file:../the-seed");
+    const extension = readJson<Manifest>(extensionManifest);
+    const own = exactVersion(manifest.version);
+    const wanted = exactVersion(extension.devDependencies?.[PACKAGE_NAME]);
+    expect(own).not.toBeNull();
+    expect(wanted).not.toBeNull();
+    if (own === null || wanted === null) {
+      return;
+    }
+    expect(wanted[0]).toBe(own[0]);
+    expect(compareVersions(wanted, own)).toBeLessThanOrEqual(0);
+    expect(extension.dependencies?.[PACKAGE_NAME]).toBeUndefined();
   });
 });
 

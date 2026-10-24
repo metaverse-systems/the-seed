@@ -208,7 +208,7 @@ const PUBLIC_MODULE_CONTENTS: Record<string, string> = {
   ".": "The entry point: the classes, error types and type declarations listed in this reference",
   "./Build": "`Build`, the build target table and the strip-tool helpers",
   "./Config": "`Config` and `ConfigError`",
-  "./Dependencies": "The dependency checks and installers for libecs-cpp and libthe-seed",
+  "./Dependencies": "The dependency checks and installers for libecs-cpp and libthe-seed, and `runInstallSteps`",
   "./DependencyWalker": "`walkDependencies` and the dependency discovery errors",
   "./Hints": "The hint texts that follow command-line messages",
   "./Installer": "`Installer` and its configuration and result types",

@@ -23,6 +23,7 @@ import { addScopeHint, buildWindowsHint, createCertHint } from "../src/cli/Hints
 import { readWxs, WxsElement } from "./helpers/WxsReader";
 import { optionalExternalCheck } from "./helpers/ExternalTools";
 import { defined } from "./helpers/Defined";
+import { InstallerRunOptions, PackageCopyEvent, ToolLogLevel } from "../src/types";
 
 // Mock child_process for wixl/which detection
 jest.mock("child_process", () => ({
@@ -600,6 +601,182 @@ describe("Installer", () => {
         expect(output).not.toContain("'the-seed");
         expect(errors[errors.length - 1]).toBe("Error: Packaging failed; no installer was built.");
         expect(mockedExecFileSync).not.toHaveBeenCalledWith("wixl", expect.anything(), expect.anything());
+      });
+    });
+
+    // Installer.run given a caller's log and onCopy. Choices where the contract is open: the console is
+    // recorded through console.log, console.warn and console.error together, in call order, with the level of
+    // each method; the same project is run without options first and with them after its outputs are removed,
+    // so both runs print the same text. `wixl` is the stub of this file, and is run for real in one case when
+    // it is installed.
+    describe("with a caller's log and onCopy", () => {
+      type Line = { line: string; level: ToolLogLevel };
+      let printed: Line[];
+      let spies: jest.SpyInstance[];
+
+      beforeEach(() => {
+        printed = [];
+        const record = (level: ToolLogLevel) => (...parts: unknown[]) => {
+          printed.push({ line: parts.map(String).join(" "), level });
+        };
+        spies = [
+          jest.spyOn(console, "log").mockImplementation(record("info")),
+          jest.spyOn(console, "warn").mockImplementation(record("warn")),
+          jest.spyOn(console, "error").mockImplementation(record("error")),
+        ];
+        mockedListDependencies.mockReset();
+        mockedListDependencies.mockReturnValue({ dependencies: {}, errors: {} });
+      });
+
+      afterEach(() => {
+        for (const spy of spies) {
+          spy.mockRestore();
+        }
+      });
+
+      function sink(): { lines: Line[]; copies: PackageCopyEvent[]; options: InstallerRunOptions } {
+        const lines: Line[] = [];
+        const copies: PackageCopyEvent[] = [];
+        return {
+          lines,
+          copies,
+          options: {
+            log: (line, level) => {
+              lines.push({ line, level });
+            },
+            onCopy: (event) => {
+              copies.push({ ...event });
+            },
+          },
+        };
+      }
+
+      /** A built, signed program project without dist/. */
+      function signedProgram(pkg: { name: string; version: string; author: string }): { projectDir: string; binary: string } {
+        const projectDir = path.join(tempDir, "app");
+        fs.mkdirSync(path.join(projectDir, "src", ".libs"), { recursive: true });
+        fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify(pkg));
+        fs.writeFileSync(path.join(projectDir, "src", "Makefile.am"), "bin_PROGRAMS = app\napp_SOURCES = app.cpp\n");
+        const binary = path.join(projectDir, "src", ".libs", "app");
+        fs.writeFileSync(binary, "content of app");
+        fs.writeFileSync(binary + ".sig", "signature of app");
+        return { projectDir, binary };
+      }
+
+      /** Removes what a run wrote into the project, so the next run packages again. */
+      function removeOutputs(projectDir: string): void {
+        for (const entry of fs.readdirSync(projectDir)) {
+          if (entry === "dist" || entry.endsWith(".wxs") || entry.endsWith(".msi")) {
+            fs.rmSync(path.join(projectDir, entry), { recursive: true, force: true });
+          }
+        }
+      }
+
+      /** Runs without options and returns what the console received, then clears the console record. */
+      async function consoleRun(projectDir: string): Promise<{ ok: boolean; lines: Line[] }> {
+        printed.length = 0;
+        const result = await installer.run(projectDir);
+        const lines = printed.slice();
+        printed.length = 0;
+        for (const spy of spies) {
+          spy.mockClear();
+        }
+        return { ok: result.ok, lines };
+      }
+
+      function expectNoConsole(): void {
+        expect(printed).toEqual([]);
+        for (const spy of spies) {
+          expect(spy).not.toHaveBeenCalled();
+        }
+      }
+
+      async function packagesFirst(): Promise<void> {
+        const { projectDir, binary } = signedProgram({ name: "@t/app", version: "1.0.0", author: "Dev" });
+        const distDir = path.join(projectDir, "dist");
+
+        const before = await consoleRun(projectDir);
+        expect(before.ok).toBe(true);
+        removeOutputs(projectDir);
+
+        const { lines, copies, options } = sink();
+        const result = await installer.run(projectDir, options);
+
+        expect(result).toEqual({ ok: true, msiPath: path.join(projectDir, "app-1.0.0.msi") });
+        expectNoConsole();
+        expect(lines).toEqual(before.lines);
+        expect(lines).toEqual([
+          { line: "dist/ not found, running package step...", level: "info" },
+          { line: "Copying app...", level: "info" },
+          { line: "Copying app.sig...", level: "info" },
+          { line: "Packaged 2 files into " + distDir + "/ (1 signature included)", level: "info" },
+          { line: "Generating WiX XML source...", level: "info" },
+          { line: "Generated: app-1.0.0.wxs", level: "info" },
+          { line: "Compiling MSI installer...", level: "info" },
+          { line: "Installer created: app-1.0.0.msi", level: "info" },
+        ]);
+        expect(copies).toEqual([
+          { name: "app", source: fs.realpathSync(binary), index: 1, total: 2 },
+          { name: "app.sig", source: fs.realpathSync(binary + ".sig"), index: 2, total: 2 },
+        ]);
+      }
+
+      it("packages first, sending the packaging lines then the installer lines to log in order, with no console call", async () => {
+        await packagesFirst();
+      });
+
+      it("does the same with the real wixl when it is installed", async () => {
+        if (!toolPresent("wixl")) {
+          // The console is recorded in this group; give it back so the skip notice is seen.
+          for (const spy of spies) {
+            spy.mockRestore();
+          }
+          optionalExternalCheck("wixl", false, "wixl is not installed");
+          return;
+        }
+        mockedExecFileSync.mockImplementation(((command: string, args?: readonly string[], options?: object) =>
+          realChildProcess.execFileSync(command, args ?? [], { ...options, stdio: "pipe" })) as typeof execFileSync);
+
+        await packagesFirst();
+
+        expect(fs.existsSync(path.join(tempDir, "app", "app-1.0.0.msi"))).toBe(true);
+      });
+
+      it("refuses a missing wixl with one error line through log and no console call", async () => {
+        mockedExecFileSync.mockImplementation((command: string, args?: readonly string[]) => {
+          if (command === "which" && args && args[0] === "wixl") {
+            throw new Error("not found");
+          }
+          return Buffer.from("");
+        });
+        const { projectDir } = signedProgram({ name: "@t/app", version: "1.0.0", author: "Dev" });
+
+        const before = await consoleRun(projectDir);
+        const { lines, copies, options } = sink();
+        const result = await installer.run(projectDir, options);
+
+        expect(result).toEqual({ ok: false, status: 2, message: "Error: wixl is not installed. Install it with: sudo apt install wixl" });
+        expect(before.lines).toEqual([{ line: "Error: wixl is not installed. Install it with: sudo apt install wixl", level: "error" }]);
+        expect(lines).toEqual(before.lines);
+        expect(copies).toEqual([]);
+        expectNoConsole();
+      });
+
+      it("refuses bad metadata with one error line through log and no console call", async () => {
+        const { projectDir } = signedProgram({ name: "@t/app", version: "256.0.0", author: "Dev" });
+
+        const before = await consoleRun(projectDir);
+        const { lines, copies, options } = sink();
+        const result = await installer.run(projectDir, options);
+
+        expect(result.ok).toBe(false);
+        expect(before.lines).toHaveLength(1);
+        expect(before.lines[0].level).toBe("error");
+        expect(before.lines[0].line).toContain("256.0.0");
+        expect(lines).toEqual(before.lines);
+        expect(copies).toEqual([]);
+        expectNoConsole();
+        expect(fs.existsSync(path.join(projectDir, "dist"))).toBe(false);
       });
     });
   });

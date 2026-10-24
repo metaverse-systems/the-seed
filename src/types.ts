@@ -590,3 +590,32 @@ export interface PackageResult {
   fileCount: number;
   notPackaged: UnpackagedLibrary[];
 }
+
+/** How serious a line the tool reports is: "info" is console.log, "warn" console.warn, "error" console.error. */
+export type ToolLogLevel = "info" | "warn" | "error";
+
+/** Receives each line an operation reports, one whole line per call, without a line ending. */
+export type ToolLog = (line: string, level: ToolLogLevel) => void;
+
+/** One file packaging has just written into the output directory. */
+export interface PackageCopyEvent {
+  /** Name written in the output directory (a signature is `<name>.sig`) */
+  name: string;
+  /** The file its content was copied from */
+  source: string;
+  /** 1-based number of the files written so far, signatures included */
+  index: number;
+  /** How many files this run writes, signatures included */
+  total: number;
+}
+
+/** Where Package.run reports; the console when omitted. */
+export interface PackageRunOptions {
+  /** Receives every line run prints today; console.log, console.warn and console.error when omitted */
+  log?: ToolLog;
+  /** Called after each file, and after each signature, is written */
+  onCopy?: (event: PackageCopyEvent) => void;
+}
+
+/** Where Installer.run reports; the packaging step it may run reports through the same options. */
+export type InstallerRunOptions = PackageRunOptions;
