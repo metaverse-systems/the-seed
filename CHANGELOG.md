@@ -2,6 +2,22 @@
 
 Versions before 2.0.0 have no release notes.
 
+## 2.1.1 — 2026-10-25
+
+This release fixes the loading of the native component; the command line is unchanged. It requires libecs-cpp 2.1.0 and libthe-seed 0.8.0 or later, as 2.1.0 did.
+
+### Actions required
+
+None.
+
+### Command-line changes
+
+None. Every command prints the same text to the same streams, with the same exit status, as in 2.1.0.
+
+### Library and extension interface changes
+
+- Fix: when the native component is absent or fails to load, the failure is no longer kept for the life of the process. Each later operation that needs the component (signing and verifying Windows programs, Mac programs and installers, packaging, Windows builds) tries the load again and throws `NativeComponentMissingError` with the same message while it still fails, so a long-running host such as the editor extension uses the component as soon as `npm run build-addon` has built it, without being restarted. A component that loads is still loaded once and kept.
+
 ## 2.1.0 — 2026-10-24
 
 This release adds to the library interface and fixes the dependency install; the command line is otherwise unchanged. It requires libecs-cpp 2.1.0 and libthe-seed 0.8.0 or later, as 2.0.0 did.

@@ -45,45 +45,42 @@ export class NativeComponentMissingError extends Error {
 }
 
 let cachedComponent: unknown = null;
-let cachedFailure: NativeComponentMissingError | null = null;
 
 /**
- * Loads the native component once. The result, success or failure, is cached.
+ * Loads the native component. A successful load is kept and returned by every later call; a failed load is
+ * not kept, so the next call tries again and picks up a component built since (by "npm run build-addon")
+ * in the same process.
  * Throws NativeComponentMissingError when the component is absent or fails to load.
  */
 export function loadNativeComponent<T = unknown>(): T {
   if (cachedComponent !== null) {
     return cachedComponent as T;
   }
-  if (cachedFailure !== null) {
-    throw cachedFailure;
-  }
   try {
+    // Node keeps no record of a failed require of the file (absent or failing to load), so a retry loads it afresh
     // eslint-disable-next-line @typescript-eslint/no-var-requires -- the native component has no type declarations and is loaded on first use
     cachedComponent = require(path.join(packageRoot(), NATIVE_COMPONENT_PATH));
     return cachedComponent as T;
   } catch (error) {
     const failure = error as NodeJS.ErrnoException;
     if (failure && failure.code === "MODULE_NOT_FOUND") {
-      cachedFailure = new NativeComponentMissingError(null);
-    } else {
-      const text = failure && failure.message !== undefined ? String(failure.message) : String(error);
-      cachedFailure = new NativeComponentMissingError(text.split(/\r?\n/)[0]);
+      throw new NativeComponentMissingError(null);
     }
-    throw cachedFailure;
+    const text = failure && failure.message !== undefined ? String(failure.message) : String(error);
+    throw new NativeComponentMissingError(text.split(/\r?\n/)[0]);
   }
 }
 
 /**
- * Loads the native component now if it has not been tried yet, and keeps the outcome without throwing.
- * Modules that need the component call this when they are loaded, so that its availability is settled once
- * for them; loadNativeComponent() then answers from the kept outcome.
+ * Loads the native component now, without throwing. Modules that need the component call this when they
+ * are loaded, so that a component that loads is kept from then on; a failure is not kept, and the next
+ * loadNativeComponent() call tries again.
  */
 export function preloadNativeComponent(): void {
   try {
     loadNativeComponent();
   } catch {
-    // The failure is kept and thrown by the next loadNativeComponent() call
+    // Not kept: the next loadNativeComponent() call tries the load again
   }
 }
 
@@ -92,8 +89,7 @@ export function requireNativeComponent(): void {
   loadNativeComponent();
 }
 
-/** Clears the cached result so the next load requires the component again. */
+/** Clears the kept component so the next load requires it again. */
 export function resetNativeComponentForTests(): void {
   cachedComponent = null;
-  cachedFailure = null;
 }

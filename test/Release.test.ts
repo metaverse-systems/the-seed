@@ -1,5 +1,5 @@
 /*
- * The releases: version 2.1.0 and the 2.0.0 notes before it, the release notes in CHANGELOG.md, and
+ * The releases: version 2.1.1, the 2.1.0 and 2.0.0 notes before it, the release notes in CHANGELOG.md, and
  * the places that record them.
  *
  * Interfaces fixed here where the contracts leave them open:
@@ -19,7 +19,8 @@
  *   case runs only when that checkout is present (`optionalExternalCheck`). It names the tool as an
  *   exact devDependency of this major version, no newer than this package.
  * - A `## X.Y.Z` section runs to the next `## ` heading; the 2.1.0 section must name each interface
- *   it adds as a code span.
+ *   it adds as a code span. The 2.1.1 section, the newest, must name the error its fix throws and the
+ *   build step as code spans, and the package version is 2.1.1.
  * - Cases that must fail on the tree before the release: version, notes file and everything read
  *   from it, the package file list entry in package.json, the lock files, the README links. The
  *   required-versions case is a guard.
@@ -224,24 +225,52 @@ const RELEASE_2_1_0_NAMES = [
   "configFilePath",
 ];
 
-describe("release 2.1.0", () => {
-  test("package.json and package-lock.json state version 2.1.0", () => {
+// The names the 2.1.1 notes give for its fix, each as a code span.
+const RELEASE_2_1_1_NAMES = ["NativeComponentMissingError", "npm run build-addon"];
+
+describe("release 2.1.1", () => {
+  test("package.json and package-lock.json state version 2.1.1", () => {
     const manifest = readJson<Manifest>(path.join(packageRoot, "package.json"));
-    expect(manifest.version).toBe("2.1.0");
+    expect(manifest.version).toBe("2.1.1");
     const lock = readJson<{ version: string; packages: Record<string, { version: string }> }>(
       path.join(packageRoot, "package-lock.json"));
-    expect(lock.version).toBe("2.1.0");
-    expect(lock.packages[""].version).toBe("2.1.0");
+    expect(lock.version).toBe("2.1.1");
+    expect(lock.packages[""].version).toBe("2.1.1");
   });
 
+  test("CHANGELOG.md has a dated 2.1.1 heading as its first release heading, above the 2.1.0 heading", () => {
+    const lines = changelogText().split("\n");
+    const newer = lines.findIndex((line) => /^## 2\.1\.1 — \d{4}-\d{2}-\d{2}$/.test(line));
+    const older = lines.findIndex((line) => /^## 2\.1\.0(\s|$)/.test(line));
+    expect(newer).toBeGreaterThanOrEqual(0);
+    expect(older).toBeGreaterThan(newer);
+    const firstRelease = lines.findIndex((line) => /^## /.test(line));
+    expect(firstRelease).toBe(newer);
+  });
+
+  test("the 2.1.1 section has exactly the three groups, in order", () => {
+    const headings = releaseSection("2.1.1")
+      .split("\n")
+      .filter((line) => /^###\s/.test(line))
+      .map((line) => line.replace(/^###\s+/, ""));
+    expect(headings).toEqual(HEADINGS);
+  });
+
+  test("the 2.1.1 section states the required library versions and names the fix's error and build step as code spans", () => {
+    const text = releaseSection("2.1.1");
+    expect(text).toContain("libecs-cpp " + REQUIRED_VERSIONS["ecs-cpp"]);
+    expect(text).toContain("libthe-seed " + REQUIRED_VERSIONS["the-seed"]);
+    expect(RELEASE_2_1_1_NAMES.filter((name) => !text.includes("`" + name + "`"))).toEqual([]);
+  });
+});
+
+describe("release 2.1.0", () => {
   test("CHANGELOG.md has a dated 2.1.0 heading above the 2.0.0 heading", () => {
     const lines = changelogText().split("\n");
     const newer = lines.findIndex((line) => /^## 2\.1\.0 — \d{4}-\d{2}-\d{2}$/.test(line));
     const older = lines.findIndex((line) => /^## 2\.0\.0(\s|$)/.test(line));
     expect(newer).toBeGreaterThanOrEqual(0);
     expect(older).toBeGreaterThan(newer);
-    const firstRelease = lines.findIndex((line) => /^## /.test(line));
-    expect(firstRelease).toBe(newer);
   });
 
   test("the 2.1.0 section has exactly the three groups, in order", () => {

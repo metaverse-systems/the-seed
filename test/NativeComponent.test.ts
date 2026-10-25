@@ -130,7 +130,7 @@ describe("NativeComponent", () => {
     });
   });
 
-  it("caches a failure and clears it with resetNativeComponentForTests", () => {
+  it("tries the load again on each call after a failure, and after resetNativeComponentForTests", () => {
     jest.isolateModules(() => {
       let requires = 0;
       jest.doMock(
@@ -145,13 +145,135 @@ describe("NativeComponent", () => {
       mod.resetNativeComponentForTests();
       const first = thrownBy(() => mod.loadNativeComponent());
       const second = thrownBy(() => mod.loadNativeComponent());
+      expect(second).toBeInstanceOf(mod.NativeComponentMissingError);
       expect(second.message).toBe(first.message);
-      expect(requires).toBe(1);
+      expect(requires).toBe(2);
       mod.resetNativeComponentForTests();
       const third = thrownBy(() => mod.loadNativeComponent());
       expect(third.message).toBe(first.message);
-      expect(requires).toBe(2);
+      expect(requires).toBe(3);
       mod.resetNativeComponentForTests();
+    });
+  });
+
+  describe("in one long-running process", () => {
+    // Runs the built module in a fresh Node process from a scratch copy of the package, so that the component
+    // file can be absent at first and appear later, as when "npm run build-addon" runs while an editor is open.
+    function scratchPackage(): string {
+      const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "native-retry-"));
+      fs.cpSync(path.join(root, "dist"), path.join(scratch, "dist"), { recursive: true });
+      fs.symlinkSync(path.join(root, "node_modules"), path.join(scratch, "node_modules"));
+      return scratch;
+    }
+
+    const NATIVE_RELATIVE = path.join("native", "build", "Release", "the_seed_native.node");
+
+    interface Attempt {
+      threw: boolean;
+      name?: string;
+      loadError?: string | null;
+      message?: string;
+      expected?: string;
+      keys?: string[];
+      same?: boolean;
+    }
+
+    // stages: the file to put in place before each attempt ("absent" removes it, "keep" leaves it as it is, since
+    // a loaded component file must not be rewritten in place); the script counts the requires of the component
+    // file and reports each attempt.
+    function run(scratch: string, stages: Array<{ put: "absent" | "keep" | "garbage" | "stub" | "real" }>, stubLoader: boolean): { attempts: Attempt[]; requires: number } {
+      const built = path.join(root, NATIVE_RELATIVE);
+      const script =
+        "const fs = require('fs'); const path = require('path'); const Module = require('module');" +
+        "const scratch = " + JSON.stringify(scratch) + ";" +
+        "const file = path.join(scratch, " + JSON.stringify(NATIVE_RELATIVE) + ");" +
+        "fs.mkdirSync(path.dirname(file), { recursive: true });" +
+        (stubLoader
+          ? "Module._extensions['.node'] = (module, filename) => { const text = fs.readFileSync(filename, 'utf8');" +
+            " if (!text.startsWith('stub')) { throw new Error(filename + ': invalid ELF header'); } module.exports = { stubOperation: () => 1 }; };"
+          : "") +
+        "let requires = 0; const load = Module._load;" +
+        "Module._load = function (request, ...rest) { if (path.resolve(request) === file) { requires++; } return load.call(this, request, ...rest); };" +
+        "const m = require(path.join(scratch, 'dist', 'NativeComponent.js'));" +
+        "const stages = " + JSON.stringify(stages) + "; const attempts = []; let previous = null;" +
+        "for (const stage of stages) {" +
+        "  if (stage.put === 'keep') { }" +
+        "  else if (stage.put === 'absent') { fs.rmSync(file, { force: true }); }" +
+        "  else if (stage.put === 'garbage') { fs.writeFileSync(file, 'garbage'); }" +
+        "  else if (stage.put === 'stub') { fs.writeFileSync(file, 'stub'); }" +
+        "  else { fs.copyFileSync(" + JSON.stringify(built) + ", file); }" +
+        "  try { const c = m.loadNativeComponent(); attempts.push({ threw: false, keys: Object.keys(c).sort(), same: previous === c }); previous = c; }" +
+        "  catch (e) { attempts.push({ threw: true, name: e.name, loadError: e.loadError, message: e.message, expected: new m.NativeComponentMissingError(e.loadError).message }); }" +
+        "}" +
+        "console.log(JSON.stringify({ attempts, requires }));";
+      const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } });
+      expect({ stderr: result.stderr, signal: result.signal }).toEqual({ stderr: "", signal: null });
+      expect(result.status).toBe(0);
+      return JSON.parse(result.stdout) as { attempts: Attempt[]; requires: number };
+    }
+
+    function expectMissing(attempt: Attempt, scratch: string, loadError: string | null): void {
+      expect(attempt.threw).toBe(true);
+      expect(attempt.name).toBe("NativeComponentMissingError");
+      expect(attempt.message).toBe(attempt.expected);
+      expect(attempt.message).toContain("The native component is not built");
+      expect(attempt.message).toContain("cd \"" + scratch + "\" && npm run build-addon");
+      if (loadError === null) {
+        expect(attempt.loadError).toBeNull();
+      } else {
+        expect(attempt.loadError).toContain(loadError);
+      }
+    }
+
+    it("loads the component once it appears after a failed load, and keeps it without requiring it again", () => {
+      const scratch = scratchPackage();
+      try {
+        const outcome = run(scratch, [{ put: "absent" }, { put: "absent" }, { put: "stub" }, { put: "stub" }, { put: "absent" }], true);
+        expect(outcome.attempts).toHaveLength(5);
+        expectMissing(outcome.attempts[0], scratch, null);
+        expectMissing(outcome.attempts[1], scratch, null);
+        expect(outcome.attempts[2]).toEqual({ threw: false, keys: ["stubOperation"], same: false });
+        expect(outcome.attempts[3]).toEqual({ threw: false, keys: ["stubOperation"], same: true });
+        // Kept once loaded, even when the file goes away afterwards
+        expect(outcome.attempts[4]).toEqual({ threw: false, keys: ["stubOperation"], same: true });
+        // Two failed attempts and one successful load; the later calls answer from the kept component
+        expect(outcome.requires).toBe(3);
+      } finally {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      }
+    });
+
+    it("loads the component once a file that failed to load is replaced by one that loads", () => {
+      const scratch = scratchPackage();
+      try {
+        const outcome = run(scratch, [{ put: "garbage" }, { put: "stub" }, { put: "stub" }], true);
+        expectMissing(outcome.attempts[0], scratch, "invalid ELF header");
+        expect(outcome.attempts[1]).toEqual({ threw: false, keys: ["stubOperation"], same: false });
+        expect(outcome.attempts[2]).toEqual({ threw: false, keys: ["stubOperation"], same: true });
+        expect(outcome.requires).toBe(2);
+      } finally {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      }
+    });
+
+    it("loads the real built component after it was absent and after a file that failed to load", () => {
+      const built = path.join(root, NATIVE_RELATIVE);
+      if (!optionalExternalCheck("native-component", fs.existsSync(built), "native component not built")) return;
+      const scratch = scratchPackage();
+      try {
+        const outcome = run(scratch, [{ put: "absent" }, { put: "garbage" }, { put: "real" }, { put: "keep" }], false);
+        expectMissing(outcome.attempts[0], scratch, null);
+        expect(outcome.attempts[1].threw).toBe(true);
+        expect(outcome.attempts[1].name).toBe("NativeComponentMissingError");
+        expect(outcome.attempts[1].loadError).toEqual(expect.any(String));
+        expect(outcome.attempts[1].message).toBe(outcome.attempts[1].expected);
+        expect(outcome.attempts[2].threw).toBe(false);
+        expect(outcome.attempts[2].keys).toContain("listDependencies");
+        expect(outcome.attempts[3]).toEqual({ threw: false, keys: outcome.attempts[2].keys, same: true });
+        expect(outcome.requires).toBe(3);
+      } finally {
+        fs.rmSync(scratch, { recursive: true, force: true });
+      }
     });
   });
 
